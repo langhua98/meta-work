@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.local
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 本地下载缓存 - opencode 拉到本地的临时目录
+downloads/
+download/
+.downloads/
+
+# 云盘临时文件
+*.tmp
+*.log
+
+# 小桔云盘缓存
+.xiaoju-cache/
+
+# Drive 同步标记
+.drive-sync/
