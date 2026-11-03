@@ -1,5 +1,6 @@
 # 小橘推送（iPhone App）：把小橘云盘文件夹里改过的代码提交、推送到 GitHub。源码在 meta-work 仓库 src/xiaoju-push/。
 # GitHub Actions 的 Mac 机器上 `xcodegen generate` 生成 Xcode 工程再编译（.github/workflows/xiaoju-push.yml）。
+# 桌面小组件 XiaojuPushWidget 嵌在 App 里，两边通过 App Group 共享 Shared/WidgetSnapshot.swift 的数据。
 name: XiaojuPush
 options:
   bundleIdPrefix: com.langhua98.xiaoju
@@ -8,19 +9,23 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1"
+    MARKETING_VERSION: "0.2"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 targets:
   XiaojuPush:
     type: application
     platform: iOS
-    sources: [App]
+    sources: [App, Shared]
+    dependencies:
+      - target: XiaojuPushWidget
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.push
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: App/XiaojuPush.entitlements
     info:
       path: App/Info.plist
       properties:
@@ -30,3 +35,23 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes: [fetch]
+        BGTaskSchedulerPermittedIdentifiers: [com.langhua98.xiaoju.push.refresh]
+  # 桌面 / 锁屏小组件：待推文件数
+  XiaojuPushWidget:
+    type: app-extension
+    platform: iOS
+    sources: [Widget, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.push.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_ENTITLEMENTS: Widget/XiaojuPushWidget.entitlements
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: 小橘推送
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

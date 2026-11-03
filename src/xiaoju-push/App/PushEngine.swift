@@ -247,6 +247,24 @@ final class PushEngine {
         return Data(base64Encoded: s) ?? Data()
     }
 
+    /// 大概有几个文件待推：只比云盘 sha256 和上次推送的记录，不下载，给首页、通知、小组件用。
+    func pendingCount(_ m: Mapping, pushed: [String: Pushed]) async throws -> Int {
+        let repo = m.repo.trimmingCharacters(in: .whitespaces)
+        guard repo.contains("/") else { return 0 }
+        var branch = m.branch.trimmingCharacters(in: .whitespaces)
+        if branch.isEmpty {
+            branch = (try dict(try await github("GET", "/repos/\(repo)"))["default_branch"] as? String) ?? "main"
+        }
+        let prefix = Self.clean(m.repoPath).joined(separator: "/")
+        let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
+        return files.filter { rel, item in
+            if (item.size ?? 0) > Self.maxFileBytes { return false }
+            let rp = prefix.isEmpty ? rel : prefix + "/" + rel
+            guard let s = item.sha256, let old = pushed["\(repo)@\(branch):\(rp)"] else { return true }
+            return old.sha256 != s
+        }.count
+    }
+
     /// 找出要推的文件，不提交。
     func plan(_ m: Mapping, pushed: [String: Pushed], progress: @escaping (String) -> Void) async throws -> Plan {
         let repo = m.repo.trimmingCharacters(in: .whitespaces)
