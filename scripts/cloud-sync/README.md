@@ -24,6 +24,8 @@ GitHub Actions 每 10 分钟跑一次 `sync.py`：看 `config.json` 里列的云
 }
 ```
 
+可以加 `"exclude": ["cloude审阅"]`：这些子文件夹（相对 `cloud`）不推。
+
 `cloud` 是云盘文件夹（相对令牌的根文件夹），`path` 是仓库里的目录（空 = 仓库根目录），`branch` 不写就用默认分支。
 
 想马上跑一次：Actions → 「云盘同步到 GitHub」→ Run workflow（可以勾 dry_run 只看不推）。

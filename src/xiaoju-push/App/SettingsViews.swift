@@ -73,6 +73,13 @@ struct MappingEditView: View {
                     TextField("仓库里的目录（空 = 根目录）", text: $mapping.repoPath)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                 } header: { Text("推到 GitHub") }
+                Section {
+                    TextField("比如 cloude审阅", text: $mapping.excludes, axis: .vertical)
+                        .lineLimit(1...6)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                } header: { Text("不推的文件夹") } footer: {
+                    Text("每行一个，写云盘文件夹里面的路径。这些文件夹里的文件检查改动时直接跳过，不会提交。")
+                }
             }
             .navigationTitle(mapping.cloudPath.isEmpty ? "新任务" : mapping.title)
             .navigationBarTitleDisplayMode(.inline)

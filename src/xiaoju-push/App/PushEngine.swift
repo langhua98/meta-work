@@ -189,13 +189,14 @@ final class PushEngine {
     }
 
     /// 文件夹里所有文件（含子文件夹），返回（相对路径, 文件）。
-    func walk(_ root: String) async throws -> [(String, CloudItem)] {
+    func walk(_ root: String, excluding: [String] = []) async throws -> [(String, CloudItem)] {
         var out: [(String, CloudItem)] = []
         var stack: [(String, String)] = [("", "/" + Self.clean(root).joined(separator: "/"))]
         while let top = stack.popLast() {
             let (rel, path) = top
             for c in try await listFolder(path) where !Self.skipNames.contains(c.name) {
                 let r = rel.isEmpty ? c.name : rel + "/" + c.name
+                if excluding.contains(where: { r == $0 || r.hasPrefix($0 + "/") }) { continue }
                 if c.isFolder {
                     stack.append((r, (path == "/" ? "" : path) + "/" + c.name))
                 } else {
@@ -270,7 +271,7 @@ final class PushEngine {
         }
 
         progress("读取云盘 \(m.cloudPath)…")
-        let files = try await walk(m.cloudPath)
+        let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
         let prefix = Self.clean(m.repoPath).joined(separator: "/")
         var changes: [Change] = []
         var skipped: [String] = []
