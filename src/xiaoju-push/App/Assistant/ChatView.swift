@@ -1,19 +1,23 @@
 import SwiftUI
 
-// 对话框：所有功能都在这里。上面是对话（工具卡片、确认卡片、文件列表），下面是快捷按钮和输入框。
+// 对话框：所有功能都在这里。上面是对话（工具卡片、确认卡片、文件列表），下面是快捷按钮和输入栏。
+// 样子照 Claude App：深暖灰底，自己的话在右边灰色气泡里，回答直接是正文，底部胶囊输入栏。
 
 struct ChatView: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var model = ChatModel.shared
+    @StateObject private var speech = SpeechInput()
     @State private var input = ""
+    @State private var showCopy = false
+    @State private var showWorkspace = false
     @FocusState private var focused: Bool
 
-    private var mapping: Mapping? { model.mapping }
+    private var mapping: Mapping? { model.currentTask }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     if model.items.isEmpty { welcome }
                     ForEach(model.items) { it in
                         row(it).id(it.id)
@@ -21,7 +25,7 @@ struct ChatView: View {
                     }
                     Color.clear.frame(height: 4).id("bottom")
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 18)
                 .padding(.top, 10)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -31,31 +35,63 @@ struct ChatView: View {
         }
         .background(Theme.bg)
         .safeAreaInset(edge: .bottom) { bottomBar }
-        .navigationTitle("编码助手")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) { taskSwitcher }
             if let m = mapping {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink { PushView(mapping: m) } label: { Image(systemName: "list.bullet.rectangle") }
-                        .accessibilityLabel("原来的推送页面")
+                    if m.workspace {
+                        Button { Haptics.tap(); showWorkspace = true } label: { Image(systemName: "folder") }
+                            .accessibilityLabel("工作区")
+                    } else {
+                        NavigationLink { PushView(mapping: m) } label: { Image(systemName: "list.bullet.rectangle") }
+                            .accessibilityLabel("推送页面")
+                    }
                 }
             }
         }
         .navigationDestination(item: $model.pickMapping) { m in PushView(mapping: m) }
+        .sheet(isPresented: $showCopy) {
+            if let m = mapping { CopyOutView(mapping: m) }
+        }
+        .sheet(isPresented: $showWorkspace) {
+            if let m = mapping { WorkspaceView(mapping: m) }
+        }
         .onAppear { model.start() }
         .onDisappear { model.leave() }
+        .onChange(of: speech.text) { if speech.recording { input = speech.text } }
+    }
+
+    /// 标题：编码助手 + 当前任务，点开换任务
+    private var taskSwitcher: some View {
+        Menu {
+            ForEach(store.mappings) { m in
+                Button {
+                    Haptics.select()
+                    model.focus(m)
+                } label: {
+                    if m.id == mapping?.id { Label(m.title, systemImage: "checkmark") } else { Text(m.title) }
+                }
+            }
+        } label: {
+            VStack(spacing: 1) {
+                Text("编码助手").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text)
+                HStack(spacing: 3) {
+                    Text(mapping?.title ?? "选个任务").font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.muted)
+                }
+            }
+        }
     }
 
     private var welcome: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("说一句话就行").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text)
-            Text("比如「推送 \(TaskRef.list(store.mappings).first?.name ?? "meta-work")」「这次改了什么」「找一下 PushEngine」「帮我看看这次改动有没有 bug」「记住提交说明用中文」。会改东西的都会先问你。")
-                .font(.system(size: 14)).foregroundStyle(Theme.muted)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("说一句话，或者粘贴代码").font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.text)
+            Text("比如「推送」「这次改了什么」「找一下 PushEngine」「帮我看看有没有 bug」。从 DeepSeek 等 AI 复制来的代码直接粘贴进来，会自动整理成文件。点 + 可以把文件复制给 AI。会改东西的都会先问你。")
+                .font(.system(size: 15)).foregroundStyle(Theme.muted).lineSpacing(3)
         }
-        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .padding(.top, 8)
     }
 
     // MARK: 每一条
@@ -63,6 +99,8 @@ struct ChatView: View {
     @ViewBuilder private func row(_ it: ChatItem) -> some View {
         switch it.kind {
         case .user(let s): UserBubble(text: s)
+        case .pasted(let s): PastedBubble(text: s)
+        case .paste(let p): PasteCard(draft: p, itemID: it.id, model: model)
         case .understood(let s, let src): UnderstoodChip(text: s, source: src)
         case .thinking(let s): ThinkingRow(text: s)
         case .tool(let t): ToolCardView(card: t)
@@ -77,7 +115,7 @@ struct ChatView: View {
             Link(destination: u) {
                 Label(s, systemImage: "arrow.up.right.square").font(.system(size: 14, weight: .semibold))
             }
-            .foregroundStyle(Theme.blueText)
+            .foregroundStyle(Theme.orangeText)
         }
     }
 
@@ -89,58 +127,115 @@ struct ChatView: View {
             : [("所有任务", "所有任务"), ("找文件", "找一下"), ("记住…", "记住")]
     }
 
+    private var hasText: Bool { !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     private var bottomBar: some View {
-        VStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(chips, id: \.0) { c in
-                        Button {
-                            if c.1 == "找一下" || c.1 == "记住" {
-                                input = c.1 + " "
-                                focused = true
-                            } else {
-                                model.send(c.1)
+        VStack(spacing: 10) {
+            if !focused && !model.busy {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(chips, id: \.0) { c in
+                            Button {
+                                if c.1 == "找一下" || c.1 == "记住" {
+                                    input = c.1 + " "
+                                    focused = true
+                                } else {
+                                    model.send(c.1)
+                                }
+                            } label: {
+                                Text(c.0).font(.system(size: 13))
+                                    .padding(.horizontal, 12).frame(height: 32)
+                                    .foregroundStyle(Theme.muted)
+                                    .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
                             }
-                        } label: {
-                            Text(c.0).font(.system(size: 13, weight: .medium))
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .foregroundStyle(Theme.text)
-                                .background(Theme.raised, in: Capsule())
-                                .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                            .buttonStyle(PressStyle())
                         }
-                        .buttonStyle(PressStyle())
-                        .disabled(model.busy)
                     }
+                    .padding(.horizontal, 16)
                 }
-                .padding(.horizontal, 14)
+                .transition(.opacity)
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("说点什么…", text: $input, axis: .vertical)
-                    .lineLimit(1...4)
-                    .focused($focused)
-                    .submitLabel(.send)
-                    .onSubmit(sendInput)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.border, lineWidth: 1))
-                Button {
-                    if model.busy { Haptics.medium(); model.stop() } else { sendInput() }
-                } label: {
-                    Image(systemName: model.busy ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(model.busy ? Theme.text : Color.black)
-                        .frame(width: 38, height: 38)
-                        .background(model.busy ? Theme.raised : Theme.orange, in: Circle())
-                        .overlay(Circle().stroke(model.busy ? Theme.border : .clear, lineWidth: 1))
-                }
-                .buttonStyle(PressStyle(scale: 0.9))
-                .disabled(!model.busy && input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel(model.busy ? "停止" : "发送")
-            }
-            .padding(.horizontal, 14)
+            inputBar.padding(.horizontal, 12)
         }
-        .padding(.top, 8).padding(.bottom, 6)
-        .background(.bar)
+        .padding(.top, 6).padding(.bottom, 8)
+        .background(Theme.bg)
+        .animation(.easeOut(duration: 0.2), value: focused)
+    }
+
+    /// 胶囊输入栏：+ 菜单 · 输入框 · 麦克风（按住说话）· 发送 / 停止
+    private var inputBar: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            Menu {
+                Button { pasteClipboard() } label: { Label("粘贴剪贴板里的代码", systemImage: "doc.on.clipboard") }
+                Button { showCopy = true } label: { Label("复制文件给 AI…", systemImage: "doc.on.doc") }
+                    .disabled(mapping == nil)
+                if mapping?.workspace == true {
+                    Button { showWorkspace = true } label: { Label("工作区", systemImage: "folder") }
+                }
+            } label: {
+                circle(icon: "plus", fill: Theme.raised, fg: Theme.text)
+            }
+            .accessibilityLabel("更多")
+
+            TextField(speech.recording ? "在听…" : "输入或长按说话", text: $input, axis: .vertical)
+                .font(.system(size: 17))
+                .lineLimit(1...6)
+                .focused($focused)
+                .foregroundStyle(Theme.text)
+                .padding(.vertical, 11)
+                .frame(minHeight: 44)
+
+            if !hasText || speech.recording {
+                circle(icon: speech.recording ? "waveform" : "mic", fill: speech.recording ? Theme.orange : Theme.raised,
+                       fg: speech.recording ? Theme.onAccent : Theme.text)
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { _ in if !speech.recording { Haptics.medium(); input = ""; speech.start() } }
+                        .onEnded { _ in
+                            speech.stop()
+                            Haptics.tap()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { sendInput() }
+                        })
+                    .accessibilityLabel("按住说话")
+            }
+
+            Button {
+                if model.busy { Haptics.medium(); model.stop() } else { sendInput() }
+            } label: {
+                if model.busy {
+                    circle(icon: "stop.fill", fill: Theme.text, fg: Theme.bg, size: 13)
+                } else {
+                    circle(icon: "arrow.up", fill: hasText ? Theme.orange : Theme.orangeDim,
+                           fg: hasText ? Theme.onAccent : Theme.muted, weight: .bold)
+                }
+            }
+            .buttonStyle(PressStyle())
+            .disabled(!model.busy && !hasText)
+            .accessibilityLabel(model.busy ? "停止" : "发送")
+        }
+        .padding(7)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 29, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 29, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .overlay(alignment: .top) {
+            if !speech.error.isEmpty {
+                Text(speech.error).font(.system(size: 12)).foregroundStyle(Theme.redText)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(Theme.card, in: Capsule())
+                    .offset(y: -30)
+            }
+        }
+    }
+
+    private func circle(icon: String, fill: Color, fg: Color, size: CGFloat = 17, weight: Font.Weight = .regular) -> some View {
+        Image(systemName: icon).font(.system(size: size, weight: weight))
+            .foregroundStyle(fg)
+            .frame(width: 44, height: 44)
+            .background(fill, in: Circle())
+    }
+
+    private func pasteClipboard() {
+        guard let s = UIPasteboard.general.string, !s.isEmpty else { return }
+        model.send(s)
     }
 
     private func sendInput() {
@@ -158,9 +253,129 @@ private struct UserBubble: View {
     var body: some View {
         HStack {
             Spacer(minLength: 50)
-            Text(text).font(.system(size: 15)).foregroundStyle(Theme.text)
-                .padding(.horizontal, 14).padding(.vertical, 9)
-                .background(Theme.blueSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Text(text).font(.system(size: 16)).foregroundStyle(Theme.text)
+                .lineSpacing(2)
+                .textSelection(.enabled)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+    }
+}
+
+/// 粘贴进来的一大段代码：只显示前几行
+private struct PastedBubble: View {
+    let text: String
+    private var lines: [Substring] { text.split(separator: "\n", omittingEmptySubsequences: false) }
+    private var blocks: Int { max(1, text.components(separatedBy: "```").count / 2) }
+    var body: some View {
+        HStack {
+            Spacer(minLength: 50)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("粘贴的内容 · \(lines.count) 行 · \(blocks) 段代码", systemImage: "doc.on.clipboard")
+                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                Text(lines.prefix(4).joined(separator: "\n") + (lines.count > 4 ? "\n… 还有 \(lines.count - 4) 行" : ""))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.text.opacity(0.8))
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(Theme.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .padding(12)
+            .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+    }
+}
+
+/// 粘贴的代码整理成的文件：每个文件一行（路径能改），下面「放进工作区」「放好并推送」
+private struct PasteCard: View {
+    let draft: PasteDraft
+    let itemID: UUID
+    @ObservedObject var model: ChatModel
+    @State private var editing: FileDraft?
+    @State private var newPath = ""
+
+    private var ready: Bool { draft.files.contains { !$0.path.isEmpty } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(draft.files.isEmpty ? "没有要放的文件。" : "认出 \(draft.files.count) 个文件，放进 \(draft.task.title)：")
+                .font(.system(size: 16)).foregroundStyle(Theme.text)
+            VStack(spacing: 0) {
+                ForEach(Array(draft.files.enumerated()), id: \.element.id) { i, f in
+                    Button {
+                        guard draft.status == nil else { return }
+                        newPath = f.path
+                        editing = f
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(f.path.isEmpty ? "?" : (f.isNew ? "新" : "改"))
+                                .font(.system(size: 11, weight: .semibold))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .foregroundStyle(f.path.isEmpty ? Theme.redText : (f.isNew ? Theme.greenText : Theme.yellow))
+                                .background(f.path.isEmpty ? Theme.redSoft : (f.isNew ? Theme.greenSoft : Theme.yellowSoft),
+                                            in: RoundedRectangle(cornerRadius: 6))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(f.path.isEmpty ? "点这里填路径" : (f.path as NSString).lastPathComponent)
+                                    .font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.text).lineLimit(1)
+                                Text(f.path.isEmpty ? f.how : ((f.path as NSString).deletingLastPathComponent + " · " + f.how))
+                                    .font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer(minLength: 4)
+                            if !f.path.isEmpty {
+                                Text("+\(f.added)").font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.green)
+                                if f.removed > 0 {
+                                    Text("−\(f.removed)").font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.red)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 11)
+                        .rowDivider(i < draft.files.count - 1)
+                    }
+                    .buttonStyle(PressStyle())
+                    .contextMenu {
+                        Button(role: .destructive) { model.pasteDrop(itemID, file: f.id) } label: { Label("不要这个", systemImage: "trash") }
+                    }
+                }
+            }
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Theme.border, lineWidth: 1))
+
+            if let s = draft.status {
+                Text(s).font(.system(size: 13, weight: .semibold)).foregroundStyle(s.hasPrefix("✓") ? Theme.green : Theme.muted)
+            } else {
+                HStack(spacing: 8) {
+                    Button { Haptics.medium(); model.pasteSave(itemID, andPush: false) } label: {
+                        Text(draft.task.workspace ? "放进工作区" : "放进云盘")
+                            .font(.system(size: 15, weight: .semibold)).frame(maxWidth: .infinity, minHeight: 44)
+                            .foregroundStyle(Theme.onAccent)
+                            .background(Theme.orange, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    Button { Haptics.medium(); model.pasteSave(itemID, andPush: true) } label: {
+                        Text("放好并推送")
+                            .font(.system(size: 15)).frame(maxWidth: .infinity, minHeight: 44)
+                            .foregroundStyle(Theme.text)
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
+                    }
+                }
+                .buttonStyle(PressStyle())
+                .disabled(!ready)
+                HStack {
+                    Text("点文件改路径，长按不要它。").font(.system(size: 12)).foregroundStyle(Theme.faint)
+                    Spacer()
+                    Button("算了") { model.pasteCancel(itemID) }.font(.system(size: 13)).foregroundStyle(Theme.muted)
+                }
+            }
+        }
+        .alert("放到哪", isPresented: Binding(get: { editing != nil }, set: { if !$0 { editing = nil } })) {
+            TextField("比如 App/Theme.swift", text: $newPath)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("好") {
+                if let f = editing { model.pasteEdit(itemID, file: f.id, path: newPath) }
+                editing = nil
+            }
+            Button("取消", role: .cancel) { editing = nil }
+        } message: {
+            Text("相对 \(draft.task.title) 的路径")
         }
     }
 }
@@ -170,13 +385,10 @@ private struct UnderstoodChip: View {
     let source: String
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkles").font(.system(size: 11, weight: .bold))
-            Text("听懂了：\(text)").font(.system(size: 12, weight: .semibold)).lineLimit(2)
-            Text("· \(source)").font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(1)
+            Image(systemName: "sparkle").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.orange)
+            Text(text).font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(2)
+            Text("· \(source)").font(.system(size: 12)).foregroundStyle(Theme.faint).lineLimit(1)
         }
-        .foregroundStyle(Theme.orangeText)
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Theme.orangeSoft, in: Capsule())
     }
 }
 
@@ -203,7 +415,7 @@ private struct ThinkingRow: View {
 
 private struct ToolCardView: View {
     let card: ToolCard
-    private var accent: Color { card.cloud ? Color(dark: 0xbc8cff, light: 0x8250df) : Theme.blueText }
+    private var accent: Color { card.cloud ? Theme.orangeText : Theme.muted }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -211,7 +423,7 @@ private struct ToolCardView: View {
                 Image(systemName: card.icon).font(.system(size: 13, weight: .semibold))
                     .frame(width: 28, height: 28)
                     .foregroundStyle(accent)
-                    .background(card.cloud ? Color(dark: 0x271f3a, light: 0xfbefff) : Theme.raised,
+                    .background(Theme.raised,
                                 in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(card.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
@@ -232,8 +444,8 @@ private struct ToolCardView: View {
             }
         }
         .padding(10)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.border, lineWidth: 1))
         .animation(.spring(response: 0.3), value: card)
     }
 
@@ -249,7 +461,8 @@ private struct ToolCardView: View {
 private struct AnswerText: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 15)).foregroundStyle(Theme.text)
+        Text(text).font(.system(size: 16)).foregroundStyle(Theme.text)
+            .lineSpacing(4)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
@@ -298,8 +511,8 @@ private struct ChangesCard: View {
                 }
             }
         }
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.border, lineWidth: 1))
     }
 }
 
@@ -332,8 +545,8 @@ private struct EntriesCard: View {
                 }
             }
         }
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.border, lineWidth: 1))
     }
 }
 
@@ -366,11 +579,8 @@ private struct ActionCardView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 2).fill(accent).frame(width: 3).padding(.vertical, 10)
-        }
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Theme.border, lineWidth: 1))
         .animation(.spring(response: 0.3), value: card.status)
     }
 
@@ -386,11 +596,11 @@ private struct ActionCardView: View {
     private func button(_ b: CardButton) -> some View {
         Button { Haptics.tap(); b.run() } label: {
             Text(b.label).font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                .frame(maxWidth: .infinity, minHeight: 36)
+                .frame(maxWidth: .infinity, minHeight: 44)
                 .padding(.horizontal, 8)
                 .foregroundStyle(fg(b.style))
-                .background(bg(b.style), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .background(bg(b.style), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(b.style == .plain ? Theme.border : .clear, lineWidth: 1))
         }
         .buttonStyle(PressStyle())
@@ -398,17 +608,14 @@ private struct ActionCardView: View {
 
     private func bg(_ s: CardButton.Style) -> Color {
         switch s {
-        case .push: return Theme.greenFill
-        case .primary: return Theme.orange
-        case .cloud: return Color(dark: 0x8957e5, light: 0x8250df)
+        case .push, .primary, .cloud: return Theme.orange
         case .plain: return Theme.raised
         }
     }
 
     private func fg(_ s: CardButton.Style) -> Color {
         switch s {
-        case .push, .cloud: return .white
-        case .primary: return .black
+        case .push, .primary, .cloud: return Theme.onAccent
         case .plain: return Theme.text
         }
     }

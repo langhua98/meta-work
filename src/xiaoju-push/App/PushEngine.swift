@@ -67,6 +67,17 @@ final class PushEngine {
     static let maxFileBytes: Int64 = 50 * 1024 * 1024
     static let skipNames: Set<String> = [".git", "node_modules", ".DS_Store"]
 
+    /// 这个相对路径在不在排除列表里：写了路径的（docs/old）按路径前缀比；
+    /// 只写了名字的（7day）哪一层叫这个名字都算，这样「子目录下的 7day」也能跳过
+    static func isExcluded(_ rel: String, by list: [String]) -> Bool {
+        guard !list.isEmpty else { return false }
+        let segs = clean(rel)
+        return list.contains { p in
+            if rel == p || rel.hasPrefix(p + "/") { return true }
+            return !p.contains("/") && segs.contains(p)
+        }
+    }
+
     init(cloudBase: String, cloudToken: String, githubToken: String) {
         var b = cloudBase.trimmingCharacters(in: .whitespacesAndNewlines)
         while b.hasSuffix("/") { b.removeLast() }
@@ -144,6 +155,28 @@ final class PushEngine {
         }
     }
 
+    /// 下载仓库 ZIP（和 GitHub 页面 Code → Download ZIP 一样），存到 to 这个文件。ref 空 = 默认分支
+    func downloadZip(repo: String, ref: String, to dest: URL) async throws {
+        let r = ref.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/zipball" + (r.isEmpty ? "" : "/" + Self.enc(r))) else {
+            throw PushError("仓库名不对：\(repo)")
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(githubToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 600
+        let (tmp, resp) = try await session.download(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw PushError(code == 404 ? "GitHub 上找不到 \(repo)\(r.isEmpty ? "" : " 的 " + r)（或令牌没权限）" : "下载 ZIP 失败（\(code)）")
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.removeItem(at: dest)
+        try fm.moveItem(at: tmp, to: dest)
+    }
+
     private func dict(_ v: Any?) throws -> [String: Any] {
         guard let d = v as? [String: Any] else { throw PushError("GitHub 返回的内容看不懂") }
         return d
@@ -196,7 +229,7 @@ final class PushEngine {
             let (rel, path) = top
             for c in try await listFolder(path) where !Self.skipNames.contains(c.name) {
                 let r = rel.isEmpty ? c.name : rel + "/" + c.name
-                if excluding.contains(where: { r == $0 || r.hasPrefix($0 + "/") }) { continue }
+                if Self.isExcluded(r, by: excluding) { continue }
                 if c.isFolder {
                     stack.append((r, (path == "/" ? "" : path) + "/" + c.name))
                 } else {
@@ -256,6 +289,15 @@ final class PushEngine {
             branch = (try dict(try await github("GET", "/repos/\(repo)"))["default_branch"] as? String) ?? "main"
         }
         let prefix = Self.clean(m.repoPath).joined(separator: "/")
+        if m.workspace {
+            // 工作区：本地算 blob，和上次推送 / 拉取时记下的比
+            let ws = Workspace(mapping: m)
+            return ws.files().filter { rel in
+                let rp = prefix.isEmpty ? rel : prefix + "/" + rel
+                guard let d = ws.read(rel), let old = pushed["\(repo)@\(branch):\(rp)"] else { return true }
+                return Self.gitBlobSHA(d) != old.blob
+            }.count
+        }
         let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
         return files.filter { rel, item in
             if (item.size ?? 0) > Self.maxFileBytes { return false }
@@ -288,14 +330,31 @@ final class PushEngine {
             }
         }
 
-        progress("读取云盘 \(m.cloudPath)…")
-        let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
+        // 文件来源：云盘文件夹，或者手机里的工作区
+        struct Source { let rel: String; let size: Int64; let sha256: String?; let load: () async throws -> Data }
+        var files: [Source] = []
+        if m.workspace {
+            progress("读取工作区…")
+            let ws = Workspace(mapping: m)
+            files = ws.files().map { rel in
+                Source(rel: rel, size: ws.size(rel), sha256: nil, load: {
+                    guard let d = ws.read(rel) else { throw PushError("读不了工作区里的 \(rel)") }
+                    return d
+                })
+            }
+        } else {
+            progress("读取云盘 \(m.cloudPath)…")
+            files = try await walk(m.cloudPath, excluding: m.excludedPaths).map { rel, item in
+                Source(rel: rel, size: item.size ?? 0, sha256: item.sha256, load: { try await self.download(item) })
+            }
+        }
         let prefix = Self.clean(m.repoPath).joined(separator: "/")
         var changes: [Change] = []
         var skipped: [String] = []
         var confirmed: [String: Pushed] = [:]
         var unchanged = 0
-        for (i, (rel, item)) in files.enumerated() {
+        for (i, item) in files.enumerated() {
+            let rel = item.rel
             let rp = prefix.isEmpty ? rel : prefix + "/" + rel
             let key = "\(repo)@\(branch):\(rp)"
             let cur = inRepo[rp]
@@ -303,13 +362,13 @@ final class PushEngine {
                 unchanged += 1
                 continue
             }
-            if (item.size ?? 0) > Self.maxFileBytes {
+            if item.size > Self.maxFileBytes {
                 skipped.append(rp + "（超过 50MB）")
                 continue
             }
             if Task.isCancelled { throw PushError("已取消") }
             progress("比较 \(i + 1)/\(files.count)：\(rel)")
-            let data = try await download(item)
+            let data = try await item.load()
             let blob = Self.gitBlobSHA(data)
             if blob == cur?.sha {
                 unchanged += 1
@@ -324,6 +383,63 @@ final class PushEngine {
         }
         return Plan(repo: repo, branch: branch, head: head, changes: changes, unchanged: unchanged,
                     skipped: skipped, confirmed: confirmed)
+    }
+
+    /// 从 GitHub 拉到工作区：仓库里（仓库目录下）的文件写进手机。
+    /// 本地改过还没推的文件不覆盖，返回（拉下来的记录, 拉了几个, 没覆盖的文件）。
+    func pull(_ m: Mapping, pushed: [String: Pushed], progress: @escaping (String) -> Void) async throws
+        -> (records: [String: Pushed], written: Int, kept: [String]) {
+        let repo = m.repo.trimmingCharacters(in: .whitespaces)
+        guard repo.contains("/") else { throw PushError("仓库要写成 owner/name") }
+        var branch = m.branch.trimmingCharacters(in: .whitespaces)
+        if branch.isEmpty {
+            branch = (try dict(try await github("GET", "/repos/\(repo)"))["default_branch"] as? String) ?? "main"
+        }
+        progress("读取 \(repo) 的文件列表…")
+        guard let ref = try await github("GET", "/repos/\(repo)/git/ref/heads/\(Self.enc(branch))", allow404: true) else {
+            throw PushError("\(repo) 没有分支 \(branch)")
+        }
+        let head = (try dict(try dict(ref)["object"])["sha"] as? String) ?? ""
+        let commit = try dict(try await github("GET", "/repos/\(repo)/git/commits/\(head)"))
+        let baseTree = (try dict(commit["tree"])["sha"] as? String) ?? ""
+        let tree = try dict(try await github("GET", "/repos/\(repo)/git/trees/\(baseTree)?recursive=1"))
+        let prefix = Self.clean(m.repoPath).joined(separator: "/")
+        let ws = Workspace(mapping: m)
+        try ws.ensure()
+        var todo: [(rel: String, rp: String, sha: String)] = []
+        for e in tree["tree"] as? [[String: Any]] ?? [] where e["type"] as? String == "blob" {
+            guard let rp = e["path"] as? String, let sha = e["sha"] as? String else { continue }
+            if (e["size"] as? Int ?? 0) > 5 * 1024 * 1024 { continue }
+            var rel = rp
+            if !prefix.isEmpty {
+                guard rp.hasPrefix(prefix + "/") else { continue }
+                rel = String(rp.dropFirst(prefix.count + 1))
+            }
+            if PushEngine.clean(rel).contains(where: { Self.skipNames.contains($0) }) { continue }
+            if Self.isExcluded(rel, by: m.excludedPaths) { continue }
+            todo.append((rel, rp, sha))
+        }
+        if todo.count > 3000 { throw PushError("仓库文件太多（\(todo.count) 个），填个「仓库里的目录」只拉一部分") }
+        var records: [String: Pushed] = [:]
+        var written = 0
+        var kept: [String] = []
+        for (i, t) in todo.enumerated() {
+            if Task.isCancelled { throw PushError("已取消") }
+            let key = "\(repo)@\(branch):\(t.rp)"
+            if let local = ws.read(t.rel) {
+                let lb = Self.gitBlobSHA(local)
+                if lb == t.sha { records[key] = Pushed(sha256: "", blob: t.sha); continue }
+                // 本地改过（和上次记下的不一样）就留着
+                if let old = pushed[key], old.blob != lb { kept.append(t.rel); continue }
+                if pushed[key] == nil { kept.append(t.rel); continue }
+            }
+            progress("拉取 \(i + 1)/\(todo.count)：\(t.rel)")
+            let data = try await repoBlob(repo, t.sha)
+            try ws.write(t.rel, data)
+            records[key] = Pushed(sha256: "", blob: t.sha)
+            written += 1
+        }
+        return (records, written, kept)
     }
 
     /// 上传改动并提交；返回提交的网址。分支在这期间被别人推过，就在新的 HEAD 上重做（不强推）。

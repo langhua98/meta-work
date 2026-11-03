@@ -10,7 +10,7 @@ struct XiaojuPushApp: App {
             HomeView()
                 .environmentObject(store)
                 .preferredColorScheme(store.colorScheme)
-                .tint(Theme.blue)
+                .tint(Theme.orange)
         }
         .backgroundTask(.appRefresh(BackgroundCheck.id)) { await BackgroundCheck.run() }
     }
@@ -20,6 +20,8 @@ enum Route: Hashable {
     case history(Mapping)
     /// 唯一的对话框（编码助手）；点任务也是进这里
     case assistant
+    /// 下载仓库 ZIP
+    case zip
 }
 
 // 首页：推送任务列表。点一个任务 → 看改了什么 → 提交并推送。
@@ -82,6 +84,23 @@ struct HomeView: View {
                          : "左滑编辑或删除，右滑看推送记录，下拉刷新改动数。云盘删掉的文件不会在 GitHub 上删除。")
                         .foregroundStyle(Theme.muted)
                 }
+                Section {
+                    Button { Haptics.tap(); path.append(.zip) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "shippingbox").foregroundStyle(Theme.orangeText).frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("下载仓库 ZIP").font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
+                                Text("和 GitHub 上 Code → Download ZIP 一样").font(.system(size: 13)).foregroundStyle(Theme.muted)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.faint)
+                        }
+                    }
+                    .buttonStyle(PressStyle())
+                    .listRowBackground(Theme.card)
+                } header: {
+                    Text("工具").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
+                }
                 if !store.mappings.isEmpty && store.ready {
                     Section {
                         Button {
@@ -105,6 +124,7 @@ struct HomeView: View {
                 switch r {
                 case .history(let m): HistoryView(mapping: m)
                 case .assistant: ChatView()
+                case .zip: RepoZipView()
                 }
             }
             .toolbar {
@@ -119,7 +139,7 @@ struct HomeView: View {
                     .accessibilityLabel("编码助手")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { Haptics.tap(); editing = Mapping() } label: {
+                    Button { Haptics.tap(); var m = Mapping(); m.workspace = true; editing = m } label: {
                         Image(systemName: "plus").font(.system(size: 15, weight: .bold))
                             .foregroundStyle(Color.black)
                             .frame(width: 30, height: 30)
@@ -221,7 +241,7 @@ struct TaskRow: View {
                     .font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
                 HStack(spacing: 6) {
                     Pill(text: mapping.branch.isEmpty ? "默认分支" : mapping.branch, mono: !mapping.branch.isEmpty)
-                    Text("云盘 \(mapping.cloudPath)").font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(1)
+                    Text(mapping.sourceLabel).font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(1)
                 }
             }
             Spacer(minLength: 4)

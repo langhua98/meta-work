@@ -124,6 +124,11 @@ final class CloudFiles {
         return exact.isEmpty ? Array(hits.prefix(5)) : exact
     }
 
+    func readData(_ path: String) async throws -> Data? {
+        guard let it = try await item(path), !it.isFolder else { return nil }
+        return try await request("GET", "/items/\(it.id)/content")
+    }
+
     func readText(_ path: String) async throws -> String? {
         guard let it = try await item(path), !it.isFolder else { return nil }
         let d = try await request("GET", "/items/\(it.id)/content")

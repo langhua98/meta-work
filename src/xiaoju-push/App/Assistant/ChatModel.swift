@@ -47,6 +47,10 @@ struct ChatItem: Identifiable {
         case link(String, URL)
         case attachment(Attachment)
         case work(WorkLog)
+        /// 粘贴进来的一大段代码（只显示前几行）
+        case pasted(String)
+        /// 粘贴的代码整理成的文件，等确认
+        case paste(PasteDraft)
     }
     let id = UUID()
     var kind: Kind
@@ -65,6 +69,7 @@ final class ChatModel: ObservableObject {
     /// 当前任务（没说哪个任务时用它）
     @Published var mapping: Mapping?
     private var job: Task<Void, Never>?
+    private var jobID = UUID()
     private var plans: [UUID: Plan] = [:]
     private var lastCommand: String?
     private var recent: [String] = []
@@ -121,13 +126,10 @@ final class ChatModel: ObservableObject {
         Task { await loadMemory() }
     }
 
-    /// 从首页点了某个任务：设成当前任务，在同一个对话里检查它
+    /// 从首页点了某个任务：只换当前任务，不自动检查（要检查点「检查改动」或直接说）
     func focus(_ m: Mapping) {
+        // 同一个任务也换成最新的（设置里改了「不推的文件夹」要马上生效）
         mapping = m
-        guard !busy else { return }
-        let name = TaskRef.list(store.mappings).first { $0.mapping.id == m.id }?.name ?? m.title
-        add(.user("检查 \(name) 有什么改动"))
-        run { await self.check(m) }
     }
 
     func stop() {
@@ -146,16 +148,155 @@ final class ChatModel: ObservableObject {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !busy else { return }
         Haptics.tap()
+        // 粘贴进来的代码（比如 DeepSeek 的回答）：整理成文件
+        if CodePaste.looksLikeCode(text) {
+            add(.pasted(text))
+            run { await self.organize(text) }
+            return
+        }
         add(.user(text))
         run { await self.handle(text) }
+    }
+
+    // MARK: 粘贴代码 → 文件
+
+    /// 当前任务；没选但只有一个任务就用它
+    var currentTask: Mapping? {
+        if let m = mapping, let fresh = store.mappings.first(where: { $0.id == m.id }) { return fresh }
+        return store.mappings.count == 1 ? store.mappings[0] : nil
+    }
+
+    /// 任务里所有文件的相对路径
+    func taskFiles(_ m: Mapping) async throws -> [String] {
+        if m.workspace { return Workspace(mapping: m).files() }
+        return try await store.engine().walk(m.cloudPath, excluding: m.excludedPaths).map(\.0)
+    }
+
+    /// 任务里某个文件的内容（云盘的要下载）
+    func readTaskFile(_ m: Mapping, _ rel: String) async -> Data? {
+        if m.workspace { return Workspace(mapping: m).read(rel) }
+        let path = "/" + (PushEngine.clean(m.cloudPath) + PushEngine.clean(rel)).joined(separator: "/")
+        return try? await files.readData(path)
+    }
+
+    private func organize(_ text: String) async {
+        guard let m = currentTask else {
+            say("先选个任务：点上面的标题切换，或者去首页点一个任务，再粘贴。")
+            return
+        }
+        let blocks = CodePaste.blocks(text)
+        guard !blocks.isEmpty else { say("没认出代码。"); return }
+        let t = add(.tool(ToolCard(icon: "doc.on.clipboard", title: "整理 \(blocks.count) 段代码", sub: m.sourceLabel)))
+        var list: [String] = []
+        do { list = try await taskFiles(m) } catch {
+            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            return
+        }
+        // 按内容找类名只在工作区里做（本地读，快）
+        let ws = m.workspace ? Workspace(mapping: m) : nil
+        let textFiles = list.filter(CodePaste.isText)
+        var drafts: [FileDraft] = []
+        for (i, b) in blocks.enumerated() {
+            let r = CodePaste.resolve(b, files: textFiles.isEmpty ? list : textFiles) { f in
+                ws?.read(f).flatMap { String(data: $0, encoding: .utf8) }
+            }
+            var d = FileDraft(path: r?.0 ?? "", code: b.code, isNew: r?.1 ?? true,
+                              how: r?.2 ?? "第 \(i + 1) 段没认出放哪，填个路径")
+            if let r, !r.1 {
+                let old = await readTaskFile(m, r.0)
+                let diff = FileDiff.make(old: old, new: Data(b.code.utf8))
+                d.added = diff.added
+                d.removed = diff.removed
+            } else {
+                d.added = b.code.split(separator: "\n", omittingEmptySubsequences: false).count
+            }
+            drafts.append(d)
+        }
+        tool(t) { $0.state = .ok; $0.sub = "认出 \(drafts.filter { !$0.path.isEmpty }.count) 个文件" }
+        add(.paste(PasteDraft(task: m, files: drafts)))
+    }
+
+    func pasteEdit(_ id: UUID, file: UUID, path: String) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .paste(var p) = items[i].kind,
+              let j = p.files.firstIndex(where: { $0.id == file }) else { return }
+        p.files[j].path = CodePaste.cleanPath(path)
+        items[i].kind = .paste(p)
+    }
+
+    func pasteDrop(_ id: UUID, file: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .paste(var p) = items[i].kind else { return }
+        p.files.removeAll { $0.id == file }
+        items[i].kind = .paste(p)
+    }
+
+    /// 写进工作区（或云盘）；andPush 就接着检查并出推送卡片
+    func pasteSave(_ id: UUID, andPush: Bool) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .paste(var p) = items[i].kind else { return }
+        let files = p.files.filter { !$0.path.isEmpty }
+        guard !files.isEmpty else { return }
+        p.status = "保存中…"
+        items[i].kind = .paste(p)
+        let m = p.task
+        run {
+            do {
+                if m.workspace {
+                    let ws = Workspace(mapping: m)
+                    try ws.ensure()
+                    for f in files { try ws.write(f.path, Data(f.code.utf8)) }
+                } else {
+                    guard self.files.canWrite else { throw PushError("写云盘要先在设置里填整理令牌") }
+                    for f in files {
+                        let path = "/" + (PushEngine.clean(m.cloudPath) + PushEngine.clean(f.path)).joined(separator: "/")
+                        try await self.files.upload(path, Data(f.code.utf8))
+                    }
+                }
+                self.setPasteStatus(id, "✓ 放好了 \(files.count) 个文件")
+                self.recent.append("把粘贴的代码整理成 \(files.map(\.path).joined(separator: "、"))")
+                Haptics.success()
+                if andPush { await self.preparePush(m) }
+            } catch {
+                self.setPasteStatus(id, "没放进去")
+                self.add(.error(error.localizedDescription))
+            }
+        }
+    }
+
+    func pasteCancel(_ id: UUID) { setPasteStatus(id, "没动") }
+
+    private func setPasteStatus(_ id: UUID, _ s: String) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .paste(var p) = items[i].kind else { return }
+        p.status = s
+        items[i].kind = .paste(p)
+    }
+
+    /// 从 GitHub 拉到工作区
+    func pull(_ m: Mapping) {
+        run {
+            let t = self.add(.tool(ToolCard(icon: "arrow.down.circle", title: "从 GitHub 拉到工作区", sub: m.repo + "…")))
+            do {
+                let r = try await self.store.engine().pull(m, pushed: self.store.pushed) { s in
+                    Task { @MainActor in self.tool(t) { $0.sub = s } }
+                }
+                self.store.record(r.records)
+                self.tool(t) { $0.state = .ok; $0.sub = "拉了 \(r.written) 个文件" }
+                self.say(r.kept.isEmpty ? "工作区和 GitHub 一样了。"
+                         : "工作区更新好了。这 \(r.kept.count) 个你改过还没推，没覆盖：\(r.kept.prefix(5).joined(separator: "、"))")
+                await self.store.refreshPending()
+            } catch {
+                self.tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            }
+        }
     }
 
     private func run(_ work: @escaping () async -> Void) {
         job?.cancel()
         busy = true
+        let id = UUID()
+        jobID = id
         job = Task {
             await work()
-            if !Task.isCancelled { busy = false }
+            // 只有最新的那件事做完才算空闲（被新的一句话顶掉的旧任务不管）
+            if jobID == id { busy = false }
         }
     }
 
@@ -169,7 +310,7 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
-        if let c = Interpreter.keyword(text, tasks: ts, current: mapping) {
+        if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
             if case .say(let q) = c { say(q); return }
             add(.understood(c.summary, source: "直接认出来"))
             await execute(c, original: text)
@@ -186,7 +327,7 @@ final class ChatModel: ObservableObject {
         await loadMemory()
         let thinking = add(.thinking(LocalModelIsLoaded.value ? "本地模型在理解你的话" : "加载本地模型…"))
         let started = Date()
-        let p = Interpreter.prompt(tasks: ts, current: mapping, memoryIndex: memoryIndex, last: lastCommand)
+        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: lastCommand)
         let grammar = Interpreter.grammar(tasks: ts)
         let path = ModelStore.shared.fileURL.path
         let suffix = p.suffix(text)
@@ -195,7 +336,7 @@ final class ChatModel: ObservableObject {
             try await LocalModel.shared.load(path: path)
             LocalModelIsLoaded.value = true
             update(thinking, .thinking("本地模型在理解你的话"))
-            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar)
+            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
         } catch {
             remove(thinking)
             add(.error(error.localizedDescription))
@@ -228,10 +369,14 @@ final class ChatModel: ObservableObject {
         switch cmd {
         case .check(let t):
             guard let m = taskOrComplain(t) else { return }
-            await check(m)
+            let (mm, extra) = withSpokenExcludes(m, original)
+            await check(mm)
+            offerKeepExcludes(m, extra)
         case .push(let t):
             guard let m = taskOrComplain(t) else { return }
-            await preparePush(m)
+            let (mm, extra) = withSpokenExcludes(m, original)
+            await preparePush(mm)
+            offerKeepExcludes(m, extra)
         case .status:
             await status()
         case .history(let t):
@@ -250,15 +395,47 @@ final class ChatModel: ObservableObject {
             if cloudReady { await askCloud(s, kind: "remember", auto: true) }
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
         case .cloud(let s):
-            if cloudReady { confirmCloud(s.isEmpty ? original : s) }
+            // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
+            let ask = original.isEmpty || original == cmd.summary ? s : original
+            if cloudReady && store.autoCloud { await askCloud(ask, kind: "ask", auto: true) }
+            else if cloudReady { confirmCloud(ask) }
             else { say("这件事要交给云端大模型，先在设置里填 OpenCode 密码。") }
-        case .say(let q):
+        case .say(let q), .answer(let q):
             say(q)
         }
     }
 
+    /// 话里说了「除了 7day 不用检查」「跳过 docs」：这次检查 / 推送先跳过这些文件夹（规则认，不靠小模型）
+    private func withSpokenExcludes(_ m: Mapping, _ text: String) -> (Mapping, [String]) {
+        let extra = ExcludeWords.parse(text, taskNames: tasks.map(\.name))
+            .map { m.relativeToCloud($0) }
+            .filter { !$0.isEmpty && !m.excludedPaths.contains($0) }
+        guard !extra.isEmpty else { return (m, []) }
+        var mm = m
+        for e in extra { mm.addExclude(e) }
+        return (mm, extra)
+    }
+
+    /// 这次跳过的，问一句要不要以后都跳过
+    private func offerKeepExcludes(_ m: Mapping, _ extra: [String]) {
+        guard !extra.isEmpty else { return }
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: "以后也都跳过？", lines: extra.map { "\(m.title) / \($0)" },
+                                   note: "这次已经跳过了。确认后以后检查、推送都不管这些文件夹", tone: .primary, buttons: [
+            CardButton(label: "以后都跳过", style: .primary) { [weak self] in
+                guard let self else { return }
+                var mm = self.store.mappings.first { $0.id == m.id } ?? m
+                for e in extra { mm.addExclude(e) }
+                self.store.upsert(mm)
+                self.resolveCard(cid, "已加入不推的文件夹")
+                Haptics.success()
+            },
+            CardButton(label: "只这一次", style: .plain) { [weak self] in self?.resolveCard(cid, "只跳过这一次") },
+        ])))
+    }
+
     private func taskOrComplain(_ name: String?) -> Mapping? {
-        if let m = TaskRef.find(name, in: tasks, current: mapping) { return m }
+        if let m = TaskRef.find(name, in: tasks, current: currentTask) { return m }
         let names = tasks.map(\.name).joined(separator: "、")
         say(name == nil ? "是哪个任务？有：\(names)" : "没找到任务「\(name!)」。有：\(names)")
         return nil
@@ -280,10 +457,10 @@ final class ChatModel: ObservableObject {
         do {
             let p = try await engine.plan(m, pushed: store.pushed) { s in
                 Task { @MainActor in
-                    if s.hasPrefix("读取云盘") {
+                    if s.hasPrefix("读取云盘") || s.hasPrefix("读取工作区") {
                         self.tool(git) { $0.state = .ok; $0.sub = m.repo + (m.branch.isEmpty ? "" : " · " + m.branch) }
                         if ids.a == nil {
-                            ids.a = self.add(.tool(ToolCard(icon: Self.iconFolder, title: "浏览云盘 \(m.cloudPath)", sub: "读取文件夹…")))
+                            ids.a = self.add(.tool(ToolCard(icon: Self.iconFolder, title: "浏览\(m.sourceLabel)", sub: "读取文件夹…")))
                         }
                     } else if s.hasPrefix("比较") {
                         if let c = ids.a { self.tool(c) { $0.state = .ok; $0.sub = m.excludedPaths.isEmpty ? "读完了" : "跳过 " + m.excludedPaths.joined(separator: "、") } }
@@ -321,7 +498,8 @@ final class ChatModel: ObservableObject {
             tool(git) { if $0.state == .busy { $0.state = .failed } }
             if let c = ids.a { tool(c) { if $0.state == .busy { $0.state = .failed } } }
             if let c = ids.b { tool(c) { $0.state = .failed; $0.progress = nil } }
-            if !Task.isCancelled { add(.error(PushPhaseView.friendly(error.localizedDescription).title + "：" + error.localizedDescription)) }
+            if Task.isCancelled { say("检查停了。") }
+            else { add(.error(PushPhaseView.friendly(error.localizedDescription).title + "：" + error.localizedDescription)) }
             return nil
         }
     }
@@ -690,13 +868,13 @@ final class ChatModel: ObservableObject {
                     else { throw PushError("找不准 \(p)") }
                     try await perform(c, entry: hits[0])
                 case .exclude(let task, let path):
-                    if let m = TaskRef.find(task, in: tasks, current: mapping) {
+                    if let m = TaskRef.find(task, in: tasks, current: currentTask) {
                         var mm = m
                         mm.addExclude(mm.relativeToCloud(path))
                         store.upsert(mm)
                     }
                 case .push(let task):
-                    if let m = TaskRef.find(task, in: tasks, current: mapping), let p = await check(m, quiet: true), !p.changes.isEmpty {
+                    if let m = TaskRef.find(task, in: tasks, current: currentTask), let p = await check(m, quiet: true), !p.changes.isEmpty {
                         await commit(m, p, message: commitMessage(p))
                     }
                 default:

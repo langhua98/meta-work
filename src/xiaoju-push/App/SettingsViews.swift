@@ -129,7 +129,7 @@ struct SettingsView: View {
     private var autoCheckSection: some View {
         Section {
             Toggle("后台检查云盘，有改动发通知", isOn: autoCheckBinding)
-                .tint(Theme.greenFill)
+                .tint(Theme.orange)
         } header: { Text("自动检查") } footer: {
             autoCheckFooter
         }
@@ -235,13 +235,15 @@ struct MappingEditView: View {
     var body: some View {
         NavigationStack {
             Form {
-                cloudSection
+                sourceSection
                 repoSection
+                if !mapping.workspace { cloudSection }
                 excludeSection
+                previewSection
             }
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
-            .navigationTitle(mapping.cloudPath.isEmpty ? "新任务" : mapping.title)
+            .navigationTitle(store.mappings.contains { $0.id == mapping.id } ? mapping.title : "新建任务")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -251,12 +253,42 @@ struct MappingEditView: View {
                     Button("保存") {
                         Haptics.success()
                         store.upsert(mapping)
+                        // 新的工作区任务：先把仓库拉到手机里
+                        if mapping.workspace && Workspace(mapping: mapping).files().isEmpty {
+                            ChatModel.shared.focus(mapping)
+                            ChatModel.shared.pull(mapping)
+                        }
                         dismiss()
                     }
-                    .disabled(mapping.cloudPath.isEmpty || !mapping.repo.contains("/"))
+                    .fontWeight(.semibold)
+                    .disabled((!mapping.workspace && mapping.cloudPath.isEmpty) || !mapping.repo.contains("/"))
                 }
             }
         }
+    }
+
+    private var sourceSection: some View {
+        Section {
+            Picker("代码从哪来", selection: $mapping.workspace) {
+                Text("手机工作区").tag(true)
+                Text("小橘云盘文件夹").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
+        } header: { Text("代码从哪来") } footer: {
+            Text(mapping.workspace
+                 ? "工作区：从 DeepSeek 等 AI 复制来的代码粘贴进对话框，整理到手机里再推。保存后会先从 GitHub 拉一份下来。"
+                 : "云盘：推小橘云盘里某个文件夹。")
+        }
+    }
+
+    private var previewSection: some View {
+        Section {
+            Text("\(mapping.sourceLabel) → \(mapping.target)\(mapping.excludedPaths.isEmpty ? "" : "，跳过 \(mapping.excludedPaths.count) 个文件夹")")
+                .font(.system(size: 15)).foregroundStyle(Theme.text)
+        } header: { Text("预览") }
+        .listRowBackground(Theme.card)
     }
 
     private var cloudSection: some View {
@@ -291,7 +323,7 @@ struct MappingEditView: View {
             NavigationLink("浏览选择…") {
                 ExcludePicker(root: mapping.cloudPath, mapping: $mapping)
             }
-            .disabled(!store.ready || mapping.cloudPath.isEmpty)
+            .disabled(!store.ready || mapping.cloudPath.isEmpty || mapping.workspace)
             TextField("手写，比如 cloude审阅", text: $mapping.excludes, axis: .vertical)
                 .lineLimit(1...6)
                 .font(Theme.mono)

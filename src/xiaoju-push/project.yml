@@ -39,6 +39,11 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
         NSPhotoLibraryAddUsageDescription: 把模型发来的图片和视频存到相册
+        NSMicrophoneUsageDescription: 按住麦克风说话，把你说的话变成文字
+        NSSpeechRecognitionUsageDescription: 把你说的话变成文字发给编码助手
+        # 工作区在「文件」App 里能看到
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes: [fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.langhua98.xiaoju.push.refresh]
   # 桌面 / 锁屏小组件：待推文件数
