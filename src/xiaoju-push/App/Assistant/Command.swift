@@ -16,6 +16,8 @@ enum Command: Equatable {
     case remember(String)
     case cloud(String)
     case say(String)
+    /// 本地模型自己回答（关于自己、App 能做什么、简单问题）
+    case answer(String)
 
     /// 给对话里「听懂了：…」小标签用
     var summary: String {
@@ -33,13 +35,14 @@ enum Command: Equatable {
         case .remember(let s): return "记住：\(s)"
         case .cloud: return "这件事要交给云端大模型"
         case .say: return "要再问你一句"
+        case .answer: return "直接回答"
         }
     }
 
     /// 最近一条指令的一行摘要（下一句话的上下文，比如「再移回来」）
     var memoryLine: String? {
         switch self {
-        case .say, .cloud, .status: return nil
+        case .say, .cloud, .status, .answer: return nil
         default: return summary
         }
     }
@@ -84,9 +87,6 @@ enum Interpreter {
         // 句子里提到的任务名
         let named = tasks.first { s.contains($0.name.lowercased()) }?.name
         // 没说哪个任务也照样认：只有一个任务就用它，多个会反问是哪个
-        if ["什么模型", "你是谁", "哪个模型", "你是什么"].contains(where: { s.contains($0) }) {
-            return .say("我是手机上的本地模型 Qwen3.5-2B（不联网），负责听懂你的话、管推送和云盘文件。写代码、改 bug、解释代码这些难事会交给云端的 OpenCode（DeepSeek）。")
-        }
         // 打招呼、道谢这种不用模型，也不交给云端
         if s.count <= 8 {
             if ["你好", "您好", "嗨", "hi", "hello", "在吗", "在不在"].contains(where: { s.hasPrefix($0) }) {
@@ -131,7 +131,7 @@ enum Interpreter {
         case .move(let p, _): return has(["移", "挪", "放到", "放进", "搬", "归档", "move"]) && mentions(p)
         case .trash(let p): return has(["删", "回收站", "扔", "清理", "不要了", "去掉"]) && mentions(p)
         case .remember: return has(["记住", "记得", "记一下", "以后", "下次", "别再", "不要再", "错了", "不对", "应该是"])
-        case .cloud, .say: return true
+        case .cloud, .say, .answer: return true
         }
     }
 
@@ -141,7 +141,8 @@ enum Interpreter {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let cur = current.flatMap { c in tasks.first { $0.mapping.id == c.id }?.name }
         var sys = """
-        你是编码助手「小橘推送」的指令翻译器（帮用户管代码：云盘里的代码文件夹推到 GitHub）。把用户的一句话翻译成一条 JSON 指令，只输出 JSON。
+        你是编码助手「小橘推送」里跑在 iPhone 上的本地模型 Qwen3.5-2B（不联网）。App 帮用户管代码：云盘里的代码文件夹推到 GitHub；写代码、改 bug、解释代码这类难事交给云端的 OpenCode（DeepSeek，能跑命令、读写仓库、画图发文件）。
+        你能用的工具就是下面这些指令。把用户的一句话变成一条 JSON，只输出 JSON。
         指令：
         {"do":"push","task":任务名} 推送任务到 GitHub
         {"do":"check","task":任务名} 检查任务有什么改动
@@ -156,7 +157,8 @@ enum Interpreter {
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
         {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
         {"do":"say","text":"问题"} 缺信息时反问，比如没说是哪个任务
-        只有用户明确要做这件事才用对应指令。提问、闲聊、要你解释或者写东西、看不懂的话，一律用 cloud，不要猜。
+        {"do":"answer","text":"回答"} 问你是谁、能做什么、有什么工具、怎么用这个 App、打招呼闲聊、简单常识：自己用中文直接回答，两三句
+        只有用户明确要做这件事才用对应指令。跟代码有关的问题、要写东西、你答不准的，用 cloud，不要猜。
         任务：
         \(taskLines.isEmpty ? "（还没有任务）" : taskLines)
         """
@@ -171,6 +173,7 @@ enum Interpreter {
         把 /代码/demo 移到归档 → {"do":"move","path":"/代码/demo","to":"/归档"}
         记住提交说明用中文 → {"do":"remember","text":"提交说明用中文"}
         帮我看看这次改动有没有 bug → {"do":"cloud","text":"帮我看看这次改动有没有 bug"}
+        你是什么模型 → {"do":"answer","text":"我是跑在你手机上的本地模型 Qwen3.5-2B，不联网。我负责听懂你的话、推送和管云盘文件，写代码这类难事交给云端的 OpenCode。"}
         这个项目是干什么的 → {"do":"cloud","text":"这个项目是干什么的"}
         为什么推送失败了 → {"do":"cloud","text":"为什么推送失败了"}
         """
@@ -186,7 +189,7 @@ enum Interpreter {
         let names = tasks.map { "\"\\\"" + gbnfEscape(jsonEscape($0.name)) + "\\\"\"" }
         let task = names.isEmpty ? "str" : names.joined(separator: " | ")
         return #"""
-        root ::= "{" ws "\"do\":" ws ( push | check | status | history | exclude | find | mkdir | rename | move | trash | remember | cloud | say ) ws "}"
+        root ::= "{" ws "\"do\":" ws ( push | check | status | history | exclude | find | mkdir | rename | move | trash | remember | cloud | say | answer ) ws "}"
         push ::= "\"push\"," ws "\"task\":" ws task
         check ::= "\"check\"," ws "\"task\":" ws task
         status ::= "\"status\""
@@ -200,6 +203,8 @@ enum Interpreter {
         remember ::= "\"remember\"," ws "\"text\":" ws str
         cloud ::= "\"cloud\"," ws "\"text\":" ws str
         say ::= "\"say\"," ws "\"text\":" ws str
+        answer ::= "\"answer\"," ws "\"text\":" ws long
+        long ::= "\"" char{1,300} "\""
         task ::= TASKS
         str ::= "\"" char{1,120} "\""
         char ::= [^"\\\x00-\x1F] | "\\" ["\\/nt]
@@ -238,6 +243,7 @@ enum Interpreter {
         case "remember": return s("text").map { .remember($0) }
         case "cloud": return s("text").map { .cloud($0) }
         case "say": return s("text").map { .say($0) }
+        case "answer": return s("text").map { .answer($0) }
         default: return nil
         }
     }

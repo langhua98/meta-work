@@ -65,6 +65,7 @@ final class ChatModel: ObservableObject {
     /// 当前任务（没说哪个任务时用它）
     @Published var mapping: Mapping?
     private var job: Task<Void, Never>?
+    private var jobID = UUID()
     private var plans: [UUID: Plan] = [:]
     private var lastCommand: String?
     private var recent: [String] = []
@@ -121,13 +122,10 @@ final class ChatModel: ObservableObject {
         Task { await loadMemory() }
     }
 
-    /// 从首页点了某个任务：设成当前任务，在同一个对话里检查它
+    /// 从首页点了某个任务：只换当前任务，不自动检查（要检查点「检查改动」或直接说）
     func focus(_ m: Mapping) {
+        guard mapping?.id != m.id else { return }
         mapping = m
-        guard !busy else { return }
-        let name = TaskRef.list(store.mappings).first { $0.mapping.id == m.id }?.name ?? m.title
-        add(.user("检查 \(name) 有什么改动"))
-        run { await self.check(m) }
     }
 
     func stop() {
@@ -153,9 +151,12 @@ final class ChatModel: ObservableObject {
     private func run(_ work: @escaping () async -> Void) {
         job?.cancel()
         busy = true
+        let id = UUID()
+        jobID = id
         job = Task {
             await work()
-            if !Task.isCancelled { busy = false }
+            // 只有最新的那件事做完才算空闲（被新的一句话顶掉的旧任务不管）
+            if jobID == id { busy = false }
         }
     }
 
@@ -195,7 +196,7 @@ final class ChatModel: ObservableObject {
             try await LocalModel.shared.load(path: path)
             LocalModelIsLoaded.value = true
             update(thinking, .thinking("本地模型在理解你的话"))
-            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar)
+            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
         } catch {
             remove(thinking)
             add(.error(error.localizedDescription))
@@ -250,9 +251,10 @@ final class ChatModel: ObservableObject {
             if cloudReady { await askCloud(s, kind: "remember", auto: true) }
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
         case .cloud(let s):
-            if cloudReady { confirmCloud(s.isEmpty ? original : s) }
+            if cloudReady && store.autoCloud { await askCloud(s.isEmpty ? original : s, kind: "ask", auto: true) }
+            else if cloudReady { confirmCloud(s.isEmpty ? original : s) }
             else { say("这件事要交给云端大模型，先在设置里填 OpenCode 密码。") }
-        case .say(let q):
+        case .say(let q), .answer(let q):
             say(q)
         }
     }
@@ -321,7 +323,8 @@ final class ChatModel: ObservableObject {
             tool(git) { if $0.state == .busy { $0.state = .failed } }
             if let c = ids.a { tool(c) { if $0.state == .busy { $0.state = .failed } } }
             if let c = ids.b { tool(c) { $0.state = .failed; $0.progress = nil } }
-            if !Task.isCancelled { add(.error(PushPhaseView.friendly(error.localizedDescription).title + "：" + error.localizedDescription)) }
+            if Task.isCancelled { say("检查停了。") }
+            else { add(.error(PushPhaseView.friendly(error.localizedDescription).title + "：" + error.localizedDescription)) }
             return nil
         }
     }

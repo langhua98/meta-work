@@ -137,7 +137,7 @@ actor LocalModel {
     private var idleTimer: Task<Void, Never>?
     private static var backendReady = false
 
-    static let contextSize: UInt32 = 2048
+    static let contextSize: UInt32 = 3072
 
     var isLoaded: Bool { model != nil }
 
