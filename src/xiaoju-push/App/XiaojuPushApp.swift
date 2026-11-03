@@ -19,6 +19,8 @@ struct XiaojuPushApp: App {
 enum Route: Hashable {
     case task(Mapping)
     case history(Mapping)
+    /// 不针对某个任务的对话（找文件、整理云盘）
+    case assistant
 }
 
 // 首页：推送任务列表。点一个任务 → 看改了什么 → 提交并推送。
@@ -102,14 +104,21 @@ struct HomeView: View {
             .navigationTitle("推送任务")
             .navigationDestination(for: Route.self) { r in
                 switch r {
-                case .task(let m): PushView(mapping: m)
+                case .task(let m): ChatView(mapping: m)
                 case .history(let m): HistoryView(mapping: m)
+                case .assistant: ChatView(mapping: nil)
                 }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { Haptics.tap(); showSettings = true } label: { Image(systemName: "gearshape") }
                         .accessibilityLabel("设置")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Haptics.tap(); path.append(.assistant) } label: {
+                        Image(systemName: "bubble.left.and.text.bubble.right")
+                    }
+                    .accessibilityLabel("编码助手")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Haptics.tap(); editing = Mapping() } label: {

@@ -133,6 +133,18 @@ final class Store: ObservableObject {
     /// 点通知后要打开的任务
     @Published var openTask: UUID?
     private(set) var pushed: [String: Pushed]
+    /// 能改云盘文件的「整理」令牌（改名、移动、放回收站、写记忆）
+    @Published var organizeToken: String { didSet { Keychain.write("organizeToken", organizeToken) } }
+    /// HF 上的 OpenCode
+    @Published var openCodeURL: String { didSet { UserDefaults.standard.set(openCodeURL, forKey: "openCodeURL") } }
+    @Published var openCodePassword: String { didSet { Keychain.write("openCodePassword", openCodePassword) } }
+    /// 本地模型搞不定时自动问云端
+    @Published var autoCloud: Bool { didSet { UserDefaults.standard.set(autoCloud, forKey: "autoCloud") } }
+    /// 接着用的 OpenCode 会话
+    var openCodeSession: String {
+        get { UserDefaults.standard.string(forKey: "openCodeSession") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "openCodeSession") }
+    }
 
     init() {
         let d = UserDefaults.standard
@@ -147,6 +159,10 @@ final class Store: ObservableObject {
         autoCheck = d.bool(forKey: "autoCheck")
         pending = Store.load("pending") ?? [:]
         lastChecked = d.object(forKey: "lastChecked") as? Date
+        organizeToken = Keychain.read("organizeToken")
+        openCodeURL = d.string(forKey: "openCodeURL") ?? OpenCodeClient.defaultURL
+        openCodePassword = Keychain.read("openCodePassword")
+        autoCloud = d.object(forKey: "autoCloud") as? Bool ?? true
         // 老用户已经填过令牌，不再显示引导
         onboarded = d.bool(forKey: "onboarded") || !Keychain.read("githubToken").isEmpty
     }

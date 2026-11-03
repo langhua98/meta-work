@@ -11,6 +11,18 @@
 
 不打开手机也想自动同步：用 xiaoju-cloud 仓库的 `tools/cloud-sync`（GitHub Actions 定时跑）。
 
+## 0.3：编码助手对话框 + 本地模型
+
+点任务进入对话框，所有事都在里面说一句话完成：检查改动、推送、看记录、不推某个文件夹、在云盘找文件、新建 / 改名 / 移动 / 放回收站。会改东西的都先出确认卡片。
+
+- 简单的话（「推送」「检查」）直接用关键词认，不用模型。
+- 其他的交给手机上的 Qwen3.5-2B（Q4_K_M，1.28 GB，设置 → 本地模型 下载）。llama.cpp 跑，输出用 GBNF 语法锁成一条 JSON 指令。只在说话时加载，空闲 2 分钟 / 切后台 / 内存告警就释放。
+- 本地搞不定的交给 HF Space 上的 OpenCode（设置 → 云端大模型，填 OPENCODE_SERVER_PASSWORD）。它只出方案，手机确认后执行。
+- 长记忆：说「记住…」或纠正它时，由 OpenCode 整理成云盘 `/小橘推送/记忆/` 里一个主题一个 .md 加 `索引.md`，确认后写入。本地模型看索引，OpenCode 看全部。设置 → 记忆 可以看和删。
+- 改云盘文件要在设置里填带「整理」权限的令牌。
+
+代码在 `App/Assistant/`。llama.xcframework（llama.cpp 最新正式版）由 workflow 编译时下载到 `Vendor/`，不进仓库。
+
 ## 编译和安装
 
 推送 `src/xiaoju-push/` 的改动后，`.github/workflows/xiaoju-push.yml` 在 GitHub 的 Mac 机器上编译，

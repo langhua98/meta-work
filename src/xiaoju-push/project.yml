@@ -9,7 +9,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.2"
+    MARKETING_VERSION: "0.3"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 targets:
@@ -19,6 +19,9 @@ targets:
     sources: [App, Shared]
     dependencies:
       - target: XiaojuPushWidget
+        embed: true
+      # 本地模型：llama.cpp 官方 XCFramework（最新正式版），编译时由 workflow 下载到 Vendor/（不进仓库）
+      - framework: Vendor/llama.xcframework
         embed: true
     settings:
       base:

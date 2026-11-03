@@ -27,6 +27,7 @@ struct SettingsView: View {
                 cloudSection
                 githubSection
                 testSection
+                AssistantSettingsSections()
                 appearanceSection
                 autoCheckSection
                 templateSection
