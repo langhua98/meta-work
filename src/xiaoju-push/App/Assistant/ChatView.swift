@@ -80,6 +80,7 @@ struct ChatView: View {
         case .entries(let title, let items): EntriesCard(title: title, items: items)
         case .card(let c): ActionCardView(card: c)
         case .error(let s): ErrorRow(text: s)
+        case .work(let w): WorkLogView(log: w)
         case .attachment(let a): AttachmentCard(item: a, saveToCloud: { try await model.saveToCloud($0) })
         case .link(let s, let u):
             Link(destination: u) {
