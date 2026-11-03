@@ -3,6 +3,22 @@ import Foundation
 // 交给 HF 上的 OpenCode（douyin-proxy Space，默认 DeepSeek）。
 // Space 对自己带 Authorization 的请求原样转给 OpenCode：Basic 认证，用户名 opencode，密码是 OPENCODE_SERVER_PASSWORD。
 
+/// OpenCode 干活时的一步（跑命令、读文件、搜索…）
+struct CloudStep: Equatable {
+    let id: String
+    var name: String
+    var input: String
+    var output: String
+    var done: Bool
+    var failed: Bool
+
+    /// 输出的最后几行（打过码）
+    var tail: String {
+        let lines = OpenCodeClient.mask(output).split(separator: "\n", omittingEmptySubsequences: false).suffix(6)
+        return String(lines.joined(separator: "\n").suffix(500))
+    }
+}
+
 struct CloudReply {
     var text: String
     var commands: [Command]
@@ -74,9 +90,9 @@ final class OpenCodeClient {
     }
 
     /// 发一句话，等 OpenCode 回完。sessionID 传进来就接着用那个会话。
-    /// OpenCode 2 的接口都在 /api 下：建会话 POST /api/session → {data:{id}}；
-    /// POST /api/session/{id}/generate {prompt} → {data:{text}}，同步返回一段文字，不动会话记录、不跑工具。
-    func ask(_ prompt: String, sessionID: String?, status: @escaping (String) -> Void) async throws -> (reply: String, session: String) {
+    /// OpenCode 2 的接口都在 /api 下：POST /api/session 建会话，POST /api/session/{id}/prompt 发消息，GET /api/session/{id}/message 读结果。
+    func ask(_ prompt: String, sessionID: String?, status: @escaping (String) -> Void,
+             steps: @escaping ([CloudStep]) -> Void = { _ in }) async throws -> (reply: String, session: String) {
         var sid = sessionID ?? ""
         if sid.isEmpty {
             status("连接 OpenCode…")
@@ -85,9 +101,120 @@ final class OpenCodeClient {
             if sid.isEmpty { throw PushError("OpenCode 没给会话号") }
         }
         status("OpenCode 在想…")
-        let r = try await send("POST", "/api/session/\(sid)/generate", body: ["prompt": prompt], status: status) as? [String: Any]
-        let text = ((r?["data"] as? [String: Any])?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = try await promptAndWait(prompt, sid: sid, status: status, steps: steps)
         return (text, sid)
+    }
+
+    /// POST /api/session/{id}/prompt {text}，然后每 2 秒读 /message：
+    /// 新出现的工具调用（命令、读文件…）实时交给 steps，跑完（idle 或回答 10 秒不变）返回最后的回答
+    private func promptAndWait(_ prompt: String, sid: String, status: @escaping (String) -> Void,
+                               steps: @escaping ([CloudStep]) -> Void) async throws -> String {
+        let old = try await messages(sid, limit: 200)
+        let before = Self.texts(old.filter { ($0["type"] as? String) == "assistant" }).count
+        let oldSteps = Set(Self.steps(old).map(\.id))
+        _ = try await send("POST", "/api/session/\(sid)/prompt", body: ["text": prompt], status: status)
+        let deadline = Date().addingTimeInterval(600)
+        var waited = 0
+        var last = "", same = 0
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            waited += 2
+            status("OpenCode 在干活…（\(waited) 秒）")
+            let items = try await messages(sid, limit: 60)
+            steps(Self.steps(items).filter { !oldSteps.contains($0.id) })
+            let idle = (items.last?["type"] as? String) == "idle"
+            // 只要最后一条 assistant 消息里的回答文字（工具调用单独显示成卡片）
+            let replies = Self.texts(items.filter { ($0["type"] as? String) == "assistant" })
+            let reply = replies.count > before ? (replies.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            same = (!reply.isEmpty && reply == last) ? same + 1 : 0
+            last = reply
+            if !reply.isEmpty && (idle || same >= 5) { return Self.mask(reply) }
+        }
+        throw PushError("OpenCode 10 分钟都没做完")
+    }
+
+    /// 会话最近的消息，按时间从旧到新
+    private func messages(_ sid: String, limit: Int) async throws -> [[String: Any]] {
+        let page = try await send("GET", "/api/session/\(sid)/message?order=desc&limit=\(limit)", body: nil, status: { _ in }) as? [String: Any]
+        return (page?["data"] as? [[String: Any]] ?? []).reversed()
+    }
+
+    /// 从消息里找出工具调用。兼容两种结构：
+    /// OpenCode 的 {type:"tool", tool, callID, state:{status,input,output,title}}，
+    /// 和分开的 {type:"tool-call", id/toolCallId, name, params} + {type:"tool-result", toolCallId, result}
+    static func steps(_ items: [[String: Any]]) -> [CloudStep] {
+        var order: [String] = []
+        var map: [String: CloudStep] = [:]
+        func str(_ v: Any?) -> String? {
+            if let s = v as? String { return s }
+            if let v, JSONSerialization.isValidJSONObject(v), let d = try? JSONSerialization.data(withJSONObject: v) {
+                return String(decoding: d, as: UTF8.self)
+            }
+            return nil
+        }
+        func walk(_ v: Any) {
+            if let d = v as? [String: Any] {
+                let t = (d["type"] as? String ?? "").lowercased()
+                if t.contains("tool") && !t.contains("approval") {
+                    let state = d["state"] as? [String: Any]
+                    let id = (d["callID"] ?? d["toolCallId"] ?? d["callId"] ?? d["id"]) as? String ?? UUID().uuidString
+                    var st = map[id] ?? CloudStep(id: id, name: "", input: "", output: "", done: false, failed: false)
+                    if let n = (d["tool"] ?? d["name"] ?? d["toolName"]) as? String { st.name = n }
+                    if let inp = (state?["input"] ?? d["input"] ?? d["params"] ?? d["args"]) { st.input = Self.inputLine(inp) }
+                    if let title = state?["title"] as? String, !title.isEmpty, st.input.isEmpty { st.input = title }
+                    if let out = str(state?["output"] ?? d["result"] ?? d["output"] ?? state?["error"]) { st.output = out }
+                    let status = (state?["status"] as? String ?? "").lowercased()
+                    if t.contains("result") || status == "completed" { st.done = true }
+                    if status == "error" || d["isFailure"] as? Bool == true || state?["error"] != nil { st.done = true; st.failed = true }
+                    if map[id] == nil { order.append(id) }
+                    map[id] = st
+                    return
+                }
+                for (_, x) in d { walk(x) }
+            } else if let a = v as? [Any] {
+                for x in a { walk(x) }
+            }
+        }
+        for it in items { walk(it) }
+        return order.compactMap { map[$0] }
+    }
+
+    /// 工具参数挑最能说明在干什么的一项：命令 > 文件路径 > 搜索词 > 第一项
+    static func inputLine(_ v: Any) -> String {
+        guard let d = v as? [String: Any] else { return mask(String(describing: v)) }
+        for k in ["command", "cmd", "filePath", "path", "pattern", "query", "url", "description"] {
+            if let s = d[k] as? String, !s.isEmpty { return mask(s) }
+        }
+        return mask(d.values.compactMap { $0 as? String }.first ?? "")
+    }
+
+    /// 令牌、密码打码
+    static func mask(_ s: String) -> String {
+        let patterns = [#"xa_[A-Za-z0-9_\-]{12,}"#, #"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"#, #"github_pat_[A-Za-z0-9_]{20,}"#,
+                        #"hf_[A-Za-z0-9]{20,}"#, #"sk-[A-Za-z0-9_\-]{16,}"#,
+                        #"(?i)((password|passwd|secret|token|api_?key)[A-Z_]*\s*[=:]\s*)\S+"#]
+        var out = s
+        for p in patterns {
+            guard let re = try? NSRegularExpression(pattern: p) else { continue }
+            let tmpl = p.hasPrefix("(?i)") ? "$1••••" : "••••"
+            out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: tmpl)
+        }
+        return out
+    }
+
+    /// 每条 assistant 消息的回答文字：只取 type 为 text 的部分，跳过工具调用 / 工具结果 / 思考
+    static func texts(_ items: [[String: Any]]) -> [String] {
+        func walk(_ v: Any, _ out: inout [String]) {
+            if let d = v as? [String: Any] {
+                let t = (d["type"] as? String ?? "").lowercased()
+                if t.contains("tool") || t.contains("reasoning") || t.contains("file") || t.contains("result") { return }
+                if t == "text", let s = d["text"] as? String { out.append(s); return }
+                for (k, x) in d where k != "input" && k != "output" && k != "state" && k != "metadata" { walk(x, &out) }
+            } else if let a = v as? [Any] {
+                for x in a { walk(x, &out) }
+            }
+        }
+        return items.map { var out: [String] = []; walk($0, &out); return out.joined() }.filter { !$0.isEmpty }
     }
 
     // MARK: 提示词和回复
@@ -105,7 +232,7 @@ final class OpenCodeClient {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
-        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，简短。
+        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
         推送任务：
         \(taskLines.isEmpty ? "（没有）" : taskLines)
 

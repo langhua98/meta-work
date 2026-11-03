@@ -10,6 +10,8 @@ struct ToolCard: Equatable {
     var state: State = .busy
     var progress: Double?
     var cloud = false
+    /// 命令输出之类，等宽字体显示几行
+    var detail: String?
 }
 
 struct CardButton: Identifiable {
@@ -561,12 +563,15 @@ final class ChatModel: ObservableObject {
             let prompt = OpenCodeClient.prompt(request: text, kind: kind, tasks: tasks, memoryIndex: memoryIndex,
                                                memoryFiles: mem, recent: Array(recent.suffix(10)), today: f.string(from: Date()))
             let sid = store.openCodeSession.isEmpty ? nil : store.openCodeSession
+            let cards = StepCards()
             var r: (reply: String, session: String)
             do {
-                r = try await client.ask(prompt, sessionID: sid) { s in Task { @MainActor in self.tool(t) { $0.sub = s } } }
+                r = try await client.ask(prompt, sessionID: sid, status: { s in Task { @MainActor in self.tool(t) { $0.sub = s } } },
+                                         steps: { st in Task { @MainActor in self.showSteps(st, cards: cards) } })
             } catch let e as PushError where sid != nil && e.message.contains("（404）") {
                 // 会话没了（Space 重启过），开个新的
-                r = try await client.ask(prompt, sessionID: nil) { s in Task { @MainActor in self.tool(t) { $0.sub = s } } }
+                r = try await client.ask(prompt, sessionID: nil, status: { s in Task { @MainActor in self.tool(t) { $0.sub = s } } },
+                                         steps: { st in Task { @MainActor in self.showSteps(st, cards: cards) } })
             }
             store.openCodeSession = r.session
             tool(t) { $0.state = .ok; $0.sub = "回复了" }
@@ -578,6 +583,31 @@ final class ChatModel: ObservableObject {
         } catch {
             tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
             if !Task.isCancelled { add(.error(error.localizedDescription)) }
+        }
+    }
+
+    /// OpenCode 的每一步一张卡片：新的追加在下面，已有的更新状态和输出
+    private func showSteps(_ steps: [CloudStep], cards: StepCards) {
+        for st in steps {
+            let icon: String = {
+                let n = st.name.lowercased()
+                if n.contains("bash") || n.contains("shell") || n.contains("exec") { return "terminal" }
+                if n.contains("read") || n.contains("view") { return "doc.text" }
+                if n.contains("write") || n.contains("edit") || n.contains("patch") { return "square.and.pencil" }
+                if n.contains("grep") || n.contains("glob") || n.contains("search") || n.contains("find") { return "magnifyingglass" }
+                if n.contains("fetch") || n.contains("web") { return "globe" }
+                if n.contains("skill") { return "sparkles" }
+                return "wrench.and.screwdriver"
+            }()
+            let title = st.name.isEmpty ? "工具" : st.name
+            let sub = st.input.isEmpty ? "…" : st.input
+            let state: ToolCard.State = st.failed ? .failed : (st.done ? .ok : .busy)
+            let detail = st.output.isEmpty ? nil : st.tail
+            if let id = cards.ids[st.id] {
+                tool(id) { $0.sub = sub; $0.state = state; $0.detail = detail; $0.title = title; $0.icon = icon }
+            } else {
+                cards.ids[st.id] = add(.tool(ToolCard(icon: icon, title: title, sub: sub, state: state, cloud: true, detail: detail)))
+            }
         }
     }
 
@@ -680,6 +710,10 @@ enum LocalModelIsLoaded {
 }
 
 /// 进度回调里要改的条目 id（闭包里不能直接改外面的 var）
+final class StepCards: @unchecked Sendable {
+    var ids: [String: UUID] = [:]
+}
+
 final class IDBox: @unchecked Sendable {
     var a: UUID?
     var b: UUID?
