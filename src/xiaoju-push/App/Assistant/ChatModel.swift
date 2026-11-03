@@ -554,10 +554,18 @@ final class ChatModel: ObservableObject {
         let w = add(.work(WorkLog(title: auto ? "问云端 OpenCode" : "交给 OpenCode", status: "连接…")))
         do {
             await loadMemory()
+            // 记忆文件一起读，不一个个等
             var mem: [(String, String)] = []
             if let list = try? await files.memoryFiles() {
-                for e in list.prefix(20) where e.name != CloudFiles.memoryIndex {
-                    if let s = try? await files.readText(e.fullPath) { mem.append((e.name, String(s.prefix(4096)))) }
+                let picked = Array(list.filter { $0.name != CloudFiles.memoryIndex }.prefix(20))
+                let fs = files
+                mem = await withTaskGroup(of: (Int, String, String)?.self) { g in
+                    for (i, e) in picked.enumerated() {
+                        g.addTask { (try? await fs.readText(e.fullPath)).map { (i, e.name, String($0.prefix(4096))) } }
+                    }
+                    var out: [(Int, String, String)] = []
+                    for await x in g { if let x { out.append(x) } }
+                    return out.sorted { $0.0 < $1.0 }.map { ($0.1, $0.2) }
                 }
             }
             let f = DateFormatter()
@@ -567,11 +575,11 @@ final class ChatModel: ObservableObject {
             let sid = store.openCodeSession.isEmpty ? nil : store.openCodeSession
             var r: (reply: String, session: String)
             do {
-                r = try await client.ask(prompt, sessionID: sid, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
+                r = try await client.ask(prompt, sessionID: sid, fast: store.cloudFast, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
                                          steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             } catch let e as PushError where sid != nil && e.message.contains("（404）") {
                 // 会话没了（Space 重启过），开个新的
-                r = try await client.ask(prompt, sessionID: nil, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
+                r = try await client.ask(prompt, sessionID: nil, fast: store.cloudFast, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
                                          steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             }
             store.openCodeSession = r.session
