@@ -9,34 +9,47 @@ struct RepoZipView: View {
     @State private var busy: String?
     @State private var error = ""
     @State private var saved: [URL] = []
+    @State private var all: [Repo] = []
+    @State private var loading = true
+    @State private var query = ""
 
-    struct Repo: Hashable { let repo: String; let branch: String }
+    struct Target: Hashable { let repo: String; let branch: String; var isPrivate = false; var inTask = false }
 
     static var folder: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("仓库ZIP", isDirectory: true)
     }
 
-    /// 任务里用到的仓库，去重
-    private var repos: [Repo] {
-        var out: [Repo] = []
+    /// 任务里用到的仓库排前面，后面是 GitHub 上你所有的仓库（最近推过的在前）
+    private var repos: [Target] {
+        var out: [Target] = []
         for m in store.mappings where !m.repo.isEmpty {
-            let r = Repo(repo: m.repo, branch: m.branch)
-            if !out.contains(r) { out.append(r) }
+            let p = all.first { $0.full_name == m.repo }?.private ?? false
+            let r = Target(repo: m.repo, branch: m.branch, isPrivate: p, inTask: true)
+            if !out.contains(where: { $0.repo == r.repo && $0.branch == r.branch }) { out.append(r) }
         }
-        return out
+        for r in all where !out.contains(where: { $0.repo == r.full_name }) {
+            out.append(Target(repo: r.full_name, branch: "", isPrivate: r.private))
+        }
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty ? out : out.filter { $0.repo.localizedCaseInsensitiveContains(q) }
     }
 
     var body: some View {
         List {
             Section {
-                if repos.isEmpty { Text("还没有任务。也可以在下面直接写仓库名。").foregroundStyle(Theme.muted) }
+                if loading { HStack { ProgressView(); Text("读取你的 GitHub 仓库…").foregroundStyle(Theme.muted) } }
+                if !loading && repos.isEmpty { Text(query.isEmpty ? "没读到仓库，检查一下 GitHub 令牌。" : "没有叫这个的仓库").foregroundStyle(Theme.muted) }
                 ForEach(repos, id: \.self) { r in
                     Button { download(r) } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "shippingbox").foregroundStyle(Theme.orangeText).frame(width: 24)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.repo).font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
-                                Text(r.branch.isEmpty ? "默认分支" : r.branch).font(.system(size: 13)).foregroundStyle(Theme.muted)
+                                HStack(spacing: 6) {
+                                    if r.isPrivate { Image(systemName: "lock.fill").font(.system(size: 10)) }
+                                    Text((r.branch.isEmpty ? "默认分支" : r.branch) + (r.inTask ? " · 任务里在用" : ""))
+                                }
+                                .font(.system(size: 13)).foregroundStyle(Theme.muted)
                             }
                             Spacer()
                             if busy == key(r) { ProgressView() } else {
@@ -47,7 +60,7 @@ struct RepoZipView: View {
                     .disabled(busy != nil)
                     .listRowBackground(Theme.card)
                 }
-            } header: { Text("下载哪个仓库") } footer: {
+            } header: { Text("下载哪个仓库（\(repos.count) 个）") } footer: {
                 Text("和 GitHub 网页上点 Code → Download ZIP 一样，下载的是 GitHub 上现在的版本。")
             }
 
@@ -58,7 +71,7 @@ struct RepoZipView: View {
                     Button("下载") {
                         let parts = other.trimmingCharacters(in: .whitespaces).split(separator: "@", maxSplits: 1).map(String.init)
                         guard let name = parts.first, name.contains("/") else { error = "写成 用户名/仓库名"; return }
-                        download(Repo(repo: name, branch: parts.count > 1 ? parts[1] : ""))
+                        download(Target(repo: name, branch: parts.count > 1 ? parts[1] : ""))
                     }
                     .disabled(busy != nil || other.isEmpty)
                 }
@@ -96,12 +109,18 @@ struct RepoZipView: View {
         .background(Theme.bg)
         .navigationTitle("仓库 ZIP")
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "搜仓库名")
         .onAppear(perform: load)
+        .task {
+            guard all.isEmpty else { return }
+            do { all = try await store.engine().repos() } catch { self.error = error.localizedDescription }
+            loading = false
+        }
     }
 
-    private func key(_ r: Repo) -> String { r.repo + "@" + r.branch }
+    private func key(_ r: Target) -> String { r.repo + "@" + r.branch }
 
-    private func download(_ r: Repo) {
+    private func download(_ r: Target) {
         guard !store.githubToken.isEmpty else { error = "先在设置里填 GitHub 令牌"; return }
         Haptics.tap()
         error = ""
