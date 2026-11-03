@@ -87,6 +87,15 @@ enum Interpreter {
         if ["什么模型", "你是谁", "哪个模型", "你是什么"].contains(where: { s.contains($0) }) {
             return .say("我是手机上的本地模型 Qwen3.5-2B（不联网），负责听懂你的话、管推送和云盘文件。写代码、改 bug、解释代码这些难事会交给云端的 OpenCode（DeepSeek）。")
         }
+        // 打招呼、道谢这种不用模型，也不交给云端
+        if s.count <= 8 {
+            if ["你好", "您好", "嗨", "hi", "hello", "在吗", "在不在"].contains(where: { s.hasPrefix($0) }) {
+                return .say("在的。要我推送、检查改动、找文件，还是看代码？直接说就行。")
+            }
+            if ["谢谢", "多谢", "感谢", "thanks", "好的", "ok", "收到", "行", "嗯"].contains(where: { s.hasPrefix($0) }) {
+                return .say("好的，有事再叫我。")
+            }
+        }
         let negative = ["不推", "别推", "不要推", "排除"].contains { s.contains($0) }
         if negative { return nil }
         if ["推送记录", "历史", "推过什么"].contains(where: { s.contains($0) }) { return .history(task: named) }
@@ -98,6 +107,32 @@ enum Interpreter {
         }
         if ["全部任务", "所有任务", "哪些任务", "待推"].contains(where: { s.contains($0) }) { return .status }
         return nil
+    }
+
+    /// 小模型被语法逼着一定要选一条指令，闲聊或问题也会被硬翻成「找文件」「新建文件夹」。
+    /// 原话里得有对应的意思才算数，不然当没听懂（交给云端或请用户说具体点）。
+    static func plausible(_ c: Command, _ text: String) -> Bool {
+        let s = text.lowercased()
+        func has(_ words: [String]) -> Bool { words.contains { s.contains($0) } }
+        func mentions(_ path: String) -> Bool {
+            let last = path.split(separator: "/").last.map { String($0).lowercased() } ?? path.lowercased()
+            return !last.isEmpty && s.contains(last)
+        }
+        switch c {
+        case .push: return has(["推", "push", "提交", "上传", "发布", "同步"])
+        case .check: return has(["检查", "改动", "改了", "变化", "diff", "check", "看看", "差别", "不一样"])
+        case .history: return has(["记录", "历史", "推过", "上次"])
+        case .status: return has(["任务", "改动", "待推", "状态", "哪些"])
+        case .exclude: return has(["不推", "别推", "不要推", "排除", "忽略", "跳过", "不用推"])
+        case .find(let k, let f): return has(["找", "搜", "查", "在哪", "哪里", "有什么", "列出", "列一下", "看看", "看下", "打开"])
+            || s.contains(k.lowercased()) || (f.map(mentions) ?? false)
+        case .mkdir: return has(["新建", "建", "创建", "加个", "mkdir"])
+        case .rename(let p, _): return has(["改名", "重命名", "改成", "叫"]) && mentions(p)
+        case .move(let p, _): return has(["移", "挪", "放到", "放进", "搬", "归档", "move"]) && mentions(p)
+        case .trash(let p): return has(["删", "回收站", "扔", "清理", "不要了", "去掉"]) && mentions(p)
+        case .remember: return has(["记住", "记得", "记一下", "以后", "下次", "别再", "不要再", "错了", "不对", "应该是"])
+        case .cloud, .say: return true
+        }
     }
 
     // MARK: 模型
@@ -121,6 +156,7 @@ enum Interpreter {
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
         {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
         {"do":"say","text":"问题"} 缺信息时反问，比如没说是哪个任务
+        只有用户明确要做这件事才用对应指令。提问、闲聊、要你解释或者写东西、看不懂的话，一律用 cloud，不要猜。
         任务：
         \(taskLines.isEmpty ? "（还没有任务）" : taskLines)
         """
@@ -135,6 +171,8 @@ enum Interpreter {
         把 /代码/demo 移到归档 → {"do":"move","path":"/代码/demo","to":"/归档"}
         记住提交说明用中文 → {"do":"remember","text":"提交说明用中文"}
         帮我看看这次改动有没有 bug → {"do":"cloud","text":"帮我看看这次改动有没有 bug"}
+        这个项目是干什么的 → {"do":"cloud","text":"这个项目是干什么的"}
+        为什么推送失败了 → {"do":"cloud","text":"为什么推送失败了"}
         """
         let prefix = "<|im_start|>system\n\(sys)<|im_end|>\n"
         let lastLine = last.map { "（上一步：\($0)）\n" } ?? ""

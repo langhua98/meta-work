@@ -17,9 +17,8 @@ struct XiaojuPushApp: App {
 }
 
 enum Route: Hashable {
-    case task(Mapping)
     case history(Mapping)
-    /// 不针对某个任务的对话（找文件、整理云盘）
+    /// 唯一的对话框（编码助手）；点任务也是进这里
     case assistant
 }
 
@@ -49,7 +48,7 @@ struct HomeView: View {
                 }
                 Section {
                     ForEach(store.mappings) { m in
-                        Button { Haptics.tap(); path.append(.task(m)) } label: {
+                        Button { Haptics.tap(); open(m) } label: {
                             TaskRow(mapping: m, pending: store.pending[m.id])
                         }
                         .buttonStyle(PressStyle())
@@ -69,7 +68,7 @@ struct HomeView: View {
                             .tint(Theme.orange)
                         }
                         .contextMenu {
-                            Button { path.append(.task(m)) } label: { Label("检查改动", systemImage: "arrow.triangle.2.circlepath") }
+                            Button { open(m) } label: { Label("检查改动", systemImage: "arrow.triangle.2.circlepath") }
                             Button { path.append(.history(m)) } label: { Label("推送记录", systemImage: "clock") }
                             Button { editing = m } label: { Label("编辑", systemImage: "pencil") }
                             Button(role: .destructive) { store.remove(m) } label: { Label("删除", systemImage: "trash") }
@@ -104,9 +103,8 @@ struct HomeView: View {
             .navigationTitle("推送任务")
             .navigationDestination(for: Route.self) { r in
                 switch r {
-                case .task(let m): ChatView(mapping: m)
                 case .history(let m): HistoryView(mapping: m)
-                case .assistant: ChatView(mapping: nil)
+                case .assistant: ChatView()
                 }
             }
             .toolbar {
@@ -149,7 +147,13 @@ struct HomeView: View {
     private func openFromNotification() {
         guard let id = store.openTask else { return }
         store.openTask = nil
-        if let m = store.mappings.first(where: { $0.id == id }) { path = [.task(m)] }
+        if let m = store.mappings.first(where: { $0.id == id }) { open(m) }
+    }
+
+    /// 进对话框并检查这个任务（和右上角进的是同一个对话）
+    private func open(_ m: Mapping) {
+        ChatModel.shared.focus(m)
+        path = [.assistant]
     }
 
     private var header: some View {

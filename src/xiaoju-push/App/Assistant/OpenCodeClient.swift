@@ -102,8 +102,11 @@ final class OpenCodeClient {
         if sid.isEmpty {
             status("连接 OpenCode…")
             // 允许读写工作目录外（比如 /tmp），不然它会停下来等一个没人点的批准
+            // 不加载技能、不反问用户：这两样最拖时间（技能会先读一大段说明，反问会一直等）
             let body: [String: Any] = ["title": "小橘推送",
-                                       "permissions": [["action": "external_directory", "resource": "*", "effect": "allow"]]]
+                                       "permissions": [["action": "external_directory", "resource": "*", "effect": "allow"],
+                                                       ["action": "skill", "resource": "*", "effect": "deny"],
+                                                       ["action": "question", "resource": "*", "effect": "deny"]]]
             let s = try await send("POST", "/api/session", body: body, status: status) as? [String: Any]
             sid = (s?["data"] as? [String: Any])?["id"] as? String ?? s?["id"] as? String ?? ""
             if sid.isEmpty { throw PushError("OpenCode 没给会话号") }
@@ -261,11 +264,11 @@ final class OpenCodeClient {
     """
 
     static func prompt(request: String, kind: String, tasks: [TaskRef], memoryIndex: String,
-                       memoryFiles: [(String, String)], recent: [String], today: String) -> String {
+                       memoryFiles: [(String, String)], recent: [String], today: String, followUp: Bool = false) -> String {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
-        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；要快：能一步做完就别分几步，不要先做计划、头脑风暴或写测试，不要向用户提问，有不确定就按最可能的意思直接做；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
+        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；要快：能一步做完就别分几步，不要先做计划、头脑风暴或写测试，不要加载技能，不要向用户提问，有不确定就按最可能的意思直接做；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
         推送任务：
         \(taskLines.isEmpty ? "（没有）" : taskLines)
 
@@ -276,7 +279,7 @@ final class OpenCodeClient {
         \(memoryIndex.isEmpty ? "（空）" : memoryIndex)
 
         记忆文件：
-        \(files.isEmpty ? "（空）" : files)
+        \(followUp ? "（同这个会话前面发过的）" : files.isEmpty ? "（空）" : files)
 
         """
         if kind == "remember" {
