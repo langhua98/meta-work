@@ -46,6 +46,7 @@ struct ChatItem: Identifiable {
         case error(String)
         case link(String, URL)
         case attachment(Attachment)
+        case work(WorkLog)
     }
     let id = UUID()
     var kind: Kind
@@ -550,7 +551,7 @@ final class ChatModel: ObservableObject {
 
     private func askCloud(_ text: String, kind: String, auto: Bool) async {
         let client = OpenCodeClient(base: store.openCodeURL, password: store.openCodePassword)
-        let t = add(.tool(ToolCard(icon: "cloud", title: auto ? "问云端 OpenCode" : "交给 OpenCode", sub: "连接…", cloud: true)))
+        let w = add(.work(WorkLog(title: auto ? "问云端 OpenCode" : "交给 OpenCode", status: "连接…")))
         do {
             await loadMemory()
             var mem: [(String, String)] = []
@@ -564,18 +565,17 @@ final class ChatModel: ObservableObject {
             let prompt = OpenCodeClient.prompt(request: text, kind: kind, tasks: tasks, memoryIndex: memoryIndex,
                                                memoryFiles: mem, recent: Array(recent.suffix(10)), today: f.string(from: Date()))
             let sid = store.openCodeSession.isEmpty ? nil : store.openCodeSession
-            let cards = StepCards()
             var r: (reply: String, session: String)
             do {
-                r = try await client.ask(prompt, sessionID: sid, status: { s in Task { @MainActor in self.tool(t) { $0.sub = s } } },
-                                         steps: { st in Task { @MainActor in self.showSteps(st, cards: cards) } })
+                r = try await client.ask(prompt, sessionID: sid, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
+                                         steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             } catch let e as PushError where sid != nil && e.message.contains("（404）") {
                 // 会话没了（Space 重启过），开个新的
-                r = try await client.ask(prompt, sessionID: nil, status: { s in Task { @MainActor in self.tool(t) { $0.sub = s } } },
-                                         steps: { st in Task { @MainActor in self.showSteps(st, cards: cards) } })
+                r = try await client.ask(prompt, sessionID: nil, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
+                                         steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             }
             store.openCodeSession = r.session
-            tool(t) { $0.state = .ok; $0.sub = "回复了" }
+            work(w) { $0.finished = Date(); $0.status = "完成" }
             let reply = OpenCodeClient.parse(r.reply)
             if !reply.text.isEmpty { say(reply.text) }
             if let mu = reply.memory { memoryCard(mu) }
@@ -583,34 +583,15 @@ final class ChatModel: ObservableObject {
             if !reply.files.isEmpty { await showFiles(reply.files, client: client) }
             if reply.text.isEmpty && reply.memory == nil && reply.commands.isEmpty && reply.files.isEmpty { say("OpenCode 没给出结果。") }
         } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            work(w) { $0.finished = Date(); $0.failed = true; $0.status = error.localizedDescription }
             if !Task.isCancelled { add(.error(error.localizedDescription)) }
         }
     }
 
-    /// OpenCode 的每一步一张卡片：新的追加在下面，已有的更新状态和输出
-    private func showSteps(_ steps: [CloudStep], cards: StepCards) {
-        for st in steps {
-            let icon: String = {
-                let n = st.name.lowercased()
-                if n.contains("bash") || n.contains("shell") || n.contains("exec") { return "terminal" }
-                if n.contains("read") || n.contains("view") { return "doc.text" }
-                if n.contains("write") || n.contains("edit") || n.contains("patch") { return "square.and.pencil" }
-                if n.contains("grep") || n.contains("glob") || n.contains("search") || n.contains("find") { return "magnifyingglass" }
-                if n.contains("fetch") || n.contains("web") { return "globe" }
-                if n.contains("skill") { return "sparkles" }
-                return "wrench.and.screwdriver"
-            }()
-            let title = st.name.isEmpty ? "工具" : st.name
-            let sub = st.input.isEmpty ? "…" : st.input
-            let state: ToolCard.State = st.failed ? .failed : (st.done ? .ok : .busy)
-            let detail = st.output.isEmpty ? nil : st.tail
-            if let id = cards.ids[st.id] {
-                tool(id) { $0.sub = sub; $0.state = state; $0.detail = detail; $0.title = title; $0.icon = icon }
-            } else {
-                cards.ids[st.id] = add(.tool(ToolCard(icon: icon, title: title, sub: sub, state: state, cloud: true, detail: detail)))
-            }
-        }
+    private func work(_ id: UUID, _ f: (inout WorkLog) -> Void) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .work(var w) = items[i].kind else { return }
+        f(&w)
+        items[i].kind = .work(w)
     }
 
     /// 下载 OpenCode 发来的文件，存到本机缓存，对话里按类型显示
@@ -745,10 +726,6 @@ enum LocalModelIsLoaded {
 }
 
 /// 进度回调里要改的条目 id（闭包里不能直接改外面的 var）
-final class StepCards: @unchecked Sendable {
-    var ids: [String: UUID] = [:]
-}
-
 final class IDBox: @unchecked Sendable {
     var a: UUID?
     var b: UUID?
