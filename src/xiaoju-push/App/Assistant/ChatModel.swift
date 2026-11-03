@@ -45,6 +45,7 @@ struct ChatItem: Identifiable {
         case card(ActionCard)
         case error(String)
         case link(String, URL)
+        case attachment(Attachment)
     }
     let id = UUID()
     var kind: Kind
@@ -579,7 +580,8 @@ final class ChatModel: ObservableObject {
             if !reply.text.isEmpty { say(reply.text) }
             if let mu = reply.memory { memoryCard(mu) }
             if !reply.commands.isEmpty { cloudCommandsCard(reply.commands) }
-            if reply.text.isEmpty && reply.memory == nil && reply.commands.isEmpty { say("OpenCode 没给出结果。") }
+            if !reply.files.isEmpty { await showFiles(reply.files, client: client) }
+            if reply.text.isEmpty && reply.memory == nil && reply.commands.isEmpty && reply.files.isEmpty { say("OpenCode 没给出结果。") }
         } catch {
             tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
             if !Task.isCancelled { add(.error(error.localizedDescription)) }
@@ -609,6 +611,39 @@ final class ChatModel: ObservableObject {
                 cards.ids[st.id] = add(.tool(ToolCard(icon: icon, title: title, sub: sub, state: state, cloud: true, detail: detail)))
             }
         }
+    }
+
+    /// 下载 OpenCode 发来的文件，存到本机缓存，对话里按类型显示
+    private func showFiles(_ paths: [String], client: OpenCodeClient) async {
+        for p in paths.prefix(10) {
+            let name = (p as NSString).lastPathComponent
+            let t = add(.tool(ToolCard(icon: "arrow.down.circle", title: "接收 \(name)", sub: p, cloud: true)))
+            do {
+                let data = try await client.download(p)
+                let url = try Attachment.save(data, name: name)
+                tool(t) { $0.state = .ok; $0.sub = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file) }
+                remove(t)
+                add(.attachment(Attachment(name: name, remotePath: p, url: url, size: data.count)))
+            } catch {
+                tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            }
+        }
+    }
+
+    /// 附件存进云盘 /小橘推送/附件/日期/
+    func saveToCloud(_ a: Attachment) async throws -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let folder = "/小橘推送/附件/" + f.string(from: Date())
+        let data = try Data(contentsOf: a.url)
+        let c = files
+        try? await c.mkdir("/小橘推送")
+        try? await c.mkdir("/小橘推送/附件")
+        try? await c.mkdir(folder)
+        let path = folder + "/" + a.name
+        try await c.upload(path, data)
+        recent.append("把 \(a.name) 存到云盘 \(folder)")
+        return path
     }
 
     private func cloudCommandsCard(_ cmds: [Command]) {
