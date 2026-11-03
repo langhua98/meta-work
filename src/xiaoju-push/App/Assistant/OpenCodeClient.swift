@@ -23,6 +23,8 @@ struct CloudReply {
     var text: String
     var commands: [Command]
     var memory: MemoryUpdate?
+    /// 要发给用户看的文件（OpenCode 工作目录里的相对路径）
+    var files: [String] = []
 }
 
 /// OpenCode 给的记忆改动：要写的文件 + 新索引
@@ -265,12 +267,14 @@ final class OpenCodeClient {
             {"do":"find","keyword":"…"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
             {"do":"move","path":"/…","to":"/目标文件夹"} {"do":"trash","path":"/…"}
             不要自己改云盘或推送：App 会先给用户看、用户确认后由 App 执行。不需要执行就不输出代码块，直接回答。
+            要把文件、图片、视频发给用户看（比如你画的图、生成的报告、改好的代码），先保存在工作目录里，
+            再在代码块里加 {"do":"show","files":["相对工作目录的路径"]}，App 会下载下来显示在对话里。
             """
         }
         return p
     }
 
-    /// 从回复里拿出说明文字、指令、记忆改动
+    /// 从回复里拿出说明文字、指令、记忆改动、要显示的文件
     static func parse(_ reply: String) -> CloudReply {
         var text = reply
         var json = ""
@@ -279,9 +283,20 @@ final class OpenCodeClient {
             json = String(reply[r.upperBound..<e.lowerBound])
             text = String(reply[..<r.lowerBound]) + String(reply[e.upperBound...])
         }
+        // 没放进代码块、单独一行的 {"do":"show",...} 也认
+        var shown: [String] = []
+        text = text.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+            let l = line.trimmingCharacters(in: .whitespaces)
+            guard l.hasPrefix("{"), l.contains("\"show\""), let d = l.data(using: .utf8),
+                  let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return true }
+            let f = showFiles(o)
+            if f.isEmpty { return true }
+            shown += f
+            return false
+        }.joined(separator: "\n")
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = json.data(using: .utf8), let any = try? JSONSerialization.jsonObject(with: data) else {
-            return CloudReply(text: text, commands: [], memory: nil)
+            return CloudReply(text: text, commands: [], memory: nil, files: shown)
         }
         if let o = any as? [String: Any], (o["do"] as? String) == "memory" {
             let files = (o["files"] as? [[String: Any]] ?? []).compactMap { f -> (String, String)? in
@@ -291,9 +306,10 @@ final class OpenCodeClient {
             let remove = (o["remove"] as? [String] ?? []).filter { Self.safeName($0) && $0 != CloudFiles.memoryIndex }
             let index = o["index"] as? String ?? ""
             return CloudReply(text: text, commands: [], memory: MemoryUpdate(files: files.map { (name: $0.0, content: $0.1) },
-                                                                             remove: remove, index: index))
+                                                                             remove: remove, index: index), files: shown)
         }
         let list = (any as? [[String: Any]]) ?? ((any as? [String: Any]).map { [$0] } ?? [])
+        for o in list { shown += showFiles(o) }
         let cmds = list.compactMap { o -> Command? in
             guard let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8) else { return nil }
             switch Interpreter.parse(s) {
@@ -301,7 +317,50 @@ final class OpenCodeClient {
             case let c?: return c
             }
         }
-        return CloudReply(text: text, commands: cmds, memory: nil)
+        var seen = Set<String>()
+        return CloudReply(text: text, commands: cmds, memory: nil, files: shown.filter { seen.insert($0).inserted })
+    }
+
+    private static func showFiles(_ o: [String: Any]) -> [String] {
+        guard (o["do"] as? String) == "show" else { return [] }
+        if let f = o["files"] as? [String] { return f.filter { !$0.isEmpty } }
+        if let f = (o["file"] ?? o["path"]) as? String, !f.isEmpty { return [f] }
+        return []
+    }
+
+    // MARK: 下载 OpenCode 工作目录里的文件
+
+    static let maxDownload = 60 * 1024 * 1024
+
+    /// GET /api/fs/read/<路径>，路径相对 OpenCode 的工作目录；给了绝对路径就再试几种去掉前缀的写法
+    func download(_ path: String) async throws -> Data {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        var tries = [p]
+        if p.hasPrefix("/") {
+            tries.append(String(p.drop(while: { $0 == "/" })))
+            let segs = p.split(separator: "/").map(String.init)
+            for name in ["open-code", "workspace", "work", "project"] {
+                if let i = segs.firstIndex(of: name), i + 1 < segs.count { tries.append(segs[(i + 1)...].joined(separator: "/")) }
+            }
+        }
+        if p.hasPrefix("./") { tries.append(String(p.dropFirst(2))) }
+        var lastCode = 0
+        for t in tries {
+            let enc = t.split(separator: "/").map {
+                String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))) ?? String($0)
+            }.joined(separator: "/")
+            guard let url = URL(string: base + "/api/fs/read/" + enc) else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 120)
+            req.setValue("Basic " + Data("opencode:\(password)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+            let (data, resp) = try await session.data(for: req)
+            lastCode = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if (200..<300).contains(lastCode) {
+                if data.count > Self.maxDownload { throw PushError("文件太大（超过 60 MB）") }
+                return data
+            }
+            if lastCode == 401 { throw PushError("OpenCode 密码不对") }
+        }
+        throw PushError(lastCode == 404 ? "OpenCode 那边找不到 \(p)" : "下载 \(p) 失败（\(lastCode)）")
     }
 
     /// 记忆文件名只能是一层的 .md，不能带路径

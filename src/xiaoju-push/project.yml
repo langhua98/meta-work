@@ -38,6 +38,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
+        NSPhotoLibraryAddUsageDescription: 把模型发来的图片和视频存到相册
         UIBackgroundModes: [fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.langhua98.xiaoju.push.refresh]
   # 桌面 / 锁屏小组件：待推文件数

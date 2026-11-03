@@ -153,6 +153,11 @@ final class CloudFiles {
         _ = try await request("DELETE", "/items/\(e.id)", write: true, headers: e.etag.map { ["If-Match": $0] } ?? [:])
     }
 
+    /// 上传一个文件（同名不覆盖，云盘会自动加「 (2)」）
+    func upload(_ path: String, _ data: Data) async throws {
+        _ = try await request("PUT", "/files", query: ["path": Self.clean(path)], body: data, json: false, write: true)
+    }
+
     /// 写一个文本文件（云盘不覆盖同名：先写临时文件，旧的放回收站，再改名）
     func writeText(_ path: String, _ text: String) async throws {
         let p = Self.clean(path)
