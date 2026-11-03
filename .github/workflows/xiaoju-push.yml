@@ -26,8 +26,8 @@ jobs:
           xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$xcode"
           xcodebuild -version
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen and ldid
+        run: brew install xcodegen ldid
       - name: Build
         working-directory: src/xiaoju-push
         run: |
@@ -37,6 +37,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
           app=build/Build/Products/Release-iphoneos/XiaojuPush.app
+          # 小组件必须嵌进 App
+          if [ ! -d "$app/PlugIns/XiaojuPushWidget.appex" ]; then
+            echo "::error::$app/PlugIns/XiaojuPushWidget.appex 不存在（小组件没嵌进 App）"
+            exit 1
+          fi
+          # 没签名编译不会写入 entitlements，SideStore 就不知道要 App Group。用 ldid 先假签名写进去（先小组件，再主程序）。
+          ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
+          ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"
           mkdir Payload && cp -R "$app" Payload/
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
           ipa="XiaojuPush-$version-build$GITHUB_RUN_NUMBER.ipa"
