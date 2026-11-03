@@ -40,7 +40,7 @@ jobs:
           mkdir Payload && cp -R "$app" Payload/
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
           ipa="XiaojuPush-$version-build$GITHUB_RUN_NUMBER.ipa"
-          zip -qry "../$ipa" Payload
+          zip -qry "$GITHUB_WORKSPACE/$ipa" Payload
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "IPA=$ipa" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
