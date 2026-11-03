@@ -108,9 +108,9 @@ final class OpenCodeClient {
             let page = try await send("GET", "/api/session/\(sid)/message?order=desc&limit=30", body: nil, status: status) as? [String: Any]
             let items = page?["data"] as? [[String: Any]] ?? []
             let idle = (items.first?["type"] as? String) == "idle"
-            let texts = Self.texts(items.filter { ($0["type"] as? String) == "assistant" }.reversed())
-            let reply = texts.dropFirst(before).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            // 跑完了（idle），或者回复 10 秒没再变
+            // 只要最后一条 assistant 消息里的回答文字（不要工具调用、读文件、命令输出）
+            let replies = Self.texts(items.filter { ($0["type"] as? String) == "assistant" }.reversed())
+            let reply = replies.count > before ? (replies.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
             same = (!reply.isEmpty && reply == last) ? same + 1 : 0
             last = reply
             if !reply.isEmpty && (idle || same >= 5) { return reply }
@@ -123,14 +123,14 @@ final class OpenCodeClient {
         return Self.texts((page?["data"] as? [[String: Any]] ?? []).reversed())
     }
 
-    /// 每条 assistant 消息里所有 text 字段拼起来（不认识的结构也能找到文字；跳过思考 reasoning）
+    /// 每条 assistant 消息的回答文字：只取 type 为 text 的部分，跳过工具调用 / 工具结果 / 思考
     static func texts(_ items: [[String: Any]]) -> [String] {
         func walk(_ v: Any, _ out: inout [String]) {
             if let d = v as? [String: Any] {
-                if let t = d["type"] as? String, t.contains("reasoning") { return }
-                for (k, x) in d {
-                    if k == "text", let s = x as? String { out.append(s) } else { walk(x, &out) }
-                }
+                let t = (d["type"] as? String ?? "").lowercased()
+                if t.contains("tool") || t.contains("reasoning") || t.contains("file") || t.contains("result") { return }
+                if t == "text", let s = d["text"] as? String { out.append(s); return }
+                for (k, x) in d where k != "input" && k != "output" && k != "state" && k != "metadata" { walk(x, &out) }
             } else if let a = v as? [Any] {
                 for x in a { walk(x, &out) }
             }
@@ -153,7 +153,7 @@ final class OpenCodeClient {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
-        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，简短。
+        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
         推送任务：
         \(taskLines.isEmpty ? "（没有）" : taskLines)
 
