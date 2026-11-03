@@ -20,7 +20,7 @@ targets:
     dependencies:
       - target: XiaojuPushWidget
         embed: true
-      # 本地模型：llama.cpp 官方 XCFramework，编译时由 workflow 下载到 Vendor/（不进仓库）
+      # 本地模型：llama.cpp 官方 XCFramework（最新正式版），编译时由 workflow 下载到 Vendor/（不进仓库）
       - framework: Vendor/llama.xcframework
         embed: true
     settings:

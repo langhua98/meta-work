@@ -21,7 +21,7 @@
 - 长记忆：说「记住…」或纠正它时，由 OpenCode 整理成云盘 `/小橘推送/记忆/` 里一个主题一个 .md 加 `索引.md`，确认后写入。本地模型看索引，OpenCode 看全部。设置 → 记忆 可以看和删。
 - 改云盘文件要在设置里填带「整理」权限的令牌。
 
-代码在 `App/Assistant/`。llama.xcframework（llama.cpp b12071）由 workflow 编译时下载到 `Vendor/`，不进仓库。
+代码在 `App/Assistant/`。llama.xcframework（llama.cpp 最新正式版）由 workflow 编译时下载到 `Vendor/`，不进仓库。
 
 ## 编译和安装
 
