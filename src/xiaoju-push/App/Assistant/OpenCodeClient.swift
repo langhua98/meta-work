@@ -73,21 +73,20 @@ final class OpenCodeClient {
         }
     }
 
-    /// 发一句话，等 OpenCode 回完。sessionID 传进来就接着上次的会话。
+    /// 发一句话，等 OpenCode 回完。sessionID 传进来就接着用那个会话。
+    /// OpenCode 2 的接口都在 /api 下：建会话 POST /api/session → {data:{id}}；
+    /// POST /api/session/{id}/generate {prompt} → {data:{text}}，同步返回一段文字，不动会话记录、不跑工具。
     func ask(_ prompt: String, sessionID: String?, status: @escaping (String) -> Void) async throws -> (reply: String, session: String) {
         var sid = sessionID ?? ""
         if sid.isEmpty {
             status("连接 OpenCode…")
-            let s = try await send("POST", "/session", body: ["title": "小橘推送"], status: status) as? [String: Any]
-            sid = s?["id"] as? String ?? ""
+            let s = try await send("POST", "/api/session", body: ["title": "小橘推送"], status: status) as? [String: Any]
+            sid = (s?["data"] as? [String: Any])?["id"] as? String ?? s?["id"] as? String ?? ""
             if sid.isEmpty { throw PushError("OpenCode 没给会话号") }
         }
         status("OpenCode 在想…")
-        let r = try await send("POST", "/session/\(sid)/message",
-                               body: ["parts": [["type": "text", "text": prompt]]], status: status)
-        let parts = (r as? [String: Any])?["parts"] as? [[String: Any]] ?? []
-        let text = parts.filter { ($0["type"] as? String) == "text" }.compactMap { $0["text"] as? String }
-            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let r = try await send("POST", "/api/session/\(sid)/generate", body: ["prompt": prompt], status: status) as? [String: Any]
+        let text = ((r?["data"] as? [String: Any])?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return (text, sid)
     }
 
@@ -133,7 +132,7 @@ final class OpenCodeClient {
             p += """
 
             用户说：\(request)
-            手机上的小模型没搞定，你来。写代码、改 bug、解释、审查都行；可以用工具看小橘云盘和仓库里的代码（如果有）。
+            手机上的小模型没搞定，你来。写代码、改 bug、解释、审查都行。
             要 App 执行的话，最后输出一个 ```json 代码块，是指令数组（只能用这些）：
             {"do":"push","task":任务名} {"do":"check","task":任务名} {"do":"exclude","task":任务名,"path":"文件夹"}
             {"do":"find","keyword":"…"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
