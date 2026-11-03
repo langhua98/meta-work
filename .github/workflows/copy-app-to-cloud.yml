@@ -1,0 +1,21 @@
+name: 复制小橘推送源码到云盘
+
+# 把 src/xiaoju-push 和 xiaoju-push.yml 复制到小橘云盘 metawork/cloude审阅/小橘推送/。
+# 需要 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/project-thread-owu2zy]
+    paths: [".github/workflows/copy-app-to-cloud.yml", "scripts/copy_app_to_cloud.py"]
+
+permissions:
+  contents: read
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: python3 scripts/copy_app_to_cloud.py
