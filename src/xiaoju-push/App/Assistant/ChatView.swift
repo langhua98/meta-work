@@ -222,10 +222,17 @@ private struct ToolCardView: View {
                                 in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(card.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
-                    Text(card.sub).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(2)
+                    Text(card.sub).font(.system(size: 12, design: card.cloud ? .monospaced : .default)).foregroundStyle(Theme.muted).lineLimit(2)
                 }
                 Spacer(minLength: 4)
                 stateIcon
+            }
+            if let d = card.detail, !d.isEmpty {
+                Text(d).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Theme.bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             if let p = card.progress, card.state == .busy {
                 ProgressView(value: min(max(p, 0), 1)).tint(card.cloud ? accent : Theme.orange)
