@@ -58,8 +58,12 @@ final class ChatModel: ObservableObject {
     @Published var busy = false
     @Published var pickMapping: Mapping?
 
+    /// 整个 App 只有这一个对话：首页点任务也是进这里，只是换「当前任务」
+    static let shared = ChatModel(store: Store.shared)
+
     let store: Store
-    let mapping: Mapping?
+    /// 当前任务（没说哪个任务时用它）
+    @Published var mapping: Mapping?
     private var job: Task<Void, Never>?
     private var plans: [UUID: Plan] = [:]
     private var lastCommand: String?
@@ -67,9 +71,8 @@ final class ChatModel: ObservableObject {
     private var memoryIndex = ""
     private var memoryLoaded = false
 
-    init(store: Store, mapping: Mapping?) {
+    init(store: Store) {
         self.store = store
-        self.mapping = mapping
     }
 
     private var tasks: [TaskRef] { TaskRef.list(store.mappings) }
@@ -116,9 +119,15 @@ final class ChatModel: ObservableObject {
 
     func start() {
         Task { await loadMemory() }
-        guard let mapping, items.isEmpty else { return }
-        add(.user("检查一下有什么改动"))
-        run { await self.check(mapping) }
+    }
+
+    /// 从首页点了某个任务：设成当前任务，在同一个对话里检查它
+    func focus(_ m: Mapping) {
+        mapping = m
+        guard !busy else { return }
+        let name = TaskRef.list(store.mappings).first { $0.mapping.id == m.id }?.name ?? m.title
+        add(.user("检查 \(name) 有什么改动"))
+        run { await self.check(m) }
     }
 
     func stop() {
@@ -127,8 +136,9 @@ final class ChatModel: ObservableObject {
         busy = false
     }
 
+    /// 离开对话页：云端在干的活照样跑完，回来还能看到；只把本地模型从内存里放掉
     func leave() {
-        job?.cancel()
+        guard !busy else { return }
         Task { await LocalModel.shared.unload() }
     }
 
@@ -160,6 +170,7 @@ final class ChatModel: ObservableObject {
     private func handle(_ text: String) async {
         let ts = tasks
         if let c = Interpreter.keyword(text, tasks: ts, current: mapping) {
+            if case .say(let q) = c { say(q); return }
             add(.understood(c.summary, source: "直接认出来"))
             await execute(c, original: text)
             return
@@ -193,9 +204,10 @@ final class ChatModel: ObservableObject {
         remove(thinking)
         if Task.isCancelled { return }
         let secs = String(format: "%.1f", Date().timeIntervalSince(started))
-        guard let cmd = Interpreter.parse(out) else {
+        guard let cmd = Interpreter.parse(out).flatMap({ Interpreter.plausible($0, text) ? $0 : nil }) else {
+            // 小模型没听懂或者瞎猜（比如闲聊被翻成「找文件」），不乱执行
             if cloudReady && store.autoCloud { await askCloud(text, kind: "ask", auto: true) }
-            else { say("没听懂，换个说法试试？") }
+            else { say("这句我没把握，就不乱做了。可以说得具体点，比如「推送 \(ts.first?.name ?? "任务名")」「找一下 PushEngine」；写代码、解释代码这类要在设置里填 OpenCode 密码交给云端。") }
             return
         }
         switch cmd {
@@ -554,9 +566,13 @@ final class ChatModel: ObservableObject {
         let w = add(.work(WorkLog(title: auto ? "问云端 OpenCode" : "交给 OpenCode", status: "连接…")))
         do {
             await loadMemory()
-            // 记忆文件一起读，不一个个等
+            // 接着用最近的会话（20 分钟内、不到 6 轮），记忆它已经看过，不再重发；太久或太长就开新会话，越长越慢
+            let reuse = store.openCodeSession.isEmpty == false
+                && Date().timeIntervalSince(store.openCodeSessionAt) < 20 * 60 && store.openCodeTurns < 6
+            let sid = reuse ? store.openCodeSession : nil
+            // 记忆文件一起读，不一个个等；总共最多 12KB
             var mem: [(String, String)] = []
-            if let list = try? await files.memoryFiles() {
+            if !reuse, let list = try? await files.memoryFiles() {
                 let picked = Array(list.filter { $0.name != CloudFiles.memoryIndex }.prefix(20))
                 let fs = files
                 mem = await withTaskGroup(of: (Int, String, String)?.self) { g in
@@ -567,22 +583,27 @@ final class ChatModel: ObservableObject {
                     for await x in g { if let x { out.append(x) } }
                     return out.sorted { $0.0 < $1.0 }.map { ($0.1, $0.2) }
                 }
+                var total = 0
+                mem = mem.filter { total += $0.1.utf8.count; return total <= 12_000 }
             }
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd"
             let prompt = OpenCodeClient.prompt(request: text, kind: kind, tasks: tasks, memoryIndex: memoryIndex,
-                                               memoryFiles: mem, recent: Array(recent.suffix(10)), today: f.string(from: Date()))
-            let sid = store.openCodeSession.isEmpty ? nil : store.openCodeSession
+                                               memoryFiles: mem, recent: Array(recent.suffix(10)), today: f.string(from: Date()),
+                                               followUp: reuse)
             var r: (reply: String, session: String)
             do {
                 r = try await client.ask(prompt, sessionID: sid, fast: store.cloudFast, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
                                          steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             } catch let e as PushError where sid != nil && e.message.contains("（404）") {
                 // 会话没了（Space 重启过），开个新的
-                r = try await client.ask(prompt, sessionID: nil, fast: store.cloudFast, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
+                r = try await client.ask(prompt.replacingOccurrences(of: "（同这个会话前面发过的）", with: "（这次没带）"), sessionID: nil, fast: store.cloudFast, status: { s in Task { @MainActor in self.work(w) { $0.status = s } } },
                                          steps: { st in Task { @MainActor in self.work(w) { $0.steps = st } } })
             }
+            if r.session != store.openCodeSession { store.openCodeTurns = 0 }
             store.openCodeSession = r.session
+            store.openCodeSessionAt = Date()
+            store.openCodeTurns += 1
             work(w) { $0.finished = Date(); $0.status = "完成" }
             let reply = OpenCodeClient.parse(r.reply)
             if !reply.text.isEmpty { say(reply.text) }

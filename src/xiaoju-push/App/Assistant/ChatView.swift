@@ -4,20 +4,11 @@ import SwiftUI
 
 struct ChatView: View {
     @EnvironmentObject var store: Store
-    @StateObject private var model: ChatModel
+    @ObservedObject private var model = ChatModel.shared
     @State private var input = ""
     @FocusState private var focused: Bool
-    let mapping: Mapping?
 
-    init(mapping: Mapping?) {
-        self.mapping = mapping
-        _model = StateObject(wrappedValue: ChatModel(store: Store.shared, mapping: mapping))
-    }
-
-    private var title: String {
-        guard let m = mapping else { return "编码助手" }
-        return m.repo.split(separator: "/").last.map(String.init) ?? m.title
-    }
+    private var mapping: Mapping? { model.mapping }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -40,7 +31,7 @@ struct ChatView: View {
         }
         .background(Theme.bg)
         .safeAreaInset(edge: .bottom) { bottomBar }
-        .navigationTitle(title)
+        .navigationTitle("编码助手")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let m = mapping {

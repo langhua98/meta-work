@@ -147,6 +147,14 @@ final class Store: ObservableObject {
         get { UserDefaults.standard.string(forKey: "openCodeSession") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "openCodeSession") }
     }
+    var openCodeSessionAt: Date {
+        get { UserDefaults.standard.object(forKey: "openCodeSessionAt") as? Date ?? .distantPast }
+        set { UserDefaults.standard.set(newValue, forKey: "openCodeSessionAt") }
+    }
+    var openCodeTurns: Int {
+        get { UserDefaults.standard.integer(forKey: "openCodeTurns") }
+        set { UserDefaults.standard.set(newValue, forKey: "openCodeTurns") }
+    }
 
     init() {
         let d = UserDefaults.standard
