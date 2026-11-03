@@ -67,6 +67,17 @@ final class PushEngine {
     static let maxFileBytes: Int64 = 50 * 1024 * 1024
     static let skipNames: Set<String> = [".git", "node_modules", ".DS_Store"]
 
+    /// 这个相对路径在不在排除列表里：写了路径的（docs/old）按路径前缀比；
+    /// 只写了名字的（7day）哪一层叫这个名字都算，这样「子目录下的 7day」也能跳过
+    static func isExcluded(_ rel: String, by list: [String]) -> Bool {
+        guard !list.isEmpty else { return false }
+        let segs = clean(rel)
+        return list.contains { p in
+            if rel == p || rel.hasPrefix(p + "/") { return true }
+            return !p.contains("/") && segs.contains(p)
+        }
+    }
+
     init(cloudBase: String, cloudToken: String, githubToken: String) {
         var b = cloudBase.trimmingCharacters(in: .whitespacesAndNewlines)
         while b.hasSuffix("/") { b.removeLast() }
@@ -144,6 +155,28 @@ final class PushEngine {
         }
     }
 
+    /// 下载仓库 ZIP（和 GitHub 页面 Code → Download ZIP 一样），存到 to 这个文件。ref 空 = 默认分支
+    func downloadZip(repo: String, ref: String, to dest: URL) async throws {
+        let r = ref.trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/zipball" + (r.isEmpty ? "" : "/" + Self.enc(r))) else {
+            throw PushError("仓库名不对：\(repo)")
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(githubToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 600
+        let (tmp, resp) = try await session.download(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw PushError(code == 404 ? "GitHub 上找不到 \(repo)\(r.isEmpty ? "" : " 的 " + r)（或令牌没权限）" : "下载 ZIP 失败（\(code)）")
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.removeItem(at: dest)
+        try fm.moveItem(at: tmp, to: dest)
+    }
+
     private func dict(_ v: Any?) throws -> [String: Any] {
         guard let d = v as? [String: Any] else { throw PushError("GitHub 返回的内容看不懂") }
         return d
@@ -196,7 +229,7 @@ final class PushEngine {
             let (rel, path) = top
             for c in try await listFolder(path) where !Self.skipNames.contains(c.name) {
                 let r = rel.isEmpty ? c.name : rel + "/" + c.name
-                if excluding.contains(where: { r == $0 || r.hasPrefix($0 + "/") }) { continue }
+                if Self.isExcluded(r, by: excluding) { continue }
                 if c.isFolder {
                     stack.append((r, (path == "/" ? "" : path) + "/" + c.name))
                 } else {
@@ -383,7 +416,7 @@ final class PushEngine {
                 rel = String(rp.dropFirst(prefix.count + 1))
             }
             if PushEngine.clean(rel).contains(where: { Self.skipNames.contains($0) }) { continue }
-            if m.excludedPaths.contains(where: { rel == $0 || rel.hasPrefix($0 + "/") }) { continue }
+            if Self.isExcluded(rel, by: m.excludedPaths) { continue }
             todo.append((rel, rp, sha))
         }
         if todo.count > 3000 { throw PushError("仓库文件太多（\(todo.count) 个），填个「仓库里的目录」只拉一部分") }

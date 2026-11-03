@@ -48,7 +48,7 @@ struct Workspace {
             guard rel.hasPrefix(rootPath) else { continue }
             rel.removeFirst(rootPath.count)
             while rel.hasPrefix("/") { rel.removeFirst() }
-            if excluded.contains(where: { rel == $0 || rel.hasPrefix($0 + "/") }) {
+            if PushEngine.isExcluded(rel, by: excluded) {
                 if isDir { e.skipDescendants() }
                 continue
             }

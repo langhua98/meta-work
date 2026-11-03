@@ -55,8 +55,9 @@ struct Mapping: Codable, Identifiable, Hashable {
     /// 排除的相对路径（已清理），比如 ["cloude审阅", "docs/old"]
     /// 完整路径（/meta work/cloude审阅）和相对路径（cloude审阅）都认
     var excludedPaths: [String] {
-        excludes.split(whereSeparator: { $0 == "\n" || $0 == "," || $0 == "，" })
-            .map { relativeToCloud(String($0)) }
+        // 按换行（含 \r\n）、逗号、顿号分；Swift 里 "\r\n" 是一个字符，不能只比 "\n"
+        excludes.components(separatedBy: CharacterSet(charactersIn: "\n\r\u{2028}\u{2029},，、"))
+            .map { relativeToCloud($0.trimmingCharacters(in: .whitespaces)) }
             .filter { !$0.isEmpty }
     }
 

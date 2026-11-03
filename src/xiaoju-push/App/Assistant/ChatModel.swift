@@ -128,7 +128,7 @@ final class ChatModel: ObservableObject {
 
     /// 从首页点了某个任务：只换当前任务，不自动检查（要检查点「检查改动」或直接说）
     func focus(_ m: Mapping) {
-        guard mapping?.id != m.id else { return }
+        // 同一个任务也换成最新的（设置里改了「不推的文件夹」要马上生效）
         mapping = m
     }
 
@@ -310,7 +310,7 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
-        if let c = Interpreter.keyword(text, tasks: ts, current: mapping) {
+        if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
             if case .say(let q) = c { say(q); return }
             add(.understood(c.summary, source: "直接认出来"))
             await execute(c, original: text)
@@ -327,7 +327,7 @@ final class ChatModel: ObservableObject {
         await loadMemory()
         let thinking = add(.thinking(LocalModelIsLoaded.value ? "本地模型在理解你的话" : "加载本地模型…"))
         let started = Date()
-        let p = Interpreter.prompt(tasks: ts, current: mapping, memoryIndex: memoryIndex, last: lastCommand)
+        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: lastCommand)
         let grammar = Interpreter.grammar(tasks: ts)
         let path = ModelStore.shared.fileURL.path
         let suffix = p.suffix(text)
@@ -369,10 +369,14 @@ final class ChatModel: ObservableObject {
         switch cmd {
         case .check(let t):
             guard let m = taskOrComplain(t) else { return }
-            await check(m)
+            let (mm, extra) = withSpokenExcludes(m, original)
+            await check(mm)
+            offerKeepExcludes(m, extra)
         case .push(let t):
             guard let m = taskOrComplain(t) else { return }
-            await preparePush(m)
+            let (mm, extra) = withSpokenExcludes(m, original)
+            await preparePush(mm)
+            offerKeepExcludes(m, extra)
         case .status:
             await status()
         case .history(let t):
@@ -401,8 +405,37 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// 话里说了「除了 7day 不用检查」「跳过 docs」：这次检查 / 推送先跳过这些文件夹（规则认，不靠小模型）
+    private func withSpokenExcludes(_ m: Mapping, _ text: String) -> (Mapping, [String]) {
+        let extra = ExcludeWords.parse(text, taskNames: tasks.map(\.name))
+            .map { m.relativeToCloud($0) }
+            .filter { !$0.isEmpty && !m.excludedPaths.contains($0) }
+        guard !extra.isEmpty else { return (m, []) }
+        var mm = m
+        for e in extra { mm.addExclude(e) }
+        return (mm, extra)
+    }
+
+    /// 这次跳过的，问一句要不要以后都跳过
+    private func offerKeepExcludes(_ m: Mapping, _ extra: [String]) {
+        guard !extra.isEmpty else { return }
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: "以后也都跳过？", lines: extra.map { "\(m.title) / \($0)" },
+                                   note: "这次已经跳过了。确认后以后检查、推送都不管这些文件夹", tone: .primary, buttons: [
+            CardButton(label: "以后都跳过", style: .primary) { [weak self] in
+                guard let self else { return }
+                var mm = self.store.mappings.first { $0.id == m.id } ?? m
+                for e in extra { mm.addExclude(e) }
+                self.store.upsert(mm)
+                self.resolveCard(cid, "已加入不推的文件夹")
+                Haptics.success()
+            },
+            CardButton(label: "只这一次", style: .plain) { [weak self] in self?.resolveCard(cid, "只跳过这一次") },
+        ])))
+    }
+
     private func taskOrComplain(_ name: String?) -> Mapping? {
-        if let m = TaskRef.find(name, in: tasks, current: mapping) { return m }
+        if let m = TaskRef.find(name, in: tasks, current: currentTask) { return m }
         let names = tasks.map(\.name).joined(separator: "、")
         say(name == nil ? "是哪个任务？有：\(names)" : "没找到任务「\(name!)」。有：\(names)")
         return nil
@@ -835,13 +868,13 @@ final class ChatModel: ObservableObject {
                     else { throw PushError("找不准 \(p)") }
                     try await perform(c, entry: hits[0])
                 case .exclude(let task, let path):
-                    if let m = TaskRef.find(task, in: tasks, current: mapping) {
+                    if let m = TaskRef.find(task, in: tasks, current: currentTask) {
                         var mm = m
                         mm.addExclude(mm.relativeToCloud(path))
                         store.upsert(mm)
                     }
                 case .push(let task):
-                    if let m = TaskRef.find(task, in: tasks, current: mapping), let p = await check(m, quiet: true), !p.changes.isEmpty {
+                    if let m = TaskRef.find(task, in: tasks, current: currentTask), let p = await check(m, quiet: true), !p.changes.isEmpty {
                         await commit(m, p, message: commitMessage(p))
                     }
                 default:

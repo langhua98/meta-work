@@ -83,9 +83,19 @@ enum Interpreter {
 
     static func keyword(_ text: String, tasks: [TaskRef], current: Mapping?) -> Command? {
         let s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !s.isEmpty, s.count <= 24 else { return nil }
+        guard !s.isEmpty else { return nil }
         // 句子里提到的任务名
         let named = tasks.first { s.contains($0.name.lowercased()) }?.name
+        // 「检查代码，除了 7day 不用检查」「推送，跳过 docs」：这次检查 / 推送时跳过，规则认，不交给小模型
+        // （说了「以后」「一直」的是要永久不推，交给下面的 exclude）
+        if s.count <= 80, !["以后", "一直", "永远", "从此"].contains(where: { s.contains($0) }),
+           !ExcludeWords.parse(text, taskNames: tasks.map(\.name)).isEmpty {
+            if ["推送", "推上去", "推一下", "push", "提交"].contains(where: { s.contains($0) }) && !s.contains("检查") {
+                return .push(task: named)
+            }
+            if ["检查", "改动", "对比", "check"].contains(where: { s.contains($0) }) { return .check(task: named) }
+        }
+        guard s.count <= 24 else { return nil }
         // 没说哪个任务也照样认：只有一个任务就用它，多个会反问是哪个
         // 打招呼、道谢这种不用模型，也不交给云端
         if s.count <= 8 {
