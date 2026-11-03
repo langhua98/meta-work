@@ -1,0 +1,49 @@
+name: 测试本地模型
+
+# 在 Linux 上用 llama.cpp 跑手机同款 Qwen3.5-2B，喂 App 里同一份提示词和语法，
+# 检查简单问题由本地模型自己回答、动作翻译对、难事交给云端。
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/xiaoju-push/App/Assistant/Command.swift"
+      - "scripts/local-model-test/**"
+      - ".github/workflows/local-model-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Model cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/model
+          key: qwen3.5-2b-q4km
+      - name: Download model
+        run: |
+          mkdir -p /tmp/model
+          [ -f /tmp/model/m.gguf ] || curl -sSfL -o /tmp/model/m.gguf \
+            https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+          ls -la /tmp/model
+      - name: Download llama.cpp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $(gh release list -R ggml-org/llama.cpp -L 15 --exclude-drafts --json tagName -q '.[].tagName'); do
+            if gh release download "$tag" -R ggml-org/llama.cpp -p "llama-$tag-bin-ubuntu-x64.*" -D /tmp/llama; then
+              echo "llama.cpp $tag"; break
+            fi
+          done
+          cd /tmp/llama && for f in *; do case "$f" in *.zip) unzip -q "$f";; *.tar.gz) tar xzf "$f";; esac; done
+          find /tmp/llama -name llama-server -type f
+      - name: Run test
+        run: |
+          srv=$(find /tmp/llama -name llama-server -type f | head -1)
+          export LD_LIBRARY_PATH=$(dirname "$srv"):$LD_LIBRARY_PATH
+          "$srv" -m /tmp/model/m.gguf -c 3072 --port 8080 -np 1 > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/health && break; sleep 2; done
+          python3 scripts/local-model-test/run.py || { tail -30 /tmp/server.log; exit 1; }
