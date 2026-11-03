@@ -252,7 +252,7 @@ final class ChatModel: ObservableObject {
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
-            let ask = original == s || original.isEmpty ? s : original
+            let ask = original.isEmpty || original == cmd.summary ? s : original
             if cloudReady && store.autoCloud { await askCloud(ask, kind: "ask", auto: true) }
             else if cloudReady { confirmCloud(ask) }
             else { say("这件事要交给云端大模型，先在设置里填 OpenCode 密码。") }
