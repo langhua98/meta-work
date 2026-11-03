@@ -15,7 +15,7 @@ struct ChatView: View {
     }
 
     private var title: String {
-        guard let m = mapping else { return "小橘助手" }
+        guard let m = mapping else { return "编码助手" }
         return m.repo.split(separator: "/").last.map(String.init) ?? m.title
     }
 
@@ -58,7 +58,7 @@ struct ChatView: View {
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("说一句话就行").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text)
-            Text("比如「推送 \(TaskRef.list(store.mappings).first?.name ?? "meta-work")」「找一下发票」「把 /文档/demo 移到 /归档」「记住发票都放 /文档/发票」。会改东西的都会先问你。")
+            Text("比如「推送 \(TaskRef.list(store.mappings).first?.name ?? "meta-work")」「这次改了什么」「找一下 PushEngine」「帮我看看这次改动有没有 bug」「记住提交说明用中文」。会改东西的都会先问你。")
                 .font(.system(size: 14)).foregroundStyle(Theme.muted)
         }
         .padding(14)

@@ -101,7 +101,7 @@ enum Interpreter {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let cur = current.flatMap { c in tasks.first { $0.mapping.id == c.id }?.name }
         var sys = """
-        你是「小橘推送」的指令翻译器。把用户的一句话翻译成一条 JSON 指令，只输出 JSON。
+        你是编码助手「小橘推送」的指令翻译器（帮用户管代码：云盘里的代码文件夹推到 GitHub）。把用户的一句话翻译成一条 JSON 指令，只输出 JSON。
         指令：
         {"do":"push","task":任务名} 推送任务到 GitHub
         {"do":"check","task":任务名} 检查任务有什么改动
@@ -114,7 +114,7 @@ enum Interpreter {
         {"do":"move","path":"/路径","to":"/目标文件夹"} 移动
         {"do":"trash","path":"/路径"} 删除（放进回收站）
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
-        {"do":"cloud","text":"用户原话"} 复杂的事：批量整理、写代码、总结、解释原因、你不确定路径或指的是什么
+        {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
         {"do":"say","text":"问题"} 缺信息时反问，比如没说是哪个任务
         任务：
         \(taskLines.isEmpty ? "（还没有任务）" : taskLines)
@@ -126,10 +126,10 @@ enum Interpreter {
 
         例子：
         把 meta-work 推上去 → {"do":"push","task":"meta-work"}
-        找一下发票 → {"do":"find","keyword":"发票"}
-        把 /文档/demo 移到归档 → {"do":"move","path":"/文档/demo","to":"/归档"}
-        记住发票都放 /文档/发票 → {"do":"remember","text":"发票都放 /文档/发票"}
-        帮我把代码文件夹按项目整理 → {"do":"cloud","text":"帮我把代码文件夹按项目整理"}
+        找一下 PushEngine → {"do":"find","keyword":"PushEngine"}
+        把 /代码/demo 移到归档 → {"do":"move","path":"/代码/demo","to":"/归档"}
+        记住提交说明用中文 → {"do":"remember","text":"提交说明用中文"}
+        帮我看看这次改动有没有 bug → {"do":"cloud","text":"帮我看看这次改动有没有 bug"}
         """
         let prefix = "<|im_start|>system\n\(sys)<|im_end|>\n"
         let lastLine = last.map { "（上一步：\($0)）\n" } ?? ""

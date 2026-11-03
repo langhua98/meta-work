@@ -106,7 +106,7 @@ final class OpenCodeClient {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
-        你在帮 iPhone 上的「小橘推送」App 办事。今天是 \(today)。用中文，简短。
+        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，简短。
         推送任务：
         \(taskLines.isEmpty ? "（没有）" : taskLines)
 
@@ -133,7 +133,7 @@ final class OpenCodeClient {
             p += """
 
             用户说：\(request)
-            手机上的小模型没搞定，你来。你可以用工具看小橘云盘（如果有）。
+            手机上的小模型没搞定，你来。写代码、改 bug、解释、审查都行；可以用工具看小橘云盘和仓库里的代码（如果有）。
             要 App 执行的话，最后输出一个 ```json 代码块，是指令数组（只能用这些）：
             {"do":"push","task":任务名} {"do":"check","task":任务名} {"do":"exclude","task":任务名,"path":"文件夹"}
             {"do":"find","keyword":"…"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}

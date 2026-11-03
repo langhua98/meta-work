@@ -118,7 +118,7 @@ struct HomeView: View {
                     Button { Haptics.tap(); path.append(.assistant) } label: {
                         Image(systemName: "bubble.left.and.text.bubble.right")
                     }
-                    .accessibilityLabel("小橘助手")
+                    .accessibilityLabel("编码助手")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Haptics.tap(); editing = Mapping() } label: {
