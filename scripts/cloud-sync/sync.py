@@ -89,7 +89,7 @@ class Cloud:
             if not cursor:
                 return children
 
-    def walk(self, root):
+    def walk(self, root, exclude=()):
         """返回 [(相对路径, item)]，包括子文件夹里的文件。"""
         out, stack = [], [("", "/" + "/".join(clean(root)))]
         while stack:
@@ -98,6 +98,8 @@ class Cloud:
                 if c["name"] in SKIP_NAMES:
                     continue
                 r = f"{rel}/{c['name']}" if rel else c["name"]
+                if any(r == e or r.startswith(e + "/") for e in exclude):
+                    continue
                 if c["type"] == "folder":
                     stack.append((r, f"{path.rstrip('/')}/{c['name']}"))
                 else:
@@ -139,7 +141,8 @@ def sync_target(cloud, gh, repo, branch, mappings, state, dry):
     entries, record, pushed = [], {}, []
     for m in mappings:
         prefix = "/".join(clean(m.get("path", "")))
-        files = cloud.walk(m["cloud"])
+        exclude = ["/".join(clean(e)) for e in m.get("exclude", []) if clean(e)]
+        files = cloud.walk(m["cloud"], exclude)
         print(f"  {m['cloud']} -> {repo}@{branch}:/{prefix}  ({len(files)} 个文件)")
         for rel, item in files:
             rp = f"{prefix}/{rel}" if prefix else rel

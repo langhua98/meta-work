@@ -32,6 +32,28 @@ struct Mapping: Codable, Identifiable, Hashable {
     var repo = ""      // owner/name
     var branch = ""    // 空 = 仓库默认分支
     var repoPath = ""  // 空 = 仓库根目录
+    /// 不推的文件夹（相对云盘文件夹），每行一个，比如「cloude审阅」
+    var excludes = ""
+
+    init() {}
+
+    // 旧版本存的任务没有 excludes，解码时缺了就用空
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        cloudPath = try c.decodeIfPresent(String.self, forKey: .cloudPath) ?? ""
+        repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+        branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? ""
+        repoPath = try c.decodeIfPresent(String.self, forKey: .repoPath) ?? ""
+        excludes = try c.decodeIfPresent(String.self, forKey: .excludes) ?? ""
+    }
+
+    /// 排除的相对路径（已清理），比如 ["cloude审阅", "docs/old"]
+    var excludedPaths: [String] {
+        excludes.split(whereSeparator: { $0 == "\n" || $0 == "," || $0 == "，" })
+            .map { PushEngine.clean(String($0)).joined(separator: "/") }
+            .filter { !$0.isEmpty }
+    }
 
     var title: String {
         let name = cloudPath.split(separator: "/").last.map(String.init) ?? cloudPath
