@@ -28,6 +28,18 @@ jobs:
           xcodebuild -version
       - name: Install XcodeGen and ldid
         run: brew install xcodegen ldid
+      - name: Download llama.cpp XCFramework
+        working-directory: src/xiaoju-push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLAMA_TAG: b12071
+        run: |
+          gh release download "$LLAMA_TAG" -R ggml-org/llama.cpp -p "llama-$LLAMA_TAG-xcframework.zip" -D /tmp/llama
+          unzip -q "/tmp/llama/llama-$LLAMA_TAG-xcframework.zip" -d /tmp/llama
+          mkdir -p Vendor
+          rm -rf Vendor/llama.xcframework
+          mv /tmp/llama/build-apple/llama.xcframework Vendor/
+          ls Vendor/llama.xcframework
       - name: Build
         working-directory: src/xiaoju-push
         run: |
@@ -45,6 +57,10 @@ jobs:
           # 没签名编译不会写入 entitlements，SideStore 就不知道要 App Group。用 ldid 先假签名写进去（先小组件，再主程序）。
           ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
           ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"
+          if [ ! -d "$app/Frameworks/llama.framework" ]; then
+            echo "::error::llama.framework 没嵌进 App"
+            exit 1
+          fi
           mkdir Payload && cp -R "$app" Payload/
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
           ipa="XiaojuPush-$version-build$GITHUB_RUN_NUMBER.ipa"
