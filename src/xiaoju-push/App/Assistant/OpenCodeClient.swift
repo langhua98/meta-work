@@ -86,8 +86,56 @@ final class OpenCodeClient {
         }
         status("OpenCode 在想…")
         let r = try await send("POST", "/api/session/\(sid)/generate", body: ["prompt": prompt], status: status) as? [String: Any]
-        let text = ((r?["data"] as? [String: Any])?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = ((r?["data"] as? [String: Any])?["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            // generate 只给最终文字；推理模型有时只出思考、文字是空的。改走正常对话：发消息，等它答完再读回复。
+            text = try await promptAndWait(prompt, sid: sid, status: status)
+        }
         return (text, sid)
+    }
+
+    /// POST /api/session/{id}/prompt {text}，然后轮询 /message，直到出现 idle（这一轮跑完）
+    private func promptAndWait(_ prompt: String, sid: String, status: @escaping (String) -> Void) async throws -> String {
+        let before = try await assistantTexts(sid).count
+        _ = try await send("POST", "/api/session/\(sid)/prompt", body: ["text": prompt], status: status)
+        let deadline = Date().addingTimeInterval(300)
+        var waited = 0
+        var last = "", same = 0
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            waited += 2
+            status("OpenCode 在想…（\(waited) 秒）")
+            let page = try await send("GET", "/api/session/\(sid)/message?order=desc&limit=30", body: nil, status: status) as? [String: Any]
+            let items = page?["data"] as? [[String: Any]] ?? []
+            let idle = (items.first?["type"] as? String) == "idle"
+            let texts = Self.texts(items.filter { ($0["type"] as? String) == "assistant" }.reversed())
+            let reply = texts.dropFirst(before).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            // 跑完了（idle），或者回复 10 秒没再变
+            same = (!reply.isEmpty && reply == last) ? same + 1 : 0
+            last = reply
+            if !reply.isEmpty && (idle || same >= 5) { return reply }
+        }
+        throw PushError("OpenCode 5 分钟都没答完")
+    }
+
+    private func assistantTexts(_ sid: String) async throws -> [String] {
+        let page = try await send("GET", "/api/session/\(sid)/message?order=desc&limit=200&type=assistant", body: nil, status: { _ in }) as? [String: Any]
+        return Self.texts((page?["data"] as? [[String: Any]] ?? []).reversed())
+    }
+
+    /// 每条 assistant 消息里所有 text 字段拼起来（不认识的结构也能找到文字；跳过思考 reasoning）
+    static func texts(_ items: [[String: Any]]) -> [String] {
+        func walk(_ v: Any, _ out: inout [String]) {
+            if let d = v as? [String: Any] {
+                if let t = d["type"] as? String, t.contains("reasoning") { return }
+                for (k, x) in d {
+                    if k == "text", let s = x as? String { out.append(s) } else { walk(x, &out) }
+                }
+            } else if let a = v as? [Any] {
+                for x in a { walk(x, &out) }
+            }
+        }
+        return items.map { var out: [String] = []; walk($0, &out); return out.joined() }.filter { !$0.isEmpty }
     }
 
     // MARK: 提示词和回复

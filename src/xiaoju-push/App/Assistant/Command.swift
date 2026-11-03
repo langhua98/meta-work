@@ -63,7 +63,9 @@ struct TaskRef {
     }
 
     static func find(_ name: String?, in tasks: [TaskRef], current: Mapping?) -> Mapping? {
-        guard let raw = name?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return current }
+        guard let raw = name?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else {
+            return current ?? (tasks.count == 1 ? tasks[0].mapping : nil)
+        }
         let n = raw.lowercased().replacingOccurrences(of: " ", with: "")
         func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "") }
         if let t = tasks.first(where: { norm($0.name) == n }) { return t.mapping }
@@ -81,20 +83,20 @@ enum Interpreter {
         guard !s.isEmpty, s.count <= 24 else { return nil }
         // 句子里提到的任务名
         let named = tasks.first { s.contains($0.name.lowercased()) }?.name
-        let hasTask = named != nil || current != nil
+        // 没说哪个任务也照样认：只有一个任务就用它，多个会反问是哪个
         if ["什么模型", "你是谁", "哪个模型", "你是什么"].contains(where: { s.contains($0) }) {
             return .say("我是手机上的本地模型 Qwen3.5-2B（不联网），负责听懂你的话、管推送和云盘文件。写代码、改 bug、解释代码这些难事会交给云端的 OpenCode（DeepSeek）。")
         }
         let negative = ["不推", "别推", "不要推", "排除"].contains { s.contains($0) }
         if negative { return nil }
-        if hasTask, ["推送", "推上去", "推一下", "推吧", "push", "提交"].contains(where: { s.contains($0) }) {
+        if ["推送记录", "历史", "推过什么"].contains(where: { s.contains($0) }) { return .history(task: named) }
+        if ["推送", "推上去", "推一下", "推吧", "push", "提交"].contains(where: { s.contains($0) }) {
             return .push(task: named)
         }
-        if hasTask, ["检查", "看看改动", "有什么改动", "改了什么", "有改动吗", "check"].contains(where: { s.contains($0) }) {
+        if ["检查", "看看改动", "有什么改动", "改了什么", "有改动吗", "check"].contains(where: { s.contains($0) }) {
             return .check(task: named)
         }
         if ["全部任务", "所有任务", "哪些任务", "待推"].contains(where: { s.contains($0) }) { return .status }
-        if hasTask, ["推送记录", "历史", "推过什么"].contains(where: { s.contains($0) }) { return .history(task: named) }
         return nil
     }
 
