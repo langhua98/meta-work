@@ -93,22 +93,52 @@ final class OpenCodeClient {
 
     /// 发一句话，等 OpenCode 回完。sessionID 传进来就接着用那个会话。
     /// OpenCode 2 的接口都在 /api 下：POST /api/session 建会话，POST /api/session/{id}/prompt 发消息，GET /api/session/{id}/message 读结果。
-    func ask(_ prompt: String, sessionID: String?, status: @escaping (String) -> Void,
+    /// 快速模式用的模型（opencode.json 里的 small_model），否则用 Space 默认的 deepseek-v4-pro
+    static let fastModel = (provider: "deepseek", id: "deepseek-flash")
+
+    func ask(_ prompt: String, sessionID: String?, fast: Bool = true, status: @escaping (String) -> Void,
              steps: @escaping ([CloudStep]) -> Void = { _ in }) async throws -> (reply: String, session: String) {
         var sid = sessionID ?? ""
         if sid.isEmpty {
             status("连接 OpenCode…")
-            let s = try await send("POST", "/api/session", body: ["title": "小橘推送"], status: status) as? [String: Any]
+            // 允许读写工作目录外（比如 /tmp），不然它会停下来等一个没人点的批准
+            let body: [String: Any] = ["title": "小橘推送",
+                                       "permissions": [["action": "external_directory", "resource": "*", "effect": "allow"]]]
+            let s = try await send("POST", "/api/session", body: body, status: status) as? [String: Any]
             sid = (s?["data"] as? [String: Any])?["id"] as? String ?? s?["id"] as? String ?? ""
             if sid.isEmpty { throw PushError("OpenCode 没给会话号") }
         }
+        await setModel(sid, fast: fast)
         status("OpenCode 在想…")
         let text = try await promptAndWait(prompt, sid: sid, status: status, steps: steps)
         return (text, sid)
     }
 
-    /// POST /api/session/{id}/prompt {text}，然后每 2 秒读 /message：
-    /// 新出现的工具调用（命令、读文件…）实时交给 steps，跑完（idle 或回答 10 秒不变）返回最后的回答
+    /// 换模型。接口的模型写法有字符串和对象两种，都试一下；不成就用默认的，不耽误干活
+    private func setModel(_ sid: String, fast: Bool) async {
+        let m = fast ? Self.fastModel : (provider: "deepseek", id: "deepseek-v4-pro")
+        let forms: [Any] = ["\(m.provider)/\(m.id)", ["providerID": m.provider, "id": m.id]]
+        for f in forms {
+            if (try? await send("POST", "/api/session/\(sid)/model", body: ["model": f], status: { _ in })) != nil { return }
+        }
+    }
+
+    /// 有等批准的就直接答：工作目录外的读写放行，别的（比如死循环提醒）拒绝，让它换个办法，不干等
+    private func answerPermissions(_ sid: String) async {
+        guard let page = try? await send("GET", "/api/session/\(sid)/permission", body: nil, status: { _ in }) as? [String: Any],
+              let list = page["data"] as? [[String: Any]] else { return }
+        for p in list {
+            guard let id = p["id"] as? String else { continue }
+            let action = p["action"] as? String ?? ""
+            let body: [String: Any] = action == "external_directory"
+                ? ["decision": "once"]
+                : ["decision": "reject", "message": "用户不在线，不能批准。换个办法，或者直接给出结论。"]
+            _ = try? await send("POST", "/api/session/\(sid)/permission/\(id)/reply", body: body, status: { _ in })
+        }
+    }
+
+    /// POST /api/session/{id}/prompt {text}，然后每秒读 /message：
+    /// 新出现的工具调用（命令、读文件…）实时交给 steps，跑完（idle 或回答 8 秒不变）返回最后的回答
     private func promptAndWait(_ prompt: String, sid: String, status: @escaping (String) -> Void,
                                steps: @escaping ([CloudStep]) -> Void) async throws -> String {
         let old = try await messages(sid, limit: 200)
@@ -119,9 +149,10 @@ final class OpenCodeClient {
         var waited = 0
         var last = "", same = 0
         while Date() < deadline {
-            try await Task.sleep(nanoseconds: 2_000_000_000)
-            waited += 2
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            waited += 1
             status("OpenCode 在干活…（\(waited) 秒）")
+            if waited % 3 == 0 { await answerPermissions(sid) }
             let items = try await messages(sid, limit: 60)
             steps(Self.steps(items).filter { !oldSteps.contains($0.id) })
             let idle = (items.last?["type"] as? String) == "idle"
@@ -130,7 +161,7 @@ final class OpenCodeClient {
             let reply = replies.count > before ? (replies.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
             same = (!reply.isEmpty && reply == last) ? same + 1 : 0
             last = reply
-            if !reply.isEmpty && (idle || same >= 5) { return Self.mask(reply) }
+            if !reply.isEmpty && (idle || same >= 8) { return Self.mask(reply) }
         }
         throw PushError("OpenCode 10 分钟都没做完")
     }
@@ -234,7 +265,7 @@ final class OpenCodeClient {
         let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
-        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
+        你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；要快：能一步做完就别分几步，不要先做计划、头脑风暴或写测试，不要向用户提问，有不确定就按最可能的意思直接做；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。
         推送任务：
         \(taskLines.isEmpty ? "（没有）" : taskLines)
 

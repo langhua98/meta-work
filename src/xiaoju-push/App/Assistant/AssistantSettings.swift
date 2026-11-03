@@ -63,8 +63,9 @@ struct AssistantSettingsSections: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
             SecureField("OpenCode 密码", text: $store.openCodePassword)
             Toggle("本地搞不定自动问云端", isOn: $store.autoCloud).tint(Theme.greenFill)
+            Toggle("快速模式", isOn: $store.cloudFast).tint(Theme.greenFill)
         } header: { Text("云端大模型（HF 上的 OpenCode）") } footer: {
-            Text("密码是 Space 里的 OPENCODE_SERVER_PASSWORD。云端只出方案，改东西前都会先问你。")
+            Text("快速模式用 DeepSeek Flash，快很多；关掉用 V4 Pro，难题更稳但慢。密码是 Space 里的 OPENCODE_SERVER_PASSWORD。云端只出方案，改东西前都会先问你。")
         }
     }
 
