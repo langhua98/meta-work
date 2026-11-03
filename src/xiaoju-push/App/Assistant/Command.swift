@@ -82,6 +82,9 @@ enum Interpreter {
         // 句子里提到的任务名
         let named = tasks.first { s.contains($0.name.lowercased()) }?.name
         let hasTask = named != nil || current != nil
+        if ["什么模型", "你是谁", "哪个模型", "你是什么"].contains(where: { s.contains($0) }) {
+            return .say("我是手机上的本地模型 Qwen3.5-2B（不联网），负责听懂你的话、管推送和云盘文件。写代码、改 bug、解释代码这些难事会交给云端的 OpenCode（DeepSeek）。")
+        }
         let negative = ["不推", "别推", "不要推", "排除"].contains { s.contains($0) }
         if negative { return nil }
         if hasTask, ["推送", "推上去", "推一下", "推吧", "push", "提交"].contains(where: { s.contains($0) }) {
