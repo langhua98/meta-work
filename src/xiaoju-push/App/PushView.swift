@@ -82,7 +82,7 @@ struct PushView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "folder").foregroundStyle(Theme.blue)
-                Text("云盘 \(mapping.cloudPath)").foregroundStyle(Theme.text).lineLimit(1)
+                Text(mapping.sourceLabel).foregroundStyle(Theme.text).lineLimit(1)
             }
             HStack(spacing: 8) {
                 Image(systemName: "arrow.turn.down.right").foregroundStyle(Theme.muted)

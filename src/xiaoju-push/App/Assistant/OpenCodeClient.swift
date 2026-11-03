@@ -265,7 +265,7 @@ final class OpenCodeClient {
 
     static func prompt(request: String, kind: String, tasks: [TaskRef], memoryIndex: String,
                        memoryFiles: [(String, String)], recent: [String], today: String, followUp: Bool = false) -> String {
-        let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
+        let taskLines = tasks.map { "- \($0.name)：\($0.mapping.sourceLabel) → \($0.mapping.repo)" }.joined(separator: "\n")
         let files = memoryFiles.map { "### \($0.0)\n\($0.1)" }.joined(separator: "\n\n")
         var p = """
         你是 iPhone 上编码助手「小橘推送」背后的大模型：用户的代码在小橘云盘里，App 负责推到 GitHub。今天是 \(today)。用中文，最后的回答只写结论，几句话就够；要快：能一步做完就别分几步，不要先做计划、头脑风暴或写测试，不要加载技能，不要向用户提问，有不确定就按最可能的意思直接做；不要贴文件内容、命令输出、技能说明，更不要写出任何令牌或密码。

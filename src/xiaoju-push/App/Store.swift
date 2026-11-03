@@ -35,6 +35,8 @@ struct Mapping: Codable, Identifiable, Hashable {
     var repoPath = ""  // 空 = 仓库根目录
     /// 不推的文件夹（相对云盘文件夹），每行一个，比如「cloude审阅」
     var excludes = ""
+    /// true = 代码在手机工作区（粘贴进来整理的），false = 小橘云盘文件夹
+    var workspace = false
 
     init() {}
 
@@ -47,6 +49,7 @@ struct Mapping: Codable, Identifiable, Hashable {
         branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? ""
         repoPath = try c.decodeIfPresent(String.self, forKey: .repoPath) ?? ""
         excludes = try c.decodeIfPresent(String.self, forKey: .excludes) ?? ""
+        workspace = try c.decodeIfPresent(Bool.self, forKey: .workspace) ?? false
     }
 
     /// 排除的相对路径（已清理），比如 ["cloude审阅", "docs/old"]
@@ -76,9 +79,13 @@ struct Mapping: Codable, Identifiable, Hashable {
     }
 
     var title: String {
-        let name = cloudPath.split(separator: "/").last.map(String.init) ?? cloudPath
+        let src = workspace ? repo : cloudPath
+        let name = src.split(separator: "/").last.map(String.init) ?? src
         return name.isEmpty ? "未命名" : name
     }
+
+    /// 代码从哪来，给界面显示
+    var sourceLabel: String { workspace ? "手机工作区" : "云盘 \(cloudPath)" }
 
     var target: String {
         var s = repo.isEmpty ? "（没选仓库）" : repo

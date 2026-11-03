@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-// 界面风格：仿 GitHub 手机 App（深色 / 浅色跟着系统），小橘橙做品牌色。
+// 界面风格：照 Claude App 的暖灰配色（深色 / 浅色跟着系统），陶土橙做品牌色。
 // 绿色只给推送和成功，红色只给删除和失败。
 
 extension Color {
@@ -19,31 +19,38 @@ extension UIColor {
 }
 
 enum Theme {
-    static let bg = Color(dark: 0x0d1117, light: 0xf6f8fa)
-    static let card = Color(dark: 0x161b22, light: 0xffffff)
-    static let raised = Color(dark: 0x21262d, light: 0xf6f8fa)
-    static let border = Color(dark: 0x30363d, light: 0xd0d7de)
-    static let divider = Color(dark: 0x21262d, light: 0xd8dee4)
-    static let text = Color(dark: 0xe6edf3, light: 0x1f2328)
-    static let muted = Color(dark: 0x8d96a0, light: 0x59636e)
-    static let faint = Color(dark: 0x6e7681, light: 0x818b98)
-    static let blue = Color(dark: 0x4493f8, light: 0x0969da)
-    static let blueFill = Color(dark: 0x1f6feb, light: 0x0969da)
-    static let blueSoft = Color(dark: 0x1f2a37, light: 0xddf4ff)
-    static let blueText = Color(dark: 0x79b8ff, light: 0x0969da)
-    static let green = Color(dark: 0x3fb950, light: 0x1a7f37)
-    static let greenFill = Color(dark: 0x238636, light: 0x1f883d)
-    static let greenSoft = Color(dark: 0x12261e, light: 0xdafbe1)
-    static let greenText = Color(dark: 0x7ee787, light: 0x116329)
-    static let red = Color(dark: 0xf85149, light: 0xd1242f)
-    static let redFill = Color(dark: 0xda3633, light: 0xcf222e)
-    static let redSoft = Color(dark: 0x3c1618, light: 0xffebe9)
-    static let redText = Color(dark: 0xffa198, light: 0xa40e26)
-    static let yellow = Color(dark: 0xe3b341, light: 0x9a6700)
-    static let yellowSoft = Color(dark: 0x3b2e10, light: 0xfff8c5)
-    static let orange = Color(red: 0xf0 / 255, green: 0x88 / 255, blue: 0x3e / 255)
-    static let orangeSoft = Color(dark: 0x2d1d0f, light: 0xfff1e5)
-    static let orangeText = Color(dark: 0xf0883e, light: 0xbc4c00)
+    // 照 Claude App 的暖灰：深色是炭灰底，浅色是象牙白底；陶土橙做品牌色
+    static let bg = Color(dark: 0x262624, light: 0xfaf9f5)
+    static let card = Color(dark: 0x30302e, light: 0xffffff)
+    static let raised = Color(dark: 0x3d3c39, light: 0xf0eee6)
+    static let bubble = Color(dark: 0x3a3936, light: 0xf0eee6)
+    static let border = Color(dark: 0x45443f, light: 0xe3e1d8)
+    static let divider = Color(dark: 0x3a3936, light: 0xebe9e1)
+    static let text = Color(dark: 0xecebe6, light: 0x1f1e1d)
+    static let muted = Color(dark: 0xa6a39b, light: 0x6b6963)
+    static let faint = Color(dark: 0x7a776f, light: 0x9a978f)
+    static let blue = Color(dark: 0x7fa7d9, light: 0x2f6db5)
+    static let blueFill = Color(dark: 0x3f6fa8, light: 0x2f6db5)
+    static let blueSoft = Color(dark: 0x2b3440, light: 0xe6eef8)
+    static let blueText = Color(dark: 0x9cbde6, light: 0x2f6db5)
+    static let green = Color(dark: 0x8fbf8a, light: 0x3d7a37)
+    static let greenFill = Color(dark: 0x4f7a4a, light: 0x3d7a37)
+    static let greenSoft = Color(dark: 0x2f3a2d, light: 0xe5f0e2)
+    static let greenText = Color(dark: 0x9fcb99, light: 0x2f6229)
+    static let red = Color(dark: 0xe0786b, light: 0xb53b2e)
+    static let redFill = Color(dark: 0xb5483b, light: 0xb53b2e)
+    static let redSoft = Color(dark: 0x3d2724, light: 0xf8e6e3)
+    static let redText = Color(dark: 0xeba196, light: 0x9a2f24)
+    static let yellow = Color(dark: 0xe6b877, light: 0x8a5a12)
+    static let yellowSoft = Color(dark: 0x3d3527, light: 0xf7ecd9)
+    /// 品牌色（陶土橙）：发送键、主按钮、开关
+    static let orange = Color(dark: 0xd97757, light: 0xc96442)
+    /// 没字时的发送键（暗一点的陶土色）
+    static let orangeDim = Color(dark: 0x6e4537, light: 0xe8c8bb)
+    static let orangeSoft = Color(dark: 0x3a2a24, light: 0xf6e6df)
+    static let orangeText = Color(dark: 0xe8916f, light: 0xa94d2c)
+    /// 橙色按钮上的字
+    static let onAccent = Color(dark: 0x1f1e1d, light: 0xffffff)
     static let mono = Font.system(size: 12, design: .monospaced)
 }
 
@@ -106,7 +113,7 @@ struct BigButtonStyle: ButtonStyle {
 
     private var bg: Color {
         switch kind {
-        case .push: return Theme.greenFill
+        case .push: return Theme.orange
         case .blue: return Theme.blueFill
         case .plain: return Theme.raised
         case .danger: return Theme.raised
@@ -115,7 +122,8 @@ struct BigButtonStyle: ButtonStyle {
 
     private var fg: Color {
         switch kind {
-        case .push, .blue: return .white
+        case .push: return Theme.onAccent
+        case .blue: return .white
         case .plain: return Theme.text
         case .danger: return Theme.redText
         }
@@ -188,7 +196,7 @@ struct CheckCircle: View {
     var body: some View {
         ZStack {
             Circle().stroke(Theme.faint, lineWidth: 2).opacity(on ? 0 : 1)
-            Circle().fill(Theme.blueFill).scaleEffect(on ? 1 : 0.3).opacity(on ? 1 : 0)
+            Circle().fill(Theme.orange).scaleEffect(on ? 1 : 0.3).opacity(on ? 1 : 0)
             Image(systemName: "checkmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(.white)
                 .scaleEffect(on ? 1 : 0.3).opacity(on ? 1 : 0)
         }

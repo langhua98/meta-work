@@ -138,7 +138,7 @@ enum Interpreter {
     // MARK: 模型
 
     static func prompt(tasks: [TaskRef], current: Mapping?, memoryIndex: String, last: String?) -> (prefix: String, suffix: (String) -> String) {
-        let taskLines = tasks.map { "- \($0.name)：云盘 \($0.mapping.cloudPath) → \($0.mapping.repo)" }.joined(separator: "\n")
+        let taskLines = tasks.map { "- \($0.name)：\($0.mapping.sourceLabel) → \($0.mapping.repo)" }.joined(separator: "\n")
         let cur = current.flatMap { c in tasks.first { $0.mapping.id == c.id }?.name }
         var sys = """
         你是编码助手「小橘推送」里跑在 iPhone 上的本地模型 Qwen3.5-2B（不联网）。App 帮用户管代码：云盘里的代码文件夹推到 GitHub；写代码、改 bug、解释代码这类难事交给云端的 OpenCode（DeepSeek，能跑命令、读写仓库、画图发文件）。

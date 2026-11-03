@@ -256,6 +256,15 @@ final class PushEngine {
             branch = (try dict(try await github("GET", "/repos/\(repo)"))["default_branch"] as? String) ?? "main"
         }
         let prefix = Self.clean(m.repoPath).joined(separator: "/")
+        if m.workspace {
+            // 工作区：本地算 blob，和上次推送 / 拉取时记下的比
+            let ws = Workspace(mapping: m)
+            return ws.files().filter { rel in
+                let rp = prefix.isEmpty ? rel : prefix + "/" + rel
+                guard let d = ws.read(rel), let old = pushed["\(repo)@\(branch):\(rp)"] else { return true }
+                return Self.gitBlobSHA(d) != old.blob
+            }.count
+        }
         let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
         return files.filter { rel, item in
             if (item.size ?? 0) > Self.maxFileBytes { return false }
@@ -288,14 +297,31 @@ final class PushEngine {
             }
         }
 
-        progress("读取云盘 \(m.cloudPath)…")
-        let files = try await walk(m.cloudPath, excluding: m.excludedPaths)
+        // 文件来源：云盘文件夹，或者手机里的工作区
+        struct Source { let rel: String; let size: Int64; let sha256: String?; let load: () async throws -> Data }
+        var files: [Source] = []
+        if m.workspace {
+            progress("读取工作区…")
+            let ws = Workspace(mapping: m)
+            files = ws.files().map { rel in
+                Source(rel: rel, size: ws.size(rel), sha256: nil, load: {
+                    guard let d = ws.read(rel) else { throw PushError("读不了工作区里的 \(rel)") }
+                    return d
+                })
+            }
+        } else {
+            progress("读取云盘 \(m.cloudPath)…")
+            files = try await walk(m.cloudPath, excluding: m.excludedPaths).map { rel, item in
+                Source(rel: rel, size: item.size ?? 0, sha256: item.sha256, load: { try await self.download(item) })
+            }
+        }
         let prefix = Self.clean(m.repoPath).joined(separator: "/")
         var changes: [Change] = []
         var skipped: [String] = []
         var confirmed: [String: Pushed] = [:]
         var unchanged = 0
-        for (i, (rel, item)) in files.enumerated() {
+        for (i, item) in files.enumerated() {
+            let rel = item.rel
             let rp = prefix.isEmpty ? rel : prefix + "/" + rel
             let key = "\(repo)@\(branch):\(rp)"
             let cur = inRepo[rp]
@@ -303,13 +329,13 @@ final class PushEngine {
                 unchanged += 1
                 continue
             }
-            if (item.size ?? 0) > Self.maxFileBytes {
+            if item.size > Self.maxFileBytes {
                 skipped.append(rp + "（超过 50MB）")
                 continue
             }
             if Task.isCancelled { throw PushError("已取消") }
             progress("比较 \(i + 1)/\(files.count)：\(rel)")
-            let data = try await download(item)
+            let data = try await item.load()
             let blob = Self.gitBlobSHA(data)
             if blob == cur?.sha {
                 unchanged += 1
@@ -324,6 +350,63 @@ final class PushEngine {
         }
         return Plan(repo: repo, branch: branch, head: head, changes: changes, unchanged: unchanged,
                     skipped: skipped, confirmed: confirmed)
+    }
+
+    /// 从 GitHub 拉到工作区：仓库里（仓库目录下）的文件写进手机。
+    /// 本地改过还没推的文件不覆盖，返回（拉下来的记录, 拉了几个, 没覆盖的文件）。
+    func pull(_ m: Mapping, pushed: [String: Pushed], progress: @escaping (String) -> Void) async throws
+        -> (records: [String: Pushed], written: Int, kept: [String]) {
+        let repo = m.repo.trimmingCharacters(in: .whitespaces)
+        guard repo.contains("/") else { throw PushError("仓库要写成 owner/name") }
+        var branch = m.branch.trimmingCharacters(in: .whitespaces)
+        if branch.isEmpty {
+            branch = (try dict(try await github("GET", "/repos/\(repo)"))["default_branch"] as? String) ?? "main"
+        }
+        progress("读取 \(repo) 的文件列表…")
+        guard let ref = try await github("GET", "/repos/\(repo)/git/ref/heads/\(Self.enc(branch))", allow404: true) else {
+            throw PushError("\(repo) 没有分支 \(branch)")
+        }
+        let head = (try dict(try dict(ref)["object"])["sha"] as? String) ?? ""
+        let commit = try dict(try await github("GET", "/repos/\(repo)/git/commits/\(head)"))
+        let baseTree = (try dict(commit["tree"])["sha"] as? String) ?? ""
+        let tree = try dict(try await github("GET", "/repos/\(repo)/git/trees/\(baseTree)?recursive=1"))
+        let prefix = Self.clean(m.repoPath).joined(separator: "/")
+        let ws = Workspace(mapping: m)
+        try ws.ensure()
+        var todo: [(rel: String, rp: String, sha: String)] = []
+        for e in tree["tree"] as? [[String: Any]] ?? [] where e["type"] as? String == "blob" {
+            guard let rp = e["path"] as? String, let sha = e["sha"] as? String else { continue }
+            if (e["size"] as? Int ?? 0) > 5 * 1024 * 1024 { continue }
+            var rel = rp
+            if !prefix.isEmpty {
+                guard rp.hasPrefix(prefix + "/") else { continue }
+                rel = String(rp.dropFirst(prefix.count + 1))
+            }
+            if PushEngine.clean(rel).contains(where: { Self.skipNames.contains($0) }) { continue }
+            if m.excludedPaths.contains(where: { rel == $0 || rel.hasPrefix($0 + "/") }) { continue }
+            todo.append((rel, rp, sha))
+        }
+        if todo.count > 3000 { throw PushError("仓库文件太多（\(todo.count) 个），填个「仓库里的目录」只拉一部分") }
+        var records: [String: Pushed] = [:]
+        var written = 0
+        var kept: [String] = []
+        for (i, t) in todo.enumerated() {
+            if Task.isCancelled { throw PushError("已取消") }
+            let key = "\(repo)@\(branch):\(t.rp)"
+            if let local = ws.read(t.rel) {
+                let lb = Self.gitBlobSHA(local)
+                if lb == t.sha { records[key] = Pushed(sha256: "", blob: t.sha); continue }
+                // 本地改过（和上次记下的不一样）就留着
+                if let old = pushed[key], old.blob != lb { kept.append(t.rel); continue }
+                if pushed[key] == nil { kept.append(t.rel); continue }
+            }
+            progress("拉取 \(i + 1)/\(todo.count)：\(t.rel)")
+            let data = try await repoBlob(repo, t.sha)
+            try ws.write(t.rel, data)
+            records[key] = Pushed(sha256: "", blob: t.sha)
+            written += 1
+        }
+        return (records, written, kept)
     }
 
     /// 上传改动并提交；返回提交的网址。分支在这期间被别人推过，就在新的 HEAD 上重做（不强推）。

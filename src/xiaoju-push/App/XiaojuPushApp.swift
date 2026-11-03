@@ -10,7 +10,7 @@ struct XiaojuPushApp: App {
             HomeView()
                 .environmentObject(store)
                 .preferredColorScheme(store.colorScheme)
-                .tint(Theme.blue)
+                .tint(Theme.orange)
         }
         .backgroundTask(.appRefresh(BackgroundCheck.id)) { await BackgroundCheck.run() }
     }
@@ -119,7 +119,7 @@ struct HomeView: View {
                     .accessibilityLabel("编码助手")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { Haptics.tap(); editing = Mapping() } label: {
+                    Button { Haptics.tap(); var m = Mapping(); m.workspace = true; editing = m } label: {
                         Image(systemName: "plus").font(.system(size: 15, weight: .bold))
                             .foregroundStyle(Color.black)
                             .frame(width: 30, height: 30)
@@ -221,7 +221,7 @@ struct TaskRow: View {
                     .font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
                 HStack(spacing: 6) {
                     Pill(text: mapping.branch.isEmpty ? "默认分支" : mapping.branch, mono: !mapping.branch.isEmpty)
-                    Text("云盘 \(mapping.cloudPath)").font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(1)
+                    Text(mapping.sourceLabel).font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
