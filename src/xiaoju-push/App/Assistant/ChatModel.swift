@@ -329,7 +329,7 @@ final class ChatModel: ObservableObject {
             if cloudReady && store.autoCloud {
                 await askCloud(text, kind: "ask", auto: true)
             } else {
-                say("这句话我要用本地模型才听得懂。去「设置 → 本地模型」下载一下（1.28 GB），或者说得简单点，比如「推送 \(ts.first?.name ?? "任务名")」。")
+                say("这句话我要用本地模型才听得懂。去「设置 → 本地模型」下载一下（\(ByteCountFormatter.string(fromByteCount: ModelStore.shared.info.bytes, countStyle: .file))），或者说得简单点，比如「推送 \(ts.first?.name ?? "任务名")」。")
             }
             return
         }
@@ -345,7 +345,9 @@ final class ChatModel: ObservableObject {
             try await LocalModel.shared.load(path: path)
             LocalModelIsLoaded.value = true
             update(thinking, .thinking("本地模型在理解你的话"))
-            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
+            // 提示里写的是 2B，换成现在用的模型名（问「你是谁」时答对）
+            let prefix = p.prefix.replacingOccurrences(of: "Qwen3.5-2B", with: ModelStore.shared.info.short)
+            out = try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
         } catch {
             remove(thinking)
             add(.error(error.localizedDescription))

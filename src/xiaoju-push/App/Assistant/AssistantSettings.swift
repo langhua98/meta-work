@@ -5,6 +5,7 @@ import SwiftUI
 struct AssistantSettingsSections: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var models = ModelStore.shared
+    @AppStorage("memoryHUD") private var showHUD = true
 
     var body: some View {
         Group {
@@ -18,35 +19,55 @@ struct AssistantSettingsSections: View {
 
     private var modelSection: some View {
         Section {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(models.info.name)
-                    Text(ByteCountFormatter.string(fromByteCount: models.info.bytes, countStyle: .file))
-                        .font(.footnote).foregroundStyle(Theme.muted)
-                }
-                Spacer()
-                if models.downloaded {
-                    Text("已下载").font(.footnote.weight(.semibold)).foregroundStyle(Theme.green)
-                }
-            }
-            if let p = models.progress {
-                VStack(alignment: .leading, spacing: 4) {
-                    ProgressView(value: p).tint(Theme.orange)
-                    Text("\(ByteCountFormatter.string(fromByteCount: models.received, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: models.info.bytes, countStyle: .file))")
-                        .font(.footnote).foregroundStyle(Theme.muted)
-                }
-                Button("取消下载", role: .destructive) { Haptics.tap(); models.cancel() }
-            } else if models.downloaded {
-                Button("删除模型", role: .destructive) { Haptics.medium(); models.delete() }
-            } else {
-                Button("下载（只用 Wi-Fi）") { Haptics.tap(); models.download() }
-            }
+            ForEach(ModelInfo.all) { m in modelRow(m) }
+            Toggle("屏幕底部显示内存占用", isOn: $showHUD).tint(Theme.orange)
             if !models.error.isEmpty {
                 Text(models.error).font(.footnote).foregroundStyle(Theme.redText)
             }
         } header: { Text("本地模型") } footer: {
-            Text("在手机上听懂你的话，不联网。只在说话时加载，空闲 2 分钟或切到后台就释放内存。不下载也能用简单的话（推送、检查）。")
+            Text("点一个用它（打勾的是在用的）。在手机上听懂你的话，不联网。只在说话时加载，空闲 2 分钟或切到后台就释放内存。4B 更聪明但更占内存，看屏幕上的内存浮标就知道跑不跑得动。")
         }
+    }
+
+    private func modelRow(_ m: ModelInfo) -> some View {
+        let on = models.selectedID == m.id
+        let have = models.isDownloaded(m)
+        let busy = models.downloadingID == m.id
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                Haptics.select()
+                models.selectedID = m.id
+            } label: {
+                HStack(spacing: 12) {
+                    CheckCircle(on: on)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(m.name).foregroundStyle(Theme.text)
+                        Text("\(ByteCountFormatter.string(fromByteCount: m.bytes, countStyle: .file)) · \(m.note)")
+                            .font(.footnote).foregroundStyle(Theme.muted)
+                    }
+                    Spacer()
+                    if have { Text("已下载").font(.footnote.weight(.semibold)).foregroundStyle(Theme.green) }
+                }
+            }
+            .buttonStyle(.plain)
+            if busy, let p = models.progress {
+                ProgressView(value: p).tint(Theme.orange)
+                HStack {
+                    Text("\(ByteCountFormatter.string(fromByteCount: models.received, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: m.bytes, countStyle: .file))")
+                        .font(.footnote).foregroundStyle(Theme.muted)
+                    Spacer()
+                    Button("取消", role: .destructive) { Haptics.tap(); models.cancel() }.buttonStyle(.borderless)
+                }
+            } else if have {
+                Button("删除这个模型", role: .destructive) { Haptics.medium(); models.delete(m) }
+                    .buttonStyle(.borderless).font(.footnote)
+            } else {
+                Button("下载（只用 Wi-Fi）") { Haptics.tap(); models.download(m) }
+                    .buttonStyle(.borderless).font(.footnote.weight(.semibold))
+                    .disabled(models.downloading)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private var organizeSection: some View {

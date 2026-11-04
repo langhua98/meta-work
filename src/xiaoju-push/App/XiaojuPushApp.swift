@@ -11,6 +11,7 @@ struct XiaojuPushApp: App {
                 .environmentObject(store)
                 .preferredColorScheme(store.colorScheme)
                 .tint(Theme.orange)
+                .onAppear { MemoryHUD.install() }
         }
         .backgroundTask(.appRefresh(BackgroundCheck.id)) { await BackgroundCheck.run() }
     }

@@ -6,24 +6,46 @@ import llama
 // 不常驻：要用时才加载，空闲 2 分钟、App 进后台、内存告警时释放。
 // 每次只把一句话翻成一条 JSON 指令：用 GBNF 语法锁死输出格式，模型写不出格式以外的东西。
 
-struct ModelInfo {
+struct ModelInfo: Identifiable, Hashable {
+    let id: String
     let name: String
+    let short: String
+    let note: String
     let file: String
     let url: URL
     let bytes: Int64
 
     static let qwen = ModelInfo(
-        name: "Qwen3.5-2B · Q4_K_M",
+        id: "2b", name: "Qwen3.5-2B · Q4_K_M", short: "Qwen3.5-2B", note: "快，省内存（运行约 1.6 GB）",
         file: "Qwen3.5-2B-Q4_K_M.gguf",
         url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf")!,
         bytes: 1_280_835_840)
+
+    static let qwen4b = ModelInfo(
+        id: "4b", name: "Qwen3.5-4B · Q4_K_M", short: "Qwen3.5-4B", note: "更聪明，慢一些，运行要 3 GB 左右（试试 15 Pro Max 跑不跑得动）",
+        file: "Qwen3.5-4B-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf")!,
+        bytes: 2_740_937_888)
+
+    static let all = [qwen, qwen4b]
 }
 
 /// 下载、删除模型文件。
 @MainActor
 final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = ModelStore()
-    let info = ModelInfo.qwen
+
+    /// 现在用哪个模型（设置里切换）
+    @Published var selectedID: String {
+        didSet {
+            UserDefaults.standard.set(selectedID, forKey: "localModel")
+            refresh()
+            Task { await LocalModel.shared.unload() }
+        }
+    }
+    var info: ModelInfo { ModelInfo.all.first { $0.id == selectedID } ?? .qwen }
+    /// 正在下载的是哪个
+    @Published private(set) var downloadingID: String?
 
     @Published private(set) var downloaded = false
     @Published private(set) var progress: Double?
@@ -34,8 +56,15 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     private var task: URLSessionDownloadTask?
 
     override init() {
+        selectedID = UserDefaults.standard.string(forKey: "localModel") ?? ModelInfo.qwen.id
         super.init()
-        downloaded = FileManager.default.fileExists(atPath: fileURL.path)
+        refresh()
+    }
+
+    func refresh() { downloaded = isDownloaded(info) }
+
+    func isDownloaded(_ m: ModelInfo) -> Bool {
+        FileManager.default.fileExists(atPath: folder.appendingPathComponent(m.file).path)
     }
 
     var folder: URL {
@@ -47,8 +76,11 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     var downloading: Bool { progress != nil }
 
-    func download() {
+    func download() { download(info) }
+
+    func download(_ m: ModelInfo) {
         guard task == nil else { return }
+        downloadingID = m.id
         error = ""
         let c = URLSessionConfiguration.default
         c.allowsCellularAccess = false
@@ -58,7 +90,7 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         session = s
         progress = 0
         received = 0
-        let t = s.downloadTask(with: info.url)
+        let t = s.downloadTask(with: m.url)
         task = t
         t.resume()
     }
@@ -67,19 +99,24 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         task?.cancel()
         task = nil
         progress = nil
+        downloadingID = nil
     }
 
-    func delete() {
+    func delete() { delete(info) }
+
+    func delete(_ m: ModelInfo) {
         Task { await LocalModel.shared.unload() }
-        try? FileManager.default.removeItem(at: fileURL)
-        downloaded = false
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(m.file))
+        refresh()
+        objectWillChange.send()
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                 didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                                 totalBytesExpectedToWrite: Int64) {
         MainActor.assumeIsolated {
-            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : info.bytes
+            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite
+                : (ModelInfo.all.first { $0.id == downloadingID } ?? info).bytes
             received = totalBytesWritten
             progress = Double(totalBytesWritten) / Double(total)
         }
@@ -91,7 +128,9 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("models", isDirectory: true)
-        let dest = base.appendingPathComponent(ModelInfo.qwen.file)
+        // 按下载地址认是哪个模型的文件
+        let name = downloadTask.originalRequest?.url?.lastPathComponent ?? ModelInfo.qwen.file
+        let dest = base.appendingPathComponent(ModelInfo.all.first { $0.file == name }?.file ?? name)
         var failure = ""
         do {
             if let code = (downloadTask.response as? HTTPURLResponse)?.statusCode, code != 200 {
@@ -109,7 +148,8 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
         MainActor.assumeIsolated {
             self.error = failure
-            self.downloaded = failure.isEmpty
+            self.refresh()
+            self.objectWillChange.send()
         }
     }
 
@@ -120,6 +160,7 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
             }
             self.task = nil
             self.progress = nil
+            self.downloadingID = nil
             session.finishTasksAndInvalidate()
         }
     }
@@ -140,6 +181,9 @@ actor LocalModel {
     static let contextSize: UInt32 = 3072
 
     var isLoaded: Bool { model != nil }
+    private var loadedPath = ""
+    /// 内存浮标用：现在在内存里的模型文件名（没加载是 nil）
+    var loadedFile: String? { model == nil ? nil : (loadedPath as NSString).lastPathComponent }
 
     init() {
         Task { @MainActor in
@@ -155,7 +199,8 @@ actor LocalModel {
     }
 
     func load(path: String) throws {
-        if model != nil { return }
+        if model != nil && loadedPath == path { return }
+        if model != nil { unload() }
         if !Self.backendReady {
             llama_backend_init()
             Self.backendReady = true
@@ -180,6 +225,7 @@ actor LocalModel {
         ctx = c
         vocab = llama_model_get_vocab(m)
         cachedPrefix = []
+        loadedPath = path
     }
 
     func unload() {
