@@ -57,7 +57,8 @@ def build(tasks=None, current=None):
     assert "\\(" not in sys_, "提示词里还有没替换的插值：" + sys_[sys_.index("\\("):][:60]
     k = src.index("return #\"\"\"")
     names = " | ".join('"\\"' + n + '\\""' for n, _, _ in tasks)
-    grammar = swift_string(src, k).replace("TASKS", names)
+    alts = " | ".join(["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "cloud", "say", "answer"])
+    grammar = swift_string(src, k).replace("TASKS", names).replace("ALTS", alts)
     prefix = f"<|im_start|>system\n{sys_}<|im_end|>\n"
     return prefix, grammar
 
