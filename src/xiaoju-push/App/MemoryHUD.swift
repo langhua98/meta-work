@@ -28,7 +28,7 @@ final class MemoryMonitor: ObservableObject {
         available = UInt64(os_proc_available_memory())
         Task {
             let f = await LocalModel.shared.loadedFile
-            let name = f.map { file in ModelInfo.all.first { $0.file == file }?.id.uppercased() ?? "模型" }
+            let name = f.map { file in ModelInfo.all.first { $0.file == file }.map { $0.id == "4b-xiaoju" ? "4B小橘" : $0.id.uppercased() } ?? "模型" }
             if name != self.model { self.model = name }
         }
     }

@@ -27,7 +27,15 @@ struct ModelInfo: Identifiable, Hashable {
         url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf")!,
         bytes: 2_740_937_888)
 
-    static let all = [qwen, qwen4b]
+    /// 在 Kaggle 上用小橘推送的工具调用数据微调过的 4B（scripts/finetune/train_kaggle.ipynb 训好后传到 HF）
+    static let xiaoju4b = ModelInfo(
+        id: "4b-xiaoju", name: "Qwen3.5-4B 小橘版 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
+        note: "专门训练过调用小橘推送的工具（要先在 Kaggle 训好才能下载）",
+        file: "Qwen3.5-4B-xiaoju-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/langhua1998/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf")!,
+        bytes: 2_740_937_888)
+
+    static let all = [qwen, qwen4b, xiaoju4b]
 }
 
 /// 下载、删除模型文件。
