@@ -43,8 +43,18 @@ def swift_string(src, start):
     return "\n".join(l[indent:] if l.startswith(" " * indent) else l.lstrip() for l in body.split("\n"))
 
 
-def build(tasks=None, current=None):
-    """返回（系统提示前缀, 语法）。tasks 默认用 TASKS；current 是当前任务名。"""
+# 和 Connectors.swift 一致：指令 → 「连接器 · 工具」
+LABELS = {
+    "find": "小橘云盘 · 找文件", "list": "小橘云盘 · 看文件夹", "mkdir": "小橘云盘 · 新建文件夹", "rename": "小橘云盘 · 改名",
+    "move": "小橘云盘 · 移动", "trash": "小橘云盘 · 放进回收站", "remember": "小橘云盘 · 读写记忆",
+    "check": "GitHub · 检查改动", "status": "GitHub · 检查改动", "history": "GitHub · 推送记录", "push": "GitHub · 推送",
+    "exclude": "GitHub · 设置不推的文件夹", "cloud": "OpenCode（云端） · 交给云端处理",
+}
+ALL_KINDS = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "cloud", "say", "answer"]
+
+
+def build(tasks=None, current=None, disabled=(), memory=""):
+    """返回（系统提示前缀, 语法）。tasks 默认用 TASKS；current 是当前任务名；disabled 是连接器里关掉的指令。"""
     tasks = tasks or TASKS
     src = open(SRC, encoding="utf-8").read()
     task_lines = "\n".join(f"- {n}：云盘 {c} → {r}" for n, c, r in tasks)
@@ -52,12 +62,18 @@ def build(tasks=None, current=None):
     sys_ = swift_string(src, i).replace('\\(taskLines.isEmpty ? "（还没有任务）" : taskLines)', task_lines)
     if current:
         sys_ += f"\n当前任务：{current}"
+    if memory.strip():
+        sys_ += "\n记忆（用户的约定，路径以这里为准）：\n" + memory.strip()[:1200]
     j = src.index("sys += \"\"\"", i)
     sys_ += swift_string(src, j)
+    if disabled:
+        off = list(disabled)
+        sys_ = "\n".join(l for l in sys_.split("\n") if not any('{"do":"%s"' % k in l for k in off))
+        sys_ += "\n这些事用户关掉了，做不了，被问到就用 answer 说一声：" + "、".join(LABELS[k] for k in off if k in LABELS)
     assert "\\(" not in sys_, "提示词里还有没替换的插值：" + sys_[sys_.index("\\("):][:60]
     k = src.index("return #\"\"\"")
     names = " | ".join('"\\"' + n + '\\""' for n, _, _ in tasks)
-    alts = " | ".join(["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "cloud", "say", "answer"])
+    alts = " | ".join(k for k in ALL_KINDS if k not in disabled)
     grammar = swift_string(src, k).replace("TASKS", names).replace("ALTS", alts)
     prefix = f"<|im_start|>system\n{sys_}<|im_end|>\n"
     return prefix, grammar
