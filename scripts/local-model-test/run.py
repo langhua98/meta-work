@@ -43,16 +43,20 @@ def swift_string(src, start):
     return "\n".join(l[indent:] if l.startswith(" " * indent) else l.lstrip() for l in body.split("\n"))
 
 
-def build():
+def build(tasks=None, current=None):
+    """返回（系统提示前缀, 语法）。tasks 默认用 TASKS；current 是当前任务名。"""
+    tasks = tasks or TASKS
     src = open(SRC, encoding="utf-8").read()
-    task_lines = "\n".join(f"- {n}：云盘 {c} → {r}" for n, c, r in TASKS)
+    task_lines = "\n".join(f"- {n}：云盘 {c} → {r}" for n, c, r in tasks)
     i = src.index("var sys = \"\"\"")
     sys_ = swift_string(src, i).replace('\\(taskLines.isEmpty ? "（还没有任务）" : taskLines)', task_lines)
+    if current:
+        sys_ += f"\n当前任务：{current}"
     j = src.index("sys += \"\"\"", i)
     sys_ += swift_string(src, j)
     assert "\\(" not in sys_, "提示词里还有没替换的插值：" + sys_[sys_.index("\\("):][:60]
     k = src.index("return #\"\"\"")
-    names = " | ".join('"\\"' + n + '\\""' for n, _, _ in TASKS)
+    names = " | ".join('"\\"' + n + '\\""' for n, _, _ in tasks)
     grammar = swift_string(src, k).replace("TASKS", names)
     prefix = f"<|im_start|>system\n{sys_}<|im_end|>\n"
     return prefix, grammar
