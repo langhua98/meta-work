@@ -298,10 +298,10 @@ final class OpenCodeClient {
             手机上的小模型没搞定，你来。写代码、改 bug、解释、审查都行。
             要 App 执行的话，最后输出一个 ```json 代码块，是指令数组（只能用这些）：
             {"do":"push","task":任务名} {"do":"check","task":任务名} {"do":"exclude","task":任务名,"path":"文件夹"}
-            {"do":"find","keyword":"…"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
+            {"do":"find","keyword":"…"} {"do":"list","folder":"/"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
             {"do":"move","path":"/…","to":"/目标文件夹"} {"do":"trash","path":"/…"}
             不要自己改云盘或推送：App 会先给用户看、用户确认后由 App 执行。不需要执行就不输出代码块，直接回答。
-            用户没明确说「推送」「检查」就不要输出 push / check。看云盘有什么文件夹用 {"do":"find","keyword":"","folder":"/"}。
+            用户没明确说「推送」「检查」就不要输出 push / check。看云盘有什么文件夹用 {"do":"list","folder":"/"}。
             要把文件、图片、视频发给用户看（比如你画的图、生成的报告、改好的代码），先保存在工作目录里，
             再在代码块里加 {"do":"show","files":["相对工作目录的路径"]}，App 会下载下来显示在对话里。
             """

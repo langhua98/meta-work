@@ -14,7 +14,7 @@ SERVER = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080"
 
 TASKS = [("meta-work", "/meta work", "langhua98/meta-work"), ("xiaoju-video", "/代码/xiaoju-video", "langhua98/xiaoju-video")]
 
-# (问题, 期望的指令)
+# (问题, 期望的指令[, 上一句 / 上一步, 期望 skip 里有的文件夹])
 CASES = [
     ("你是什么模型", {"answer"}),
     ("介绍一下你自己", {"answer"}),
@@ -28,6 +28,11 @@ CASES = [
     ("把 /代码/demo 移到 /归档", {"move"}),
     ("帮我看看这次改动有没有 bug", {"cloud"}),
     ("给 xiaoju-video 写个 README", {"cloud"}),
+    ("你好", {"answer"}),
+    ("查看一下云盘有哪些文件夹", {"list"}),
+    ("读取小橘云盘列出所有文件夹", {"list"}),
+    ("检查云盘代码 除了子目录下的7day文件夹不需要检查", {"check"}, None, "7day"),
+    ("交给云端模型处理", {"cloud"}, "上一句：给 xiaoju-video 写个 README"),
 ]
 
 
@@ -53,8 +58,9 @@ def build():
     return prefix, grammar
 
 
-def ask(prefix, grammar, text):
-    prompt = prefix + f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+def ask(prefix, grammar, text, ctx=None):
+    last = f"（{ctx}）\n" if ctx else ""
+    prompt = prefix + f"<|im_start|>user\n{last}{text}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     body = json.dumps({"prompt": prompt, "grammar": grammar, "n_predict": 320, "temperature": 0,
                        "top_k": 1, "cache_prompt": True}).encode()
     req = urllib.request.Request(SERVER + "/completion", body, {"Content-Type": "application/json"})
@@ -67,13 +73,17 @@ def main():
     prefix, grammar = build()
     print("提示词", len(prefix), "字符\n")
     bad = 0
-    for text, want in CASES:
-        out, t = ask(prefix, grammar, text)
+    for case in CASES:
+        text, want = case[0], case[1]
+        ctx = case[2] if len(case) > 2 else None
+        skip = case[3] if len(case) > 3 else None
+        out, t = ask(prefix, grammar, text, ctx)
         try:
-            got = json.loads(out[out.index("{"): out.rindex("}") + 1]).get("do")
+            o = json.loads(out[out.index("{"): out.rindex("}") + 1])
+            got = o.get("do")
         except Exception:
-            got = None
-        ok = got in want
+            o, got = {}, None
+        ok = got in want and (skip is None or any(skip in x for x in o.get("skip", [])))
         bad += not ok
         secs = (t.get("prompt_ms", 0) + t.get("predicted_ms", 0)) / 1000
         print(f"{'✓' if ok else '✗'} {text}\n   → {out.strip()}   ({secs:.1f} 秒，期望 {'/'.join(want)})\n")

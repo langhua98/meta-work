@@ -1,10 +1,11 @@
 import Foundation
 
-// 一句话 → 一条指令。先用关键词认，认不出来再问本地模型（输出被语法锁死成下面这些 JSON）。
+// 一句话 → 一条指令。只有快捷按钮发的那几句原话直接认，其他都交给本地模型（输出被语法锁死成下面这些 JSON）。
 
 enum Command: Equatable {
-    case check(task: String?)
-    case push(task: String?)
+    /// skip：这次先跳过的文件夹（用户说「除了 7day」之类，由模型填）
+    case check(task: String?, skip: [String] = [])
+    case push(task: String?, skip: [String] = [])
     case status
     case history(task: String?)
     case exclude(task: String?, path: String)
@@ -22,8 +23,8 @@ enum Command: Equatable {
     /// 给对话里「听懂了：…」小标签用
     var summary: String {
         switch self {
-        case .check(let t): return "检查 \(t ?? "这个任务") 的改动"
-        case .push(let t): return "推送 \(t ?? "这个任务")"
+        case .check(let t, let k): return "检查 \(t ?? "这个任务") 的改动" + (k.isEmpty ? "" : "，跳过 " + k.joined(separator: "、"))
+        case .push(let t, let k): return "推送 \(t ?? "这个任务")" + (k.isEmpty ? "" : "，跳过 " + k.joined(separator: "、"))
         case .status: return "看所有任务有没有改动"
         case .history(let t): return "看 \(t ?? "这个任务") 的推送记录"
         case .exclude(let t, let p): return "\(t ?? "这个任务") 不推 \(p)"
@@ -84,51 +85,14 @@ enum Interpreter {
     // MARK: 关键词（不用模型，马上出结果）
 
     static func keyword(_ text: String, tasks: [TaskRef], current: Mapping?) -> Command? {
-        let s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !s.isEmpty else { return nil }
-        // 句子里提到的任务名
-        let named = tasks.first { s.contains($0.name.lowercased()) }?.name
-        // 「检查代码，除了 7day 不用检查」「推送，跳过 docs」：这次检查 / 推送时跳过，规则认，不交给小模型
-        // （说了「以后」「一直」的是要永久不推，交给下面的 exclude）
-        if s.count <= 80, !["以后", "一直", "永远", "从此"].contains(where: { s.contains($0) }),
-           !ExcludeWords.parse(text, taskNames: tasks.map(\.name)).isEmpty {
-            if ["推送", "推上去", "推一下", "push", "提交"].contains(where: { s.contains($0) }) && !s.contains("检查") {
-                return .push(task: named)
-            }
-            if ["检查", "改动", "对比", "check"].contains(where: { s.contains($0) }) { return .check(task: named) }
+        // 只认快捷按钮发出来的原话（一个字不差），其他都让模型自己理解
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "检查一下有什么改动": return .check(task: nil)
+        case "推送": return .push(task: nil)
+        case "推送记录": return .history(task: nil)
+        case "所有任务": return .status
+        default: return nil
         }
-        // 「查看一下云盘有哪些文件夹」「meta work 里有什么文件」：列文件夹，不交给小模型（它会翻成找「云盘」）
-        if wantsListing(s) { return .find(keyword: "", folder: nil) }
-        guard s.count <= 24 else { return nil }
-        // 没说哪个任务也照样认：只有一个任务就用它，多个会反问是哪个
-        // 打招呼、道谢这种不用模型，也不交给云端
-        if s.count <= 8 {
-            if ["你好", "您好", "嗨", "hi", "hello", "在吗", "在不在"].contains(where: { s.hasPrefix($0) }) {
-                return .say("在的。要我推送、检查改动、找文件，还是看代码？直接说就行。")
-            }
-            if ["谢谢", "多谢", "感谢", "thanks", "好的", "ok", "收到", "行", "嗯"].contains(where: { s.hasPrefix($0) }) {
-                return .say("好的，有事再叫我。")
-            }
-        }
-        let negative = ["不推", "别推", "不要推", "排除"].contains { s.contains($0) }
-        if negative { return nil }
-        if ["推送记录", "历史", "推过什么"].contains(where: { s.contains($0) }) { return .history(task: named) }
-        if ["推送", "推上去", "推一下", "推吧", "push", "提交"].contains(where: { s.contains($0) }) {
-            return .push(task: named)
-        }
-        if ["检查", "看看改动", "有什么改动", "改了什么", "有改动吗", "check"].contains(where: { s.contains($0) }) {
-            return .check(task: named)
-        }
-        if ["全部任务", "所有任务", "哪些任务", "待推"].contains(where: { s.contains($0) }) { return .status }
-        return nil
-    }
-
-    /// 是不是「看看云盘 / 某个文件夹里有什么」。文件夹名不在这里猜，交给 App 拿云盘里真实的文件夹名去对
-    static func wantsListing(_ s: String) -> Bool {
-        s.count <= 40
-            && ["哪些", "什么", "列出", "列一下", "列举", "目录结构"].contains(where: { s.contains($0) })
-            && ["文件夹", "目录", "文件"].contains(where: { s.contains($0) })
-            && !["找", "改", "推", "删", "新建", "建", "移动", "重命名", "检查", "写", "为什么", "怎么"].contains(where: { s.contains($0) })
     }
 
     /// 小模型被语法逼着一定要选一条指令，闲聊或问题也会被硬翻成「找文件」「新建文件夹」。
@@ -142,12 +106,9 @@ enum Interpreter {
         }
         switch c {
         case .push: return has(["推", "push", "提交", "上传", "发布", "同步"])
-        case .check: return has(["检查", "改动", "改了", "变化", "diff", "check", "看看", "差别", "不一样"])
-        case .history: return has(["记录", "历史", "推过", "上次"])
-        case .status: return has(["任务", "改动", "待推", "状态", "哪些"])
-        case .exclude: return has(["不推", "别推", "不要推", "排除", "忽略", "跳过", "不用推"])
-        case .find(let k, let f): return has(["找", "搜", "查", "在哪", "哪里", "有什么", "列出", "列一下", "看看", "看下", "打开"])
-            || s.contains(k.lowercased()) || (f.map(mentions) ?? false)
+        // 只看不改的（检查、记录、列文件、找文件）信模型；会改东西的才核对一下原话
+        case .check, .history, .status, .find: return true
+        case .exclude: return has(["不推", "别推", "不要推", "排除", "忽略", "跳过", "不用推", "以后", "一直"])
         case .mkdir: return has(["新建", "建", "创建", "加个", "mkdir"])
         case .rename(let p, _): return has(["改名", "重命名", "改成", "叫"]) && mentions(p)
         case .move(let p, _): return has(["移", "挪", "放到", "放进", "搬", "归档", "move"]) && mentions(p)
@@ -166,12 +127,13 @@ enum Interpreter {
         你是编码助手「小橘推送」里跑在 iPhone 上的本地模型 Qwen3.5-2B（不联网）。App 帮用户管代码：云盘里的代码文件夹推到 GitHub；写代码、改 bug、解释代码这类难事交给云端的 OpenCode（DeepSeek，能跑命令、读写仓库、画图发文件）。
         你能用的工具就是下面这些指令。把用户的一句话变成一条 JSON，只输出 JSON。
         指令：
-        {"do":"push","task":任务名} 推送任务到 GitHub
-        {"do":"check","task":任务名} 检查任务有什么改动
+        {"do":"push","task":任务名} 推送任务到 GitHub；这次要跳过某些文件夹就加 "skip":["文件夹"]
+        {"do":"check","task":任务名} 检查任务有什么改动；这次不检查某些文件夹就加 "skip":["文件夹"]
         {"do":"status"} 看所有任务有没有改动
         {"do":"history","task":任务名} 看推送记录
-        {"do":"exclude","task":任务名,"path":"文件夹"} 以后不推某个文件夹
-        {"do":"find","keyword":"关键词"} 或加 "folder":"/路径" 在云盘找文件、看文件夹里有什么
+        {"do":"exclude","task":任务名,"path":"文件夹"} 以后一直不推某个文件夹（只有说「以后」「一直」才用）
+        {"do":"find","keyword":"关键词"} 或加 "folder":"/路径" 在云盘按名字找文件
+        {"do":"list","folder":"/"} 看云盘（"/"）或某个文件夹里有哪些文件夹和文件
         {"do":"mkdir","path":"/路径"} 新建文件夹
         {"do":"rename","path":"/路径","to":"新名字"} 改名
         {"do":"move","path":"/路径","to":"/目标文件夹"} 移动
@@ -197,13 +159,16 @@ enum Interpreter {
         记住提交说明用中文 → {"do":"remember","text":"提交说明用中文"}
         帮我看看这次改动有没有 bug → {"do":"cloud","text":"帮我看看这次改动有没有 bug"}
         meta-work 这次改了什么 → {"do":"check","task":"meta-work"}
+        检查 xiaoju-video，除了 docs 文件夹不用检查 → {"do":"check","task":"xiaoju-video","skip":["docs"]}
+        看看云盘里有哪些文件夹 → {"do":"list","folder":"/"}
         你是谁 → {"do":"answer","text":"我是小橘推送里的本地模型 Qwen3.5-2B，在你手机上跑，不联网。"}
         早上好 → {"do":"answer","text":"早上好！今天要推哪个项目？"}
+        （上一句：把这个函数改成异步）交给云端处理 → {"do":"cloud","text":"把这个函数改成异步"}
         这个项目是干什么的 → {"do":"cloud","text":"这个项目是干什么的"}
         为什么推送失败了 → {"do":"cloud","text":"为什么推送失败了"}
         """
         let prefix = "<|im_start|>system\n\(sys)<|im_end|>\n"
-        let lastLine = last.map { "（上一步：\($0)）\n" } ?? ""
+        let lastLine = last.map { "（\($0)）\n" } ?? ""
         return (prefix, { text in
             "<|im_start|>user\n\(lastLine)\(text)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         })
@@ -214,9 +179,11 @@ enum Interpreter {
         let names = tasks.map { "\"\\\"" + gbnfEscape(jsonEscape($0.name)) + "\\\"\"" }
         let task = names.isEmpty ? "str" : names.joined(separator: " | ")
         return #"""
-        root ::= "{" ws "\"do\":" ws ( push | check | status | history | exclude | find | mkdir | rename | move | trash | remember | cloud | say | answer ) ws "}"
-        push ::= "\"push\"," ws "\"task\":" ws task
-        check ::= "\"check\"," ws "\"task\":" ws task
+        root ::= "{" ws "\"do\":" ws ( push | check | status | history | exclude | find | list | mkdir | rename | move | trash | remember | cloud | say | answer ) ws "}"
+        push ::= "\"push\"," ws "\"task\":" ws task skip?
+        check ::= "\"check\"," ws "\"task\":" ws task skip?
+        skip ::= "," ws "\"skip\":" ws "[" ws str ( "," ws str ){0,5} ws "]"
+        list ::= "\"list\"," ws "\"folder\":" ws str
         status ::= "\"status\""
         history ::= "\"history\"," ws "\"task\":" ws task
         exclude ::= "\"exclude\"," ws "\"task\":" ws task "," ws "\"path\":" ws str
@@ -251,12 +218,16 @@ enum Interpreter {
               let data = String(json[start...end]).data(using: .utf8),
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let d = o["do"] as? String else { return nil }
+        func arr(_ k: String) -> [String] {
+            ((o[k] as? [Any]) ?? []).compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
         func s(_ k: String) -> String? {
             (o[k] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
         }
         switch d {
-        case "push": return .push(task: s("task"))
-        case "check": return .check(task: s("task"))
+        case "push": return .push(task: s("task"), skip: arr("skip"))
+        case "check": return .check(task: s("task"), skip: arr("skip"))
+        case "list": return .find(keyword: "", folder: s("folder") ?? "/")
         case "status": return .status
         case "history": return .history(task: s("task"))
         case "exclude": return s("path").map { .exclude(task: s("task"), path: $0) }

@@ -310,18 +310,8 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
-        // 「交给云端模型处理」：把上一句原话交给云端，不带小模型的误判
-        if Self.isHandoff(text) {
-            guard cloudReady else { say("要先在设置里填 OpenCode 密码才能交给云端。"); return }
-            guard let prev = previousUserText() else { say("要交给云端哪件事？直接把要做的事说一遍就行。"); return }
-            add(.understood("把上一句「\(prev.prefix(30))」交给云端", source: "规则认出 · 没用模型"))
-            await askCloud(prev + "\n（手机上的小模型没处理好这句，用户让你来做。只按这句原话做，不要猜成推送、检查等别的事。）",
-                           kind: "ask", auto: true)
-            return
-        }
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
-            if case .say(let q) = c { say(q); return }
-            add(.understood(c.summary, source: "规则认出 · 没用模型"))
+            add(.understood(c.summary, source: "快捷按钮"))
             await execute(c, original: text)
             return
         }
@@ -336,7 +326,10 @@ final class ChatModel: ObservableObject {
         await loadMemory()
         let thinking = add(.thinking(LocalModelIsLoaded.value ? "本地模型在理解你的话" : "加载本地模型…"))
         let started = Date()
-        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: lastCommand)
+        // 上一句话和上一步一起给模型，「交给云端」「再移回来」这种才知道说的是什么
+        let ctx = [previousUserText().map { "上一句：\(String($0.prefix(200)))" }, lastCommand.map { "上一步：\($0)" }]
+            .compactMap { $0 }.joined(separator: "；")
+        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: ctx.isEmpty ? nil : ctx)
         let grammar = Interpreter.grammar(tasks: ts)
         let path = ModelStore.shared.fileURL.path
         let suffix = p.suffix(text)
@@ -378,14 +371,14 @@ final class ChatModel: ObservableObject {
     private func execute(_ cmd: Command, original: String) async {
         if let line = cmd.memoryLine { lastCommand = line }
         switch cmd {
-        case .check(let t):
+        case .check(let t, let skip):
             guard let m = taskOrComplain(t) else { return }
-            let (mm, extra) = withSpokenExcludes(m, original)
+            let (mm, extra) = withSkips(m, skip)
             await check(mm)
             offerKeepExcludes(m, extra)
-        case .push(let t):
+        case .push(let t, let skip):
             guard let m = taskOrComplain(t) else { return }
-            let (mm, extra) = withSpokenExcludes(m, original)
+            let (mm, extra) = withSkips(m, skip)
             await preparePush(mm)
             offerKeepExcludes(m, extra)
         case .status:
@@ -407,7 +400,11 @@ final class ChatModel: ObservableObject {
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
-            let ask = original.isEmpty || original == cmd.summary ? s : original
+            // 再带上用户上一句原话，「交给云端处理」这种短句云端才知道是哪件事
+            var ask = original.isEmpty || original == cmd.summary ? s : original
+            if !original.isEmpty, original != cmd.summary, let prev = previousUserText() {
+                ask = "用户上一句：\(prev)\n用户这一句：\(original)"
+            }
             if cloudReady && store.autoCloud { await askCloud(ask, kind: "ask", auto: true) }
             else if cloudReady { confirmCloud(ask) }
             else { say("这件事要交给云端大模型，先在设置里填 OpenCode 密码。") }
@@ -416,9 +413,9 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    /// 话里说了「除了 7day 不用检查」「跳过 docs」：这次检查 / 推送先跳过这些文件夹（规则认，不靠小模型）
-    private func withSpokenExcludes(_ m: Mapping, _ text: String) -> (Mapping, [String]) {
-        let extra = ExcludeWords.parse(text, taskNames: tasks.map(\.name))
+    /// 模型听出来「这次跳过 7day」：这次检查 / 推送先跳过这些文件夹
+    private func withSkips(_ m: Mapping, _ skip: [String]) -> (Mapping, [String]) {
+        let extra = skip
             .map { m.relativeToCloud($0) }
             .filter { !$0.isEmpty && !m.excludedPaths.contains($0) }
         guard !extra.isEmpty else { return (m, []) }
@@ -445,25 +442,12 @@ final class ChatModel: ObservableObject {
         ])))
     }
 
-    /// 「交给云端」「让云端模型处理」「问一下大模型」这种只有转交意思、没说具体事的短句
-    static func isHandoff(_ text: String) -> Bool {
-        let s = text.lowercased().replacingOccurrences(of: " ", with: "")
-        guard s.count <= 16, ["云端", "opencode", "大模型", "云上"].contains(where: { s.contains($0) }) else { return false }
-        var rest = s
-        for w in ["交给", "让", "问问", "问一下", "问", "用", "云端", "opencode", "大模型", "云上", "模型", "处理", "来做", "来", "做",
-                  "一下", "吧", "去", "试试", "帮我", "你", "把", "这个", "这件事", "上一句", "刚才", "的", "。", "，", "!", "！"] {
-            rest = rest.replacingOccurrences(of: w, with: "")
-        }
-        return rest.isEmpty
-    }
-
     /// 这一句之前用户说的最后一句（跳过同样是「交给云端」的话）
     private func previousUserText() -> String? {
         var seenCurrent = false
         for it in items.reversed() {
             guard case .user(let s) = it.kind else { continue }
             if !seenCurrent { seenCurrent = true; continue }
-            if Self.isHandoff(s) { continue }
             return s
         }
         return nil
@@ -957,7 +941,7 @@ final class ChatModel: ObservableObject {
                         mm.addExclude(mm.relativeToCloud(path))
                         store.upsert(mm)
                     }
-                case .push(let task):
+                case .push(let task, _):
                     if let m = TaskRef.find(task, in: tasks, current: currentTask), let p = await check(m, quiet: true), !p.changes.isEmpty {
                         await commit(m, p, message: commitMessage(p))
                     }
