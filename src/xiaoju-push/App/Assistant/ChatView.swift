@@ -461,11 +461,24 @@ private struct ToolCardView: View {
 private struct AnswerText: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 16)).foregroundStyle(Theme.text)
+        Text(Self.rich(text)).font(.system(size: 16)).foregroundStyle(Theme.text)
             .lineSpacing(4)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
+    }
+
+    /// **加粗**、`代码`、[链接]() 这些显示成样式，不露出星号；换行原样保留
+    static func rich(_ s: String) -> AttributedString {
+        var t = s
+        // 「### 标题」去掉井号
+        t = t.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            var l = String(line)
+            while l.hasPrefix("#") { l.removeFirst() }
+            return l == String(line) ? l : l.trimmingCharacters(in: .whitespaces)
+        }.joined(separator: "\n")
+        let opt = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: t, options: opt)) ?? AttributedString(s)
     }
 }
 

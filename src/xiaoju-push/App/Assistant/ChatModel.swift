@@ -310,6 +310,15 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
+        // 「交给云端模型处理」：把上一句原话交给云端，不带小模型的误判
+        if Self.isHandoff(text) {
+            guard cloudReady else { say("要先在设置里填 OpenCode 密码才能交给云端。"); return }
+            guard let prev = previousUserText() else { say("要交给云端哪件事？直接把要做的事说一遍就行。"); return }
+            add(.understood("把上一句「\(prev.prefix(30))」交给云端", source: "直接认出来"))
+            await askCloud(prev + "\n（手机上的小模型没处理好这句，用户让你来做。只按这句原话做，不要猜成推送、检查等别的事。）",
+                           kind: "ask", auto: true)
+            return
+        }
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
             if case .say(let q) = c { say(q); return }
             add(.understood(c.summary, source: "直接认出来"))
@@ -432,6 +441,30 @@ final class ChatModel: ObservableObject {
             },
             CardButton(label: "只这一次", style: .plain) { [weak self] in self?.resolveCard(cid, "只跳过这一次") },
         ])))
+    }
+
+    /// 「交给云端」「让云端模型处理」「问一下大模型」这种只有转交意思、没说具体事的短句
+    static func isHandoff(_ text: String) -> Bool {
+        let s = text.lowercased().replacingOccurrences(of: " ", with: "")
+        guard s.count <= 16, ["云端", "opencode", "大模型", "云上"].contains(where: { s.contains($0) }) else { return false }
+        var rest = s
+        for w in ["交给", "让", "问问", "问一下", "问", "用", "云端", "opencode", "大模型", "云上", "模型", "处理", "来做", "来", "做",
+                  "一下", "吧", "去", "试试", "帮我", "你", "把", "这个", "这件事", "上一句", "刚才", "的", "。", "，", "!", "！"] {
+            rest = rest.replacingOccurrences(of: w, with: "")
+        }
+        return rest.isEmpty
+    }
+
+    /// 这一句之前用户说的最后一句（跳过同样是「交给云端」的话）
+    private func previousUserText() -> String? {
+        var seenCurrent = false
+        for it in items.reversed() {
+            guard case .user(let s) = it.kind else { continue }
+            if !seenCurrent { seenCurrent = true; continue }
+            if Self.isHandoff(s) { continue }
+            return s
+        }
+        return nil
     }
 
     private func taskOrComplain(_ name: String?) -> Mapping? {
@@ -627,6 +660,12 @@ final class ChatModel: ObservableObject {
 
     private func find(_ keyword: String, _ folder: String?) async {
         guard !store.cloudToken.isEmpty else { add(.error("先在设置里填云盘令牌")); return }
+        // 没有关键词（或者小模型把「云盘」「文件夹」当成了关键词）= 看看文件夹里有什么
+        let k = keyword.trimmingCharacters(in: .whitespaces)
+        if k.isEmpty || ["云盘", "文件夹", "目录", "文件", "所有文件", "全部"].contains(k) {
+            await listFolder(folder ?? "/")
+            return
+        }
         let t = add(.tool(ToolCard(icon: "magnifyingglass", title: "在云盘里找「\(keyword)」", sub: folder ?? "整个云盘")))
         do {
             var hits = try await files.search(keyword, in: folder)
@@ -636,6 +675,30 @@ final class ChatModel: ObservableObject {
             }
             tool(t) { $0.state = .ok; $0.sub = "找到 \(hits.count) 个" }
             if hits.isEmpty { say("没找到。") } else { add(.entries(title: "找到 \(hits.count) 个", items: Array(hits.prefix(12)))) }
+        } catch {
+            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+        }
+    }
+
+    /// 列出云盘某个文件夹里有什么；名字不完整就先找到那个文件夹
+    private func listFolder(_ folder: String) async {
+        var path = folder
+        let t = add(.tool(ToolCard(icon: Self.iconFolder, title: "看看云盘 \(path == "/" ? "根目录" : path)", sub: "读取…")))
+        do {
+            if path != "/", try await files.item(path) == nil {
+                let hits = try await files.resolve(path).filter(\.isFolder)
+                guard let h = hits.first else {
+                    tool(t) { $0.state = .failed; $0.sub = "没有这个文件夹" }
+                    say("云盘里没找到叫「\(folder)」的文件夹。")
+                    return
+                }
+                path = h.fullPath
+            }
+            let all = try await files.list(path, limit: 200)
+            let dirs = all.filter(\.isFolder), others = all.filter { !$0.isFolder }
+            tool(t) { $0.state = .ok; $0.title = "看看云盘 \(path == "/" ? "根目录" : path)"; $0.sub = "\(dirs.count) 个文件夹 · \(others.count) 个文件" }
+            if all.isEmpty { say("这个文件夹是空的。"); return }
+            add(.entries(title: "\(path == "/" ? "云盘根目录" : path) · \(dirs.count) 个文件夹、\(others.count) 个文件", items: Array((dirs + others).prefix(50))))
         } catch {
             tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
         }
@@ -835,10 +898,24 @@ final class ChatModel: ObservableObject {
     }
 
     private func cloudCommandsCard(_ cmds: [Command]) {
-        // 只有一条就走普通流程（推送、改文件都会再出自己的确认卡片）
+        // 只看不改的（列文件、看记录）直接做；推送、检查、改文件这些先问用户
         if cmds.count == 1, let c = cmds.first {
-            add(.understood(c.summary, source: "问了云端"))
-            run { await self.execute(c, original: c.summary) }
+            switch c {
+            case .find, .status, .history, .say, .answer:
+                add(.understood(c.summary, source: "问了云端"))
+                run { await self.execute(c, original: c.summary) }
+            default:
+                var cid = UUID()
+                cid = add(.card(ActionCard(title: "云端建议：\(c.summary)", lines: [],
+                                           note: "还没动。要做就点确认。", tone: .primary, buttons: [
+                    CardButton(label: "确认", style: .primary) { [weak self] in
+                        guard let self else { return }
+                        self.resolveCard(cid, "已确认")
+                        self.run { await self.execute(c, original: c.summary) }
+                    },
+                    CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "没做") },
+                ])))
+            }
             return
         }
         var cid = UUID()

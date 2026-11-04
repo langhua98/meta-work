@@ -301,6 +301,7 @@ final class OpenCodeClient {
             {"do":"find","keyword":"…"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
             {"do":"move","path":"/…","to":"/目标文件夹"} {"do":"trash","path":"/…"}
             不要自己改云盘或推送：App 会先给用户看、用户确认后由 App 执行。不需要执行就不输出代码块，直接回答。
+            用户没明确说「推送」「检查」就不要输出 push / check。看云盘有什么文件夹用 {"do":"find","keyword":"","folder":"/"}。
             要把文件、图片、视频发给用户看（比如你画的图、生成的报告、改好的代码），先保存在工作目录里，
             再在代码块里加 {"do":"show","files":["相对工作目录的路径"]}，App 会下载下来显示在对话里。
             """
