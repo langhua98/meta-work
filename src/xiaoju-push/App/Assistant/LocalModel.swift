@@ -306,6 +306,8 @@ actor LocalModel {
             cachedPrefix = []
             var i = 0
             while i < pre.count {
+                // 点了停止：长提示词读到一半也马上停（不然下一句要排在它后面等）
+                if Task.isCancelled { throw CancellationError() }
                 let chunk = Array(pre[i..<min(pre.count, i + 512)])
                 try decode(chunk)
                 i += chunk.count

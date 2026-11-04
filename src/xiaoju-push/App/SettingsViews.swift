@@ -24,6 +24,14 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink {
+                        ConnectorsView()
+                    } label: {
+                        Label("连接器", systemImage: "puzzlepiece.extension")
+                    }
+                } footer: { Text("小橘云盘、GitHub、OpenCode：连上账号，选模型能用哪些工具。") }
+                .listRowBackground(Theme.card)
                 cloudSection
                 githubSection
                 testSection

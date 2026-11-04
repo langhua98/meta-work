@@ -135,7 +135,19 @@ final class ChatModel: ObservableObject {
     func stop() {
         job?.cancel()
         job = nil
+        jobID = UUID()
         busy = false
+        // 还在转圈的都收掉、标成停了，不留一个一直转的
+        items.removeAll { if case .thinking = $0.kind { return true }; return false }
+        for i in items.indices {
+            switch items[i].kind {
+            case .tool(var t) where t.state == .busy:
+                t.state = .failed; t.progress = nil; t.sub = "停了"
+                items[i].kind = .tool(t)
+            default: break
+            }
+        }
+        add(.text("停了。"))
     }
 
     /// 离开对话页：云端在干的活照样跑完，回来还能看到；只把本地模型从内存里放掉
@@ -343,7 +355,7 @@ final class ChatModel: ObservableObject {
             out = try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
         } catch {
             remove(thinking)
-            add(.error(error.localizedDescription))
+            if !(error is CancellationError) && !Task.isCancelled { add(.error(error.localizedDescription)) }
             return
         }
         remove(thinking)
@@ -361,7 +373,8 @@ final class ChatModel: ObservableObject {
             add(.understood("本地模型没把握（\(q)）", source: "\(secs) 秒 · 没联网"))
             await askCloud(text, kind: "ask", auto: true)
         default:
-            add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网"))
+            let via = Connectors.label(for: cmd.kind).map { " · " + $0 } ?? ""
+            add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网" + via))
             await execute(cmd, original: text)
         }
     }
@@ -369,6 +382,11 @@ final class ChatModel: ObservableObject {
     // MARK: 执行
 
     private func execute(_ cmd: Command, original: String) async {
+        // 连接器里关掉的工具不做
+        if !Connectors.enabledKinds.contains(cmd.kind), let hit = Connectors.tool(for: cmd.kind) {
+            say("「\(hit.0.name) · \(hit.1.name)」在连接器里关掉了，要用就去「设置 → 连接器 → \(hit.0.name)」打开。")
+            return
+        }
         if let line = cmd.memoryLine { lastCommand = line }
         switch cmd {
         case .check(let t, let skip):
@@ -888,7 +906,15 @@ final class ChatModel: ObservableObject {
         return path
     }
 
-    private func cloudCommandsCard(_ cmds: [Command]) {
+    private func cloudCommandsCard(_ all: [Command]) {
+        // 连接器里关掉的，云端说了也不做
+        let on = Connectors.enabledKinds
+        let cmds = all.filter { on.contains($0.kind) }
+        let dropped = all.filter { !on.contains($0.kind) }
+        if !dropped.isEmpty {
+            say("云端还想做这些，但对应的工具在连接器里关掉了，没做：" + dropped.prefix(5).map(\.summary).joined(separator: "；"))
+        }
+        guard !cmds.isEmpty else { return }
         // 只看不改的（列文件、看记录）直接做；推送、检查、改文件这些先问用户
         if cmds.count == 1, let c = cmds.first {
             switch c {

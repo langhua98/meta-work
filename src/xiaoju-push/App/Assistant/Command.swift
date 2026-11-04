@@ -167,6 +167,14 @@ enum Interpreter {
         这个项目是干什么的 → {"do":"cloud","text":"这个项目是干什么的"}
         为什么推送失败了 → {"do":"cloud","text":"为什么推送失败了"}
         """
+        // 连接器里关掉的工具：说明和例子里都拿掉，模型就不会想到用
+        let off = Connectors.disabledKinds
+        if !off.isEmpty {
+            sys = sys.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+                !off.contains { line.contains("{\"do\":\"\($0)\"") }
+            }.joined(separator: "\n")
+            sys += "\n这些事用户关掉了，做不了，被问到就用 answer 说一声：" + off.compactMap { Connectors.label(for: $0) }.joined(separator: "、")
+        }
         let prefix = "<|im_start|>system\n\(sys)<|im_end|>\n"
         let lastLine = last.map { "（\($0)）\n" } ?? ""
         return (prefix, { text in
@@ -178,8 +186,11 @@ enum Interpreter {
     static func grammar(tasks: [TaskRef]) -> String {
         let names = tasks.map { "\"\\\"" + gbnfEscape(jsonEscape($0.name)) + "\\\"\"" }
         let task = names.isEmpty ? "str" : names.joined(separator: " | ")
+        let on = Connectors.enabledKinds
+        let alts = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "cloud", "say", "answer"]
+            .filter { on.contains($0) }.joined(separator: " | ")
         return #"""
-        root ::= "{" ws "\"do\":" ws ( push | check | status | history | exclude | find | list | mkdir | rename | move | trash | remember | cloud | say | answer ) ws "}"
+        root ::= "{" ws "\"do\":" ws ( ALTS ) ws "}"
         push ::= "\"push\"," ws "\"task\":" ws task skip?
         check ::= "\"check\"," ws "\"task\":" ws task skip?
         skip ::= "," ws "\"skip\":" ws "[" ws str ( "," ws str ){0,5} ws "]"
@@ -201,7 +212,7 @@ enum Interpreter {
         str ::= "\"" char{1,120} "\""
         char ::= [^"\\\x00-\x1F] | "\\" ["\\/nt]
         ws ::= " "?
-        """#.replacingOccurrences(of: "TASKS", with: task)
+        """#.replacingOccurrences(of: "TASKS", with: task).replacingOccurrences(of: "ALTS", with: alts)
     }
 
     private static func jsonEscape(_ s: String) -> String {
