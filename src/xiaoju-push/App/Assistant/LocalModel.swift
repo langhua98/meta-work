@@ -32,8 +32,8 @@ struct ModelInfo: Identifiable, Hashable {
         id: "4b-xiaoju", name: "Qwen3.5-4B 小橘版 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
         note: "专门训练过调用小橘推送的工具（要先在 Kaggle 训好才能下载）",
         file: "Qwen3.5-4B-xiaoju-Q4_K_M.gguf",
-        url: URL(string: "https://huggingface.co/langhua1998/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf")!,
-        bytes: 2_740_937_888)
+        url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf")!,
+        bytes: 2_783_446_880)
 
     static let all = [qwen, qwen4b, xiaoju4b]
 }
