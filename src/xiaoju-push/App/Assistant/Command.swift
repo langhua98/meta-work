@@ -98,7 +98,7 @@ enum Interpreter {
             if ["检查", "改动", "对比", "check"].contains(where: { s.contains($0) }) { return .check(task: named) }
         }
         // 「查看一下云盘有哪些文件夹」「meta work 里有什么文件」：列文件夹，不交给小模型（它会翻成找「云盘」）
-        if let folder = listFolder(s) { return .find(keyword: "", folder: folder) }
+        if wantsListing(s) { return .find(keyword: "", folder: nil) }
         guard s.count <= 24 else { return nil }
         // 没说哪个任务也照样认：只有一个任务就用它，多个会反问是哪个
         // 打招呼、道谢这种不用模型，也不交给云端
@@ -123,22 +123,12 @@ enum Interpreter {
         return nil
     }
 
-    /// 是「看看某个文件夹里有什么」就返回那个文件夹（云盘根目录是 "/"），不是就 nil
-    static func listFolder(_ s: String) -> String? {
-        guard s.count <= 40,
-              ["哪些", "什么", "列出", "列一下", "列举", "目录结构"].contains(where: { s.contains($0) }),
-              ["文件夹", "目录", "文件"].contains(where: { s.contains($0) }),
-              !["找", "改", "推", "删", "新建", "建", "移动", "重命名", "检查", "写", "为什么", "怎么"].contains(where: { s.contains($0) })
-        else { return nil }
-        var t = s
-        for w in ["帮我", "给我", "请", "查看", "看看", "看一下", "看下", "列出来", "列出", "列一下", "列举", "一下", "所有的", "所有", "全部",
-                  "云盘", "根目录", "里面", "里边", "下面", "底下", "目录结构", "有哪些", "有什么", "哪些", "什么", "文件夹", "目录", "文件",
-                  "里", "下", "中", "都", "有", "的", "吗", "呢", "？", "?", "。", "，", ",", "「", "」"] {
-            t = t.replacingOccurrences(of: w, with: " ")
-        }
-        let name = t.split(separator: " ").joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        if name.isEmpty { return "/" }
-        return name.count <= 30 ? name : nil
+    /// 是不是「看看云盘 / 某个文件夹里有什么」。文件夹名不在这里猜，交给 App 拿云盘里真实的文件夹名去对
+    static func wantsListing(_ s: String) -> Bool {
+        s.count <= 40
+            && ["哪些", "什么", "列出", "列一下", "列举", "目录结构"].contains(where: { s.contains($0) })
+            && ["文件夹", "目录", "文件"].contains(where: { s.contains($0) })
+            && !["找", "改", "推", "删", "新建", "建", "移动", "重命名", "检查", "写", "为什么", "怎么"].contains(where: { s.contains($0) })
     }
 
     /// 小模型被语法逼着一定要选一条指令，闲聊或问题也会被硬翻成「找文件」「新建文件夹」。

@@ -314,14 +314,14 @@ final class ChatModel: ObservableObject {
         if Self.isHandoff(text) {
             guard cloudReady else { say("要先在设置里填 OpenCode 密码才能交给云端。"); return }
             guard let prev = previousUserText() else { say("要交给云端哪件事？直接把要做的事说一遍就行。"); return }
-            add(.understood("把上一句「\(prev.prefix(30))」交给云端", source: "直接认出来"))
+            add(.understood("把上一句「\(prev.prefix(30))」交给云端", source: "规则认出 · 没用模型"))
             await askCloud(prev + "\n（手机上的小模型没处理好这句，用户让你来做。只按这句原话做，不要猜成推送、检查等别的事。）",
                            kind: "ask", auto: true)
             return
         }
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
             if case .say(let q) = c { say(q); return }
-            add(.understood(c.summary, source: "直接认出来"))
+            add(.understood(c.summary, source: "规则认出 · 没用模型"))
             await execute(c, original: text)
             return
         }
@@ -397,7 +397,7 @@ final class ChatModel: ObservableObject {
             guard let m = taskOrComplain(t) else { return }
             confirmExclude(m, path)
         case .find(let k, let folder):
-            await find(k, folder)
+            await find(k, folder, hint: original)
         case .mkdir(let p):
             confirmFileOp(.mkdir(path: p), entry: nil)
         case .rename(let p, _), .move(let p, _), .trash(let p):
@@ -660,12 +660,12 @@ final class ChatModel: ObservableObject {
 
     // MARK: 云盘文件
 
-    private func find(_ keyword: String, _ folder: String?) async {
+    private func find(_ keyword: String, _ folder: String?, hint: String = "") async {
         guard !store.cloudToken.isEmpty else { add(.error("先在设置里填云盘令牌")); return }
         // 没有关键词（或者小模型把「云盘」「文件夹」当成了关键词）= 看看文件夹里有什么
         let k = keyword.trimmingCharacters(in: .whitespaces)
         if k.isEmpty || ["云盘", "文件夹", "目录", "文件", "所有文件", "全部"].contains(k) {
-            await listFolder(folder ?? "/")
+            await listFolder(folder, hint: hint)
             return
         }
         let t = add(.tool(ToolCard(icon: "magnifyingglass", title: "在云盘里找「\(keyword)」", sub: folder ?? "整个云盘")))
@@ -682,19 +682,24 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    /// 列出云盘某个文件夹里有什么；名字不完整就先找到那个文件夹
-    private func listFolder(_ folder: String) async {
-        var path = folder
-        let t = add(.tool(ToolCard(icon: Self.iconFolder, title: "看看云盘 \(path == "/" ? "根目录" : path)", sub: "读取…")))
+    /// 列出云盘某个文件夹里有什么。没指定文件夹时，拿原话去对根目录里真实的文件夹名，
+    /// 话里提到了哪个就列哪个，都没提到就列根目录（不再把「读取」「小橘」这种词当文件夹名）
+    private func listFolder(_ folder: String?, hint: String = "") async {
+        var path = folder.map { CloudFiles.clean($0) } ?? "/"
+        if path.isEmpty { path = "/" }
+        let t = add(.tool(ToolCard(icon: Self.iconFolder, title: "看看云盘", sub: "读取…")))
         do {
             if path != "/", try await files.item(path) == nil {
-                let hits = try await files.resolve(path).filter(\.isFolder)
-                guard let h = hits.first else {
-                    tool(t) { $0.state = .failed; $0.sub = "没有这个文件夹" }
-                    say("云盘里没找到叫「\(folder)」的文件夹。")
-                    return
+                path = try await files.resolve(path).first(where: \.isFolder)?.fullPath ?? "/"
+            }
+            if path == "/", !hint.isEmpty {
+                func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "") }
+                let said = norm(hint)
+                let root = try await files.list("/", limit: 200).filter(\.isFolder)
+                if let hit = root.filter({ said.contains(norm($0.name)) && norm($0.name).count >= 2 })
+                    .max(by: { $0.name.count < $1.name.count }) {
+                    path = hit.fullPath
                 }
-                path = h.fullPath
             }
             let all = try await files.list(path, limit: 200)
             let dirs = all.filter(\.isFolder), others = all.filter { !$0.isFolder }
