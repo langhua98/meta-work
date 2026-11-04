@@ -207,7 +207,7 @@ enum Interpreter {
         cloud ::= "\"cloud\"," ws "\"text\":" ws str
         say ::= "\"say\"," ws "\"text\":" ws str
         answer ::= "\"answer\"," ws "\"text\":" ws long
-        long ::= "\"" char{1,300} "\""
+        long ::= "\"" char{1,160} "\""
         task ::= TASKS
         str ::= "\"" char{1,120} "\""
         char ::= [^"\\\x00-\x1F] | "\\" ["\\/nt]
