@@ -47,6 +47,9 @@ HARD = [
     ("删掉 /临时", {"trash"}, {"path": "临时"}),
     ("以后都别推 build 文件夹", {"exclude"}, {"path": "build"}),
     ("今天天气不错", {"answer"}, {}),
+    # 问某个连接器：答案里不该混进别的连接器的工具（键名带 ! 表示「不能包含」）
+    ("列举你可以对小橘云盘的工具调用操作有哪些", {"answer"}, {"text!": "推送"}),
+    ("GitHub 那边你能做什么", {"answer"}, {"text!": "回收站"}),
 ]
 
 
@@ -59,6 +62,10 @@ def parse(out):
 
 def args_ok(o, want):
     for k, v in want.items():
+        if k.endswith("!"):
+            if v in str(o.get(k[:-1], "")):
+                return False
+            continue
         got = o.get(k)
         if isinstance(got, list):
             got = " ".join(got)
