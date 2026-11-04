@@ -30,9 +30,9 @@ struct ModelInfo: Identifiable, Hashable {
     /// 在 Kaggle 上用小橘推送的工具调用数据微调过的 4B（scripts/finetune/train_kaggle.ipynb 训好后传到 HF）
     static let xiaoju4b = ModelInfo(
         id: "4b-xiaoju", name: "Qwen3.5-4B 小橘版 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
-        note: "专门训练过调用小橘推送的工具（要先在 Kaggle 训好才能下载）",
-        file: "Qwen3.5-4B-xiaoju-Q4_K_M.gguf",
-        url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf")!,
+        note: "专门训练过调用小橘推送的工具（第二版），最懂你的话",
+        file: "Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf")!,
         bytes: 2_783_446_880)
 
     static let all = [qwen, qwen4b, xiaoju4b]
@@ -66,6 +66,8 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     override init() {
         selectedID = UserDefaults.standard.string(forKey: "localModel") ?? ModelInfo.qwen.id
         super.init()
+        // 第一版小橘模型换成第二版了，旧文件（2.6 GB）删掉腾空间
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent("Qwen3.5-4B-xiaoju-Q4_K_M.gguf"))
         refresh()
     }
 
