@@ -1,20 +1,20 @@
 import SwiftUI
 
-// 设置里的：本地模型、整理令牌、云端大模型、记忆。
+// 设置 → 本地模型；记忆页。（令牌、云端开关都在连接器里）
 
-struct AssistantSettingsSections: View {
+struct LocalModelSettingsView: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var models = ModelStore.shared
     @AppStorage("memoryHUD") private var showHUD = true
 
     var body: some View {
-        Group {
-            modelSection
-            organizeSection
-            cloudSection
-            memorySection
+        Form {
+            modelSection.listRowBackground(Theme.card)
         }
-        .listRowBackground(Theme.card)
+        .scrollContentBackground(.hidden)
+        .background(Theme.bg)
+        .navigationTitle("本地模型")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var modelSection: some View {
@@ -68,35 +68,6 @@ struct AssistantSettingsSections: View {
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private var organizeSection: some View {
-        Section {
-            SecureField("xa_ 开头的整理令牌", text: $store.organizeToken)
-        } header: { Text("管理云盘文件") } footer: {
-            Text("改名、移动、放回收站、写记忆要用。在网盘「Agent 令牌」里新建一个带「整理」权限的。不填就只能找文件。删除永远只放进回收站。")
-        }
-    }
-
-    private var cloudSection: some View {
-        Section {
-            TextField("地址", text: $store.openCodeURL)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-            SecureField("OpenCode 密码", text: $store.openCodePassword)
-            Toggle("本地搞不定自动问云端", isOn: $store.autoCloud).tint(Theme.orange)
-            Toggle("快速模式", isOn: $store.cloudFast).tint(Theme.orange)
-        } header: { Text("云端大模型（HF 上的 OpenCode）") } footer: {
-            Text("快速模式用 DeepSeek Flash，快很多；关掉用 V4 Pro，难题更稳但慢。密码是 Space 里的 OPENCODE_SERVER_PASSWORD。云端只出方案，改东西前都会先问你。")
-        }
-    }
-
-    private var memorySection: some View {
-        Section {
-            NavigationLink("看记忆") { MemoryView() }
-                .disabled(store.cloudToken.isEmpty)
-        } header: { Text("记忆") } footer: {
-            Text("说「记住…」或纠正它时才会记，一个主题一个文件，存在云盘 \(CloudFiles.memoryFolder)/。")
-        }
     }
 }
 

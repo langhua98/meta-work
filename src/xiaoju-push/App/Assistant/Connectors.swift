@@ -176,6 +176,8 @@ struct ConnectorDetailView: View {
                     TextField("地址", text: $store.openCodeURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     SecureField("OpenCode 密码", text: $store.openCodePassword)
+                    Toggle("本地搞不定自动问云端", isOn: $store.autoCloud).tint(Theme.orange)
+                    Toggle("快速模式（DeepSeek Flash）", isOn: $store.cloudFast).tint(Theme.orange)
                 }
                 if connector.id != "opencode" {
                     Button {
@@ -186,7 +188,7 @@ struct ConnectorDetailView: View {
                     .disabled(testing || !Self.linked(connector, store))
                 }
                 if !result.isEmpty { Text(result).font(.footnote).foregroundStyle(Theme.muted) }
-            } header: { Text("账号") } footer: { Text(connector.note + "。令牌存在手机钥匙串里。") }
+            } header: { Text("账号") } footer: { Text(footer) }
             .listRowBackground(Theme.card)
 
             Section {
@@ -218,6 +220,14 @@ struct ConnectorDetailView: View {
         .background(Theme.bg)
         .navigationTitle(connector.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var footer: String {
+        switch connector.id {
+        case "cloud": return "在网盘网页的「Agent 令牌」里新建。只读令牌够找文件、检查改动；新建、改名、移动、放回收站、写记忆要带「整理」权限的令牌。令牌存在手机钥匙串里。"
+        case "github": return "GitHub → Settings → Developer settings → Personal access tokens 新建，要能写目标仓库（Contents: Read and write）。令牌存在手机钥匙串里。"
+        default: return "密码是 Space 里的 OPENCODE_SERVER_PASSWORD。快速模式用 DeepSeek Flash，快很多；关掉用 V4 Pro，难题更稳但慢。云端只出方案，改东西前都会先问你。"
+        }
     }
 
     private func test() {

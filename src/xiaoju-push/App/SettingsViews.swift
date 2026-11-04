@@ -1,6 +1,6 @@
 import SwiftUI
 
-// 设置：云盘地址、两个令牌、外观、自动检查、提交说明模板；
+// 设置首页：账号、连接器、本地模型、记忆、推送习惯、外观、关于（令牌都在连接器里）；
 // 以及编辑推送任务（选云盘文件夹、选仓库、选不推的文件夹）。
 
 extension Mapping {
@@ -15,31 +15,49 @@ extension Mapping {
 struct SettingsView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) private var dismiss
-    @State private var cloudResult = ""
-    @State private var githubResult = ""
-    @State private var testing = false
+    @ObservedObject private var models = ModelStore.shared
+    @AppStorage("memoryHUD") private var showHUD = true
+    @State private var login = ""
     @State private var notificationsOff = false
     @State private var newTemplate = ""
 
     var body: some View {
         NavigationStack {
             Form {
+                accountCard
                 Section {
-                    NavigationLink {
-                        ConnectorsView()
-                    } label: {
-                        Label("连接器", systemImage: "puzzlepiece.extension")
+                    NavigationLink { ConnectorsView() } label: {
+                        SettingsRow(icon: "powerplug", title: "连接器", sub: connectorsSub)
                     }
-                } footer: { Text("小橘云盘、GitHub、OpenCode：连上账号，选模型能用哪些工具。") }
+                }
                 .listRowBackground(Theme.card)
-                cloudSection
-                githubSection
-                testSection
-                AssistantSettingsSections()
-                appearanceSection
-                autoCheckSection
-                templateSection
-                aboutSection
+                Section("助手") {
+                    NavigationLink { LocalModelSettingsView() } label: {
+                        SettingsRow(icon: "cpu", title: "本地模型",
+                                    sub: models.info.short + (models.downloaded ? " · 已下载" : " · 还没下载") + (showHUD ? " · 底部显示内存" : ""))
+                    }
+                    NavigationLink { MemoryView() } label: {
+                        SettingsRow(icon: "brain", title: "记忆", sub: "存在云盘 \(CloudFiles.memoryFolder)/")
+                    }
+                    .disabled(store.cloudToken.isEmpty)
+                }
+                .listRowBackground(Theme.card)
+                Section("推送") {
+                    NavigationLink { pushPrefs } label: {
+                        SettingsRow(icon: "arrow.up.circle", title: "推送习惯",
+                                    sub: (store.autoCheck ? "后台自动检查" : "不自动检查") + " · 提交说明模板 \(store.templates.count) 个")
+                    }
+                }
+                .listRowBackground(Theme.card)
+                Section("App") {
+                    NavigationLink { appearancePage } label: {
+                        SettingsRow(icon: "circle.lefthalf.filled", title: "外观", sub: ["跟随系统", "浅色", "深色"][min(2, max(0, store.appearance))])
+                    }
+                    NavigationLink { aboutPage } label: {
+                        SettingsRow(icon: "info.circle", title: "关于", sub: "版本 \(Self.version) · 重新看引导")
+                    }
+                }
+                .listRowBackground(Theme.card)
             }
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
@@ -50,48 +68,76 @@ struct SettingsView: View {
                     Button("完成") { Haptics.tap(); dismiss() }
                 }
             }
+            .task {
+                guard login.isEmpty, !store.githubToken.isEmpty else { return }
+                login = (try? await store.engine().whoami()) ?? ""
+            }
         }
     }
 
-    // MARK: 令牌
-
-    private var cloudSection: some View {
-        Section {
-            TextField("地址", text: $store.cloudURL)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-            SecureField("xa_ 开头的令牌", text: $store.cloudToken)
-        } header: { Text("小橘云盘") } footer: {
-            Text("在网盘网页的「Agent 令牌」里新建，只读就够。")
-        }
-        .listRowBackground(Theme.card)
+    static var version: String {
+        let i = Bundle.main.infoDictionary
+        return "\(i?["CFBundleShortVersionString"] as? String ?? "?") (\(i?["CFBundleVersion"] as? String ?? "?"))"
     }
 
-    private var githubSection: some View {
-        Section {
-            SecureField("GitHub 令牌", text: $store.githubToken)
-        } header: { Text("GitHub") } footer: {
-            Text("GitHub → Settings → Developer settings → Personal access tokens 新建，要能写目标仓库（Contents: Read and write）。令牌存在手机钥匙串里。")
-        }
-        .listRowBackground(Theme.card)
+    private var connectorsSub: String {
+        let linked = Connector.all.filter { ConnectorDetailView.linked($0, store) && Connectors.isOn($0) }
+        return linked.isEmpty ? "还没连上，点进去填账号" : linked.map(\.name).joined(separator: " · ") + " 已连上"
     }
 
-    private var testSection: some View {
+    // MARK: 账号卡片
+
+    private var accountCard: some View {
         Section {
-            Button {
-                Haptics.tap()
-                test()
-            } label: {
-                HStack {
-                    Text(testing ? "测试中…" : "测试连接")
-                    Spacer()
-                    if testing { ProgressView() }
+            HStack(spacing: 12) {
+                Text(String((login.isEmpty ? "小" : login).prefix(1)).uppercased())
+                    .font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.onAccent)
+                    .frame(width: 44, height: 44).background(Theme.orange, in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(login.isEmpty ? (store.githubToken.isEmpty ? "还没连 GitHub" : "GitHub 已连上") : login)
+                        .font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
+                    Text("\(store.mappings.count) 个任务 · 本地模型 \(models.info.short) · 云端\(store.cloudFast ? "快速模式" : "V4 Pro")")
+                        .font(.system(size: 12)).foregroundStyle(Theme.muted)
                 }
             }
-            .disabled(testing || !store.ready)
-            if !cloudResult.isEmpty { Text(cloudResult).font(.footnote).foregroundStyle(Theme.muted) }
-            if !githubResult.isEmpty { Text(githubResult).font(.footnote).foregroundStyle(Theme.muted) }
+            .padding(.vertical, 4)
         }
         .listRowBackground(Theme.card)
+    }
+
+    // MARK: 子页面
+
+    private var pushPrefs: some View {
+        Form {
+            autoCheckSection
+            templateSection
+        }
+        .scrollContentBackground(.hidden)
+        .background(Theme.bg)
+        .navigationTitle("推送习惯")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var appearancePage: some View {
+        Form { appearanceSection }
+            .scrollContentBackground(.hidden)
+            .background(Theme.bg)
+            .navigationTitle("外观")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var aboutPage: some View {
+        Form {
+            Section {
+                LabeledContent("版本", value: Self.version)
+            }
+            .listRowBackground(Theme.card)
+            aboutSection
+        }
+        .scrollContentBackground(.hidden)
+        .background(Theme.bg)
+        .navigationTitle("关于")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: 外观
@@ -207,29 +253,24 @@ struct SettingsView: View {
         }
         .listRowBackground(Theme.card)
     }
+}
 
-    private func test() {
-        testing = true
-        cloudResult = ""
-        githubResult = ""
-        let e = store.engine()
-        Task {
-            var ok = true
-            do {
-                cloudResult = "云盘：✓ \(try await e.checkCloud())"
-            } catch {
-                ok = false
-                cloudResult = "云盘：✗ \(error.localizedDescription)"
+/// 设置首页的一行：图标 + 标题 + 一行状态
+struct SettingsRow: View {
+    let icon: String
+    let title: String
+    let sub: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Theme.text)
+                .frame(width: 32, height: 32).background(Theme.raised, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 16)).foregroundStyle(Theme.text)
+                Text(sub).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(1)
             }
-            do {
-                githubResult = "GitHub：✓ \(try await e.whoami())"
-            } catch {
-                ok = false
-                githubResult = "GitHub：✗ \(error.localizedDescription)"
-            }
-            if ok { Haptics.success() } else { Haptics.error() }
-            testing = false
         }
+        .padding(.vertical, 2)
     }
 }
 

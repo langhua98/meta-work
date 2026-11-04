@@ -2,18 +2,22 @@ import AVFoundation
 import Speech
 import SwiftUI
 
-// 按住麦克风说话：边说边把文字填进输入框，松手发送。用系统的语音识别（中文）。
+// 点一下麦克风开始说话，边说边把文字填进输入框；停顿两秒或再点一下就停，文字留在输入框里，看一眼再发。用系统的语音识别（中文）。
 
 @MainActor
 final class SpeechInput: ObservableObject {
     @Published var text = ""
     @Published var recording = false
+    /// 刚停：最后一句识别结果还在路上
+    @Published var finishing = false
     @Published var error = ""
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    private var lastChange = Date()
+    private var watcher: Task<Void, Never>?
 
     func start() {
         error = ""
@@ -25,18 +29,40 @@ final class SpeechInput: ObservableObject {
                 return
             }
             guard recording else { return }
-            do { try begin() } catch { fail("录音开不了：\(error.localizedDescription)") }
+            do { try begin() } catch { fail("录音开不了：\(error.localizedDescription)"); return }
+            watch()
+        }
+    }
+
+    /// 说完停顿 2 秒自动停；一直没说话 8 秒也停；最长 60 秒
+    private func watch() {
+        lastChange = Date()
+        let started = Date()
+        watcher?.cancel()
+        watcher = Task { @MainActor [weak self] in
+            while let self, self.recording, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                let quiet = Date().timeIntervalSince(self.lastChange)
+                if (!self.text.isEmpty && quiet > 2) || (self.text.isEmpty && quiet > 8)
+                    || Date().timeIntervalSince(started) > 60 {
+                    Haptics.tap()
+                    self.stop()
+                }
+            }
         }
     }
 
     func stop() {
         guard recording else { return }
         recording = false
+        finishing = true
+        watcher?.cancel()
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
         request?.endAudio()
         // 留一点时间让最后一句识别出来，再收尾
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.finishing = false
             self?.task?.finish()
             self?.task = nil
             self?.request = nil
@@ -55,7 +81,10 @@ final class SpeechInput: ObservableObject {
         task = recognizer.recognitionTask(with: req) { [weak self] result, _ in
             guard let result else { return }
             let s = result.bestTranscription.formattedString
-            Task { @MainActor in self?.text = s }
+            Task { @MainActor in
+                if self?.text != s { self?.lastChange = Date() }
+                self?.text = s
+            }
         }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)

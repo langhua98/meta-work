@@ -350,6 +350,16 @@ final class ChatModel: ObservableObject {
             try await LocalModel.shared.load(path: path)
             LocalModelIsLoaded.value = true
             update(thinking, .thinking("本地模型在理解你的话"))
+            // 每秒更新一下秒数，看得出它在算、没卡死
+            let ticker = Task { @MainActor [weak self] in
+                var n = 0
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    n += 1
+                    if n >= 2 { self?.update(thinking, .thinking("本地模型在理解你的话（\(n) 秒）")) }
+                }
+            }
+            defer { ticker.cancel() }
             // 提示里写的是 2B，换成现在用的模型名（问「你是谁」时答对）
             let prefix = p.prefix.replacingOccurrences(of: "Qwen3.5-2B", with: ModelStore.shared.info.short)
             out = try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)

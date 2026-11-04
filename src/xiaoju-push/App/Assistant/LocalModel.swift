@@ -183,6 +183,9 @@ actor LocalModel {
     private var vocab: OpaquePointer?
     /// 已经算进 KV 缓存的前缀（固定说明），下次同样的前缀就不用重算
     private var cachedPrefix: [llama_token] = []
+    /// 前缀算完后的整个状态快照。Qwen3.5 有循环层，KV 缓存删不掉后半段，
+    /// 以前每句话都要把两千多字的说明重算一遍（4B 要十几二十秒，看着像卡住）；现在算一次存起来，下次直接恢复。
+    private var prefixState: [UInt8] = []
     private var idleTimer: Task<Void, Never>?
     private static var backendReady = false
 
@@ -245,6 +248,7 @@ actor LocalModel {
         model = nil
         vocab = nil
         cachedPrefix = []
+        prefixState = []
     }
 
     /// 用完后 2 分钟没人用就释放
@@ -279,6 +283,24 @@ actor LocalModel {
         return buf.prefix(Int(max(0, n))).map { UInt8(bitPattern: $0) }
     }
 
+    private func savePrefix() {
+        guard let ctx else { return }
+        let n = llama_state_seq_get_size(ctx, 0)
+        guard n > 0, n < 400 * 1_048_576 else { return }
+        var buf = [UInt8](repeating: 0, count: n)
+        let got = buf.withUnsafeMutableBufferPointer { llama_state_seq_get_data(ctx, $0.baseAddress, n, 0) }
+        prefixState = got == n ? buf : []
+    }
+
+    private func restorePrefix(_ mem: llama_memory_t?) -> Bool {
+        guard let ctx else { return false }
+        llama_memory_clear(mem, true)
+        let n = prefixState.count
+        let got = prefixState.withUnsafeBufferPointer { llama_state_seq_set_data(ctx, $0.baseAddress, n, 0) }
+        if got == 0 { prefixState = []; llama_memory_clear(mem, true); return false }
+        return true
+    }
+
     private func decode(_ tokens: [llama_token]) throws {
         guard let ctx, !tokens.isEmpty else { return }
         var toks = tokens
@@ -301,9 +323,11 @@ actor LocalModel {
         let mem = llama_get_memory(ctx)
         // 只保留前缀、删掉后面的；模型里有循环层时删不了（返回 false），就整个重算
         if pre == cachedPrefix, llama_memory_seq_rm(mem, 0, llama_pos(pre.count), -1) {
+        } else if pre == cachedPrefix, !prefixState.isEmpty, restorePrefix(mem) {
         } else {
             llama_memory_clear(mem, true)
             cachedPrefix = []
+            prefixState = []
             var i = 0
             while i < pre.count {
                 // 点了停止：长提示词读到一半也马上停（不然下一句要排在它后面等）
@@ -313,6 +337,7 @@ actor LocalModel {
                 i += chunk.count
             }
             cachedPrefix = pre
+            savePrefix()
         }
         try decode(suf)
 

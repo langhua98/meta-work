@@ -59,7 +59,7 @@ struct ChatView: View {
         }
         .onAppear { model.start() }
         .onDisappear { model.leave() }
-        .onChange(of: speech.text) { if speech.recording { input = speech.text } }
+        .onChange(of: speech.text) { if speech.recording || speech.finishing { input = speech.text } }
     }
 
     /// 标题：编码助手 + 当前任务，点开换任务
@@ -177,7 +177,7 @@ struct ChatView: View {
             }
             .accessibilityLabel("更多")
 
-            TextField(speech.recording ? "在听…" : "输入或长按说话", text: $input, axis: .vertical)
+            TextField(speech.recording ? "在听…" : "输入或点麦克风说话", text: $input, axis: .vertical)
                 .font(.system(size: 17))
                 .lineLimit(1...6)
                 .focused($focused)
@@ -186,16 +186,16 @@ struct ChatView: View {
                 .frame(minHeight: 44)
 
             if !hasText || speech.recording {
-                circle(icon: speech.recording ? "waveform" : "mic", fill: speech.recording ? Theme.orange : Theme.raised,
-                       fg: speech.recording ? Theme.onAccent : Theme.text)
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if !speech.recording { Haptics.medium(); input = ""; speech.start() } }
-                        .onEnded { _ in
-                            speech.stop()
-                            Haptics.tap()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { sendInput() }
-                        })
-                    .accessibilityLabel("按住说话")
+                Button {
+                    if speech.recording { Haptics.tap(); speech.stop() }
+                    else { Haptics.medium(); input = ""; speech.start() }
+                } label: {
+                    circle(icon: speech.recording ? "waveform" : "mic", fill: speech.recording ? Theme.orange : Theme.raised,
+                           fg: speech.recording ? Theme.onAccent : Theme.text)
+                        .symbolEffect(.variableColor.iterative, isActive: speech.recording)
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(speech.recording ? "停止录音" : "说话")
             }
 
             Button {
