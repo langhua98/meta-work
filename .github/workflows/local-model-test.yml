@@ -8,6 +8,7 @@ on:
     paths:
       - "src/xiaoju-push/App/Assistant/Command.swift"
       - "scripts/local-model-test/**"
+      - "scripts/finetune/make_data.py"
       - ".github/workflows/local-model-test.yml"
 
 permissions:
@@ -58,3 +59,6 @@ jobs:
           "$srv" -m /tmp/model/m.gguf -c 3072 --port 8080 -np 1 > /tmp/server.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/health && break; sleep 2; done
           python3 scripts/local-model-test/run.py || { tail -30 /tmp/server.log; exit 1; }
+      - name: 对比考试（只打印成绩，不算失败）
+        continue-on-error: true
+        run: python3 scripts/local-model-test/compare.py
