@@ -124,6 +124,38 @@ final class ChatModel: ObservableObject {
 
     func start() {
         Task { await loadMemory() }
+        watchBusy()
+    }
+
+    private var watching = false
+    private var idleTicks = 0
+
+    /// 保险：转圈中但界面上已经没有任何在跑的东西（没在想、没有转圈的卡片、云端没在干活）超过 6 秒，
+    /// 就把发送键变回来。正常不会触发；万一哪里没收尾，不让人一直对着停止键。
+    private func watchBusy() {
+        guard !watching else { return }
+        watching = true
+        Task { @MainActor [weak self] in
+            while let self {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard self.busy else { self.idleTicks = 0; continue }
+                let active = self.items.suffix(8).contains { it in
+                    switch it.kind {
+                    case .thinking: return true
+                    case .tool(let t): return t.state == .busy
+                    case .work(let w): return w.running
+                    default: return false
+                    }
+                }
+                self.idleTicks = active ? 0 : self.idleTicks + 1
+                if self.idleTicks >= 3 {
+                    self.idleTicks = 0
+                    self.jobID = UUID()
+                    self.job = nil
+                    self.busy = false
+                }
+            }
+        }
     }
 
     /// 从首页点了某个任务：只换当前任务，不自动检查（要检查点「检查改动」或直接说）
