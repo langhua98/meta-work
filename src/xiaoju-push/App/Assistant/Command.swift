@@ -188,6 +188,7 @@ enum Interpreter {
         代码里有几个 py 文件 → {"do":"run","cmd":"find . -name '*.py' | wc -l"}
         $ ls -la → {"do":"run","cmd":"ls -la"}
         搜一下 SwiftUI 怎么做下拉刷新 → {"do":"search","q":"SwiftUI 下拉刷新"}
+        搜一下代码里的 apiKey → {"do":"run","cmd":"grep -rn apiKey ."}
         看看 https://example.com 写了什么 → {"do":"fetch","url":"https://example.com"}
         你是谁 → {"do":"answer","text":"我是小橘推送里的本地模型 Qwen3.5-2B，在你手机上跑，不联网。"}
         早上好 → {"do":"answer","text":"早上好！今天要推哪个项目？"}
