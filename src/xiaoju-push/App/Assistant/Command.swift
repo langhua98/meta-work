@@ -149,7 +149,7 @@ enum Interpreter {
         {"do":"move","path":"/路径","to":"/目标文件夹"} 移动
         {"do":"trash","path":"/路径"} 删除（放进回收站）
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
-        {"do":"run","cmd":"命令"} 在当前任务的代码文件夹里跑一条命令：grep -rn 搜代码、ls、cat、head、wc、find、sed、git status/diff/log/add/commit。没有 bash/npm/python，复杂的用 sh -c
+        {"do":"run","cmd":"命令"} 在当前任务的手机工作区里跑一条命令：grep -rn 搜代码、ls、cat、head、wc、find、sed、git status/diff/log/add/commit。没有 bash/npm/python，复杂的用 sh -c
         {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
         {"do":"say","text":"问题"} 缺信息时反问，比如没说是哪个任务
         {"do":"answer","text":"回答"} 问你是谁、能做什么、有什么工具、怎么用这个 App、打招呼闲聊、简单常识：自己用中文直接回答，两三句
