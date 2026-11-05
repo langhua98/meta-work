@@ -88,8 +88,14 @@ enum Interpreter {
     // MARK: 关键词（不用模型，马上出结果）
 
     static func keyword(_ text: String, tasks: [TaskRef], current: Mapping?) -> Command? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 「运行命令 xxx」「$ xxx」：用户自己写好了命令，直接跑，不用模型猜
+        for p in ["运行命令", "跑命令", "执行命令", "运行", "$"] where t.hasPrefix(p) {
+            let c = t.dropFirst(p.count).trimmingCharacters(in: CharacterSet(charactersIn: " ：:\t"))
+            if let first = c.split(separator: " ").first, ShellRunner.commands.contains(String(first)) { return .run(c) }
+        }
         // 只认快捷按钮发出来的原话（一个字不差），其他都让模型自己理解
-        switch text.trimmingCharacters(in: .whitespacesAndNewlines) {
+        switch t {
         case "检查一下有什么改动": return .check(task: nil)
         case "推送": return .push(task: nil)
         case "推送记录": return .history(task: nil)
