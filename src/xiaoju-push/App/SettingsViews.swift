@@ -16,6 +16,7 @@ struct SettingsView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var models = ModelStore.shared
+    @ObservedObject private var fixBook = FixBook.shared
     @AppStorage("memoryHUD") private var showHUD = true
     @State private var login = ""
     @State private var notificationsOff = false
@@ -40,6 +41,10 @@ struct SettingsView: View {
                         SettingsRow(icon: "brain", title: "记忆", sub: "存在云盘 \(CloudFiles.memoryFolder)/")
                     }
                     .disabled(store.cloudToken.isEmpty)
+                    NavigationLink { FixBookView() } label: {
+                        SettingsRow(icon: "checkmark.bubble", title: "纠错本",
+                                    sub: "\(fixBook.fixes.count) 条 · 本地模型下次照着做，也是升级用的训练数据")
+                    }
                 }
                 .listRowBackground(Theme.card)
                 Section("推送") {
