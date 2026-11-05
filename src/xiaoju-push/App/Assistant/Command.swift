@@ -157,7 +157,7 @@ enum Interpreter {
         {"do":"trash","path":"/路径"} 删除（放进回收站）
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
         {"do":"run","cmd":"命令"} 在当前任务的手机工作区里跑一条命令：grep -rn 搜代码、ls、cat、head、wc、find、sed、git status/diff/log/add/commit、python3、pip install（纯 Python 包）、node（没有 npm）、sqlite3、jq、ssh/scp。没有 bash，复杂的用 sh -c
-        {"do":"search","q":"关键词"} 上网搜资料、文档、报错信息、最新消息
+        {"do":"search","q":"关键词"} 上网搜资料、文档、报错信息、最新消息（搜代码里的东西不用这个，用 run 跑 grep）
         {"do":"fetch","url":"网址"} 打开一个网页，读里面的文字（用户给了网址，或要看刚搜到的某一条）
         {"do":"shortcut","name":"快捷指令的名字"} 运行用户 iPhone 上的某个快捷指令（用户说「运行快捷指令 xxx」）
         {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
