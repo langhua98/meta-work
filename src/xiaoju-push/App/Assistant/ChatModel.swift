@@ -74,6 +74,8 @@ final class ChatModel: ObservableObject {
     private var jobID = UUID()
     private var plans: [UUID: Plan] = [:]
     private var lastCommand: String?
+    /// 云盘任务的手机副本上次同步时间
+    private var mirrorSynced: [UUID: Date] = [:]
     private var recent: [String] = []
     private var memoryIndex = ""
     private var memoryLoaded = false
@@ -362,7 +364,8 @@ final class ChatModel: ObservableObject {
     private func handle(_ text: String) async {
         let ts = tasks
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
-            add(.understood(c.summary, source: "快捷按钮"))
+            if case .run = c { add(.understood(c.summary, source: "你写的命令，直接跑")) }
+            else { add(.understood(c.summary, source: "快捷按钮")) }
             await execute(c, original: text)
             return
         }
@@ -861,6 +864,26 @@ final class ChatModel: ObservableObject {
         return (Workspace.base, "工作区")
     }
 
+    /// git 命令要在 git 仓库里跑。工作区是 ZIP 下载的、云盘副本也没有 .git，先说清楚，不让它报一串看不懂的错
+    private func notAGitRepo(_ command: String) -> String? {
+        let words = command.split(separator: " ").map(String.init)
+        guard let first = words.first, first == "git" || first == "lg2" else { return nil }
+        let sub = words.dropFirst().first(where: { !$0.hasPrefix("-") }) ?? ""
+        if ["clone", "init", "version", "help", "config", "ls-remote"].contains(sub) { return nil }
+        let (dir, label) = shellFolder()
+        var u = dir
+        for _ in 0..<12 {
+            if FileManager.default.fileExists(atPath: u.appendingPathComponent(".git").path) { return nil }
+            let up = u.deletingLastPathComponent()
+            if up.path == u.path { break }
+            u = up
+        }
+        if let m = currentTask, !m.workspace {
+            return "「\(label)」是云盘代码在手机上的副本，里面没有 git 记录，git \(sub) 用不了。想看这次改了什么，说「检查改动」就行（直接和 GitHub 上的比）。"
+        }
+        return "「\(label)」里是从 GitHub 下载的文件，不是 git 仓库，git \(sub) 用不了。想看改了什么，说「检查改动」就行（直接和 GitHub 上的比）。"
+    }
+
     /// 云盘任务：跑命令前先把云盘代码同步到手机（只下新的和改过的）。失败返回 false。
     private func syncMirrorIfNeeded() async -> Bool {
         guard let m = currentTask, !m.workspace, !m.cloudPath.isEmpty else { return true }
@@ -868,9 +891,12 @@ final class ChatModel: ObservableObject {
             say("「\(m.title)」的代码在云盘里，要先在「设置 → 连接器 → 小橘云盘」填令牌，才能同步到手机上跑命令。")
             return false
         }
+        // 连着跑几条命令时不用每次都去云盘对一遍（列文件夹要好几次请求）
+        if let last = mirrorSynced[m.id], Date().timeIntervalSince(last) < 120 { return true }
+        let mirror = CloudMirror(mapping: m, engine: store.engine())
         let t = add(.tool(ToolCard(icon: "arrow.down.circle", title: "把云盘里的 \(m.title) 同步到手机", sub: "看看有哪些文件…")))
         do {
-            let r = try await CloudMirror(mapping: m, engine: store.engine()).sync { [weak self] done, total in
+            let r = try await mirror.sync { [weak self] done, total in
                 self?.tool(t) {
                     $0.sub = total == 0 ? "都是最新的" : "下载 \(done) / \(total)"
                     $0.progress = total == 0 ? nil : Double(done) / Double(total)
@@ -884,14 +910,22 @@ final class ChatModel: ObservableObject {
                 if r.skipped > 0 { parts.append("\(r.skipped) 个太大没下") }
                 $0.sub = parts.joined(separator: " · ")
             }
+            mirrorSynced[m.id] = Date()
             return true
         } catch {
-            tool(t) { $0.state = .failed; $0.progress = nil; $0.sub = error.localizedDescription }
-            return false
+            // 连不上云盘但以前同步过：用旧的副本接着跑，说一声
+            let old = (try? FileManager.default.contentsOfDirectory(atPath: mirror.root.path))?.contains { !$0.hasPrefix(".") } ?? false
+            tool(t) {
+                $0.state = .failed; $0.progress = nil
+                $0.sub = (old ? "同步失败，用上次的副本：" : "") + error.localizedDescription
+            }
+            return old && !Task.isCancelled
         }
     }
 
-    private func shell(_ command: String, original: String) async {
+    private func shell(_ raw: String, original: String) async {
+        let command = ShellSafety.normalize(raw)
+        if let why = notAGitRepo(command) { say(why); return }
         switch ShellSafety.check(command) {
         case .safe:
             await runShell(command)
@@ -969,7 +1003,9 @@ final class ChatModel: ObservableObject {
             $0.seconds = r.seconds
             $0.state = r.killed ? .killed : (r.ok || notFound ? .ok : .failed(r.status))
         }
-        lastCommand = "跑了命令 \(command)" + (r.ok ? "" : "，出错了")
+        // 下一句话的上下文：命令 + 结果前几行（「打开第一个文件」这种才知道指的是什么）
+        let head = (notFound ? "没找到" : r.output).split(separator: "\n").prefix(3).joined(separator: " | ")
+        lastCommand = "跑了命令 \(command)" + (r.ok || notFound ? "" : "，出错了") + (head.isEmpty ? "" : "，结果：" + String(head.prefix(200)))
     }
 
     /// git 配置：提交作者用 GitHub 用户名，推送用 GitHub 令牌。只在第一次跑命令时问一下 GitHub 你是谁。

@@ -61,6 +61,21 @@ enum ShellSafety {
         return .safe
     }
 
+    /// 常见的小疏忽补一下：grep -r 没写在哪搜（会去读空的输入，什么都搜不到）就补上「.」（当前文件夹）
+    static func normalize(_ command: String) -> String {
+        let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard segments(cmd).count == 1, !cmd.contains("\""), !cmd.contains("'") else { return cmd }
+        let words = cmd.split(separator: " ").map(String.init)
+        guard let name = words.first, ["grep", "egrep", "fgrep"].contains(name) else { return cmd }
+        let flags = words.dropFirst().filter { $0.hasPrefix("-") }
+        let args = words.dropFirst().filter { !$0.hasPrefix("-") }
+        let recursive = flags.contains { $0.hasPrefix("-") && !$0.hasPrefix("--") && ($0.contains("r") || $0.contains("R")) }
+            || flags.contains("--recursive")
+        // -e/-f 这类后面跟参数的，不去猜
+        if flags.contains(where: { ["-e", "-f", "--include", "--exclude"].contains($0) }) { return cmd }
+        return recursive && args.count == 1 ? cmd + " ." : cmd
+    }
+
     /// 按 | ; && || 分段（引号里的不算）
     static func segments(_ s: String) -> [String] {
         var out: [String] = [], cur = "", quote: Character? = nil
