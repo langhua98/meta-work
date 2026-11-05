@@ -34,6 +34,7 @@
   - `node` / `js`：iPhone 自带的 JavaScriptCore，有 console、process、`require("fs")`、`require("path")`，没有 npm。
   - `jq`、`ssh` / `scp` / `sftp` / `ssh-keygen`（密钥在 ~/.ssh）。
   - 没有 bash、npm。
+- git 历史：任务对着整个仓库时，第一次跑 git log / diff / blame 会先从 GitHub clone 一份，只把 `.git` 放进命令文件夹（文件本身不动），半小时内不重拿；工作区「从 GitHub 拉」时也会顺便更新。所以 `git status` / `git diff` 看到的是手机上和 GitHub 的差别。
 - 只看不改的直接跑；删文件、写文件（>）、`sed -i`、git commit / push / reset 这类先出确认卡片（`App/Shell/ShellSafety.swift`）。一条命令最多 2 分钟，停止键能停。
 - git：提交作者用 GitHub 用户名；push / pull 用 GitHub 连接器的令牌（写在 资源库/Preferences/git/config，「文件」App 里看不到）。
 - 框架由 workflow 按固定版本和 sha256 下载到 `Vendor/`（设备上一共约 10 MB）。开源许可见 `App/Shell/NOTICES.txt`。
