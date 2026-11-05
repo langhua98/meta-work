@@ -58,6 +58,15 @@ struct ChatItem: Identifiable {
     var kind: Kind
 }
 
+/// 一次理解：原话、当时的上下文、模型给的指令（被说「不对」时用来记纠错本）
+struct FixTarget {
+    let text: String
+    let context: String?
+    let wrong: Command?
+    /// 这一条本身是「再说一遍」的结果、已经记进纠错本的那条（这条也不对就删掉它）
+    var saved: String?
+}
+
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var items: [ChatItem] = []
@@ -79,6 +88,10 @@ final class ChatModel: ObservableObject {
     private var recent: [String] = []
     private var memoryIndex = ""
     private var memoryLoaded = false
+    /// 本地模型理解出来的那行字后面可以点「不对」（键是那行的 id）
+    @Published private(set) var fixable: [UUID: FixTarget] = [:]
+    /// 点了「不对 → 我再说一遍」：下一句话做成的指令记成这句的纠正
+    private var pendingFix: FixTarget?
 
     init(store: Store) {
         self.store = store
@@ -128,6 +141,7 @@ final class ChatModel: ObservableObject {
 
     func start() {
         Task { await loadMemory() }
+        Task { await FixBook.shared.sync(files) }
         watchBusy()
     }
 
@@ -366,6 +380,9 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
+        // 上一条点了「不对、我再说一遍」：这一句做成的就是那句的正确做法（只管紧接着的这一句）
+        let pf = pendingFix
+        pendingFix = nil
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
             add(.understood(c.summary, source: "快捷按钮"))
             await execute(c, original: text)
@@ -385,7 +402,9 @@ final class ChatModel: ObservableObject {
         // 上一句话和上一步一起给模型，「交给云端」「再移回来」这种才知道说的是什么
         let ctx = [previousUserText().map { "上一句：\(String($0.prefix(200)))" }, lastCommand.map { "上一步：\($0)" }]
             .compactMap { $0 }.joined(separator: "；")
-        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: ctx.isEmpty ? nil : ctx)
+        // 纠错本里跟这句最像的几条，一起给模型看
+        let fixes = FixBook.shared.similar(text)
+        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: ctx.isEmpty ? nil : ctx, fixes: fixes)
         let grammar = Interpreter.grammar(tasks: ts)
         let path = ModelStore.shared.fileURL.path
         let suffix = p.suffix(text)
@@ -415,9 +434,13 @@ final class ChatModel: ObservableObject {
         remove(thinking)
         if Task.isCancelled { return }
         let secs = String(format: "%.1f", Date().timeIntervalSince(started))
-        guard let cmd = Interpreter.parse(out).flatMap({ Interpreter.plausible($0, text) ? $0 : nil }) else {
+        let context = ctx.isEmpty ? nil : ctx
+        let parsed = Interpreter.parse(out)
+        // 照着纠错本做的，原话里不一定有「移」「删」这些字，不再拿关键词卡它
+        let learned = parsed.map { c in fixes.contains { $0.right == c.json } } ?? false
+        guard let cmd = parsed.flatMap({ learned || Interpreter.plausible($0, text) ? $0 : nil }) else {
             // 小模型没听懂或者瞎猜（比如闲聊被翻成「找文件」），不乱执行
-            if cloudReady && store.autoCloud { await askCloud(text, kind: "ask", auto: true) }
+            if cloudReady && store.autoCloud { await askCloud(text, kind: "ask", auto: true, learn: pf ?? FixTarget(text: text, context: context, wrong: parsed)) }
             else { say("这句我没把握，就不乱做了。可以说得具体点，比如「推送 \(ts.first?.name ?? "任务名")」「找一下 PushEngine」；写代码、解释代码这类要在设置里填 OpenCode 密码交给云端。") }
             return
         }
@@ -425,11 +448,97 @@ final class ChatModel: ObservableObject {
         case .say(let q) where cloudReady && store.autoCloud:
             // 小模型想反问的，先让云端带着记忆试一下
             add(.understood("本地模型没把握（\(q)）", source: "\(secs) 秒 · 没联网"))
-            await askCloud(text, kind: "ask", auto: true)
+            await askCloud(text, kind: "ask", auto: true, learn: pf ?? FixTarget(text: text, context: context, wrong: cmd))
         default:
             let via = Connectors.label(for: cmd.kind).map { " · " + $0 } ?? ""
-            add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网" + via))
+            let id = add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网" + via + (learned ? " · 参考了纠正" : "")))
+            var target = FixTarget(text: text, context: context, wrong: cmd)
+            if let pf {
+                // 交给云端的，记原来那句话（云端拿到的是用户原话）
+                let right: Command = { if case .cloud = cmd { return .cloud(pf.text) }; return cmd }()
+                let n = FixBook.shared.add(Fix(text: pf.text, context: pf.context, wrong: pf.wrong, right: right,
+                                               model: ModelStore.shared.info.short, source: .user), cloud: files)
+                target = FixTarget(text: pf.text, context: pf.context, wrong: pf.wrong, saved: FixBook.shared.fixes.last?.id)
+                say("记进纠错本了（第 \(n) 条）：以后说「\(String(pf.text.prefix(30)))」就这样做。这次也不对就再点「不对」。")
+                noticeTraining()
+            }
+            fixable[id] = target
             await execute(cmd, original: text)
+        }
+    }
+
+    // MARK: 纠错
+
+    /// 理解那行字后面的「不对」
+    func wrong(_ id: UUID) {
+        guard var t = fixable.removeValue(forKey: id) else { return }
+        Haptics.tap()
+        // 这条是「再说一遍」记下的，也不对：删掉它，接着纠正最早那句
+        if let saved = t.saved {
+            FixBook.shared.remove(saved, cloud: files)
+            t.saved = nil
+        }
+        guard cloudReady else {
+            pendingFix = t
+            say("没连云端，没法帮你猜对的做法。换个说法再说一遍，我照新的做，并记进纠错本。")
+            return
+        }
+        run { await self.askFixOptions(t) }
+    }
+
+    private func askFixOptions(_ t: FixTarget) async {
+        let client = OpenCodeClient(base: store.openCodeURL, password: store.openCodePassword)
+        let w = add(.work(WorkLog(title: "问云端该怎么做", status: "连接…")))
+        let prompt = OpenCodeClient.fixPrompt(text: t.text, context: t.context, wrong: t.wrong, tasks: tasks)
+        var options: [Command] = []
+        do {
+            let r = try await client.ask(prompt, sessionID: nil, fast: true,
+                                         status: { s in Task { @MainActor in self.work(w) { $0.status = s } } })
+            work(w) { $0.finished = Date(); $0.status = "完成" }
+            options = OpenCodeClient.fixOptions(r.reply)
+        } catch {
+            work(w) { $0.finished = Date(); $0.failed = true; $0.status = error.localizedDescription }
+            if Task.isCancelled { return }
+        }
+        let on = Connectors.enabledKinds
+        options = options.filter { $0 != t.wrong && on.contains($0.kind) }
+        var seen = Set<String>()
+        options = Array(options.filter { seen.insert($0.json).inserted }.prefix(3))
+        var cid = UUID()
+        var buttons: [CardButton] = options.map { c in
+            CardButton(label: Self.optionLabel(c), style: .primary) { [weak self] in
+                guard let self else { return }
+                let n = FixBook.shared.add(Fix(text: t.text, context: t.context, wrong: t.wrong, right: c,
+                                               model: ModelStore.shared.info.short, source: .user), cloud: self.files)
+                self.resolveCard(cid, "✓ 记进纠错本了（第 \(n) 条），下次这样说就照这个做")
+                self.noticeTraining()
+                self.add(.understood(c.summary, source: "你纠正的"))
+                self.run { await self.execute(c, original: t.text) }
+            }
+        }
+        buttons.append(CardButton(label: "都不是，我再说一遍", style: .plain) { [weak self] in
+            guard let self else { return }
+            self.pendingFix = t
+            self.resolveCard(cid, "好，再说一遍你要做什么")
+        })
+        cid = add(.card(ActionCard(title: "你想让我做的是？", lines: [],
+                                   note: options.isEmpty ? "云端没猜出来，直接再说一遍吧。" : "选项是云端看了你的原话给的。会改东西的，选了还会再让你确认。",
+                                   tone: .primary, buttons: buttons)))
+    }
+
+    private static func optionLabel(_ c: Command) -> String {
+        switch c {
+        case .cloud(let s): return "交给云端：" + String(s.prefix(20))
+        case .answer(let s): return "直接回答：" + String(s.prefix(20))
+        case .say(let s): return "先问我：" + String(s.prefix(20))
+        default: return c.summary
+        }
+    }
+
+    /// 刚攒够数就提醒一次
+    private func noticeTraining() {
+        if FixBook.shared.shouldNoticeTraining() {
+            say("纠错本攒够 \(FixBook.trainAt) 条了，可以拿去训新一版本地模型了。在「设置 → 纠错本」里能看到都有哪些。")
         }
     }
 
@@ -1190,7 +1299,7 @@ final class ChatModel: ObservableObject {
         ])))
     }
 
-    private func askCloud(_ text: String, kind: String, auto: Bool) async {
+    private func askCloud(_ text: String, kind: String, auto: Bool, learn: FixTarget? = nil) async {
         let client = OpenCodeClient(base: store.openCodeURL, password: store.openCodePassword)
         let w = add(.work(WorkLog(title: auto ? "问云端 OpenCode" : "交给 OpenCode", status: "连接…")))
         do {
@@ -1235,6 +1344,15 @@ final class ChatModel: ObservableObject {
             store.openCodeTurns += 1
             work(w) { $0.finished = Date(); $0.status = "完成" }
             let reply = OpenCodeClient.parse(r.reply)
+            // 本地模型没搞定、云端给了一条明确的指令：记进纠错本，下次本地模型自己就会
+            if let learn, FixBook.shared.learnFromCloud {
+                let right: Command? = reply.commands.count == 1 ? reply.commands[0] : nil
+                if let right, right != learn.wrong {
+                    FixBook.shared.add(Fix(text: learn.text, context: learn.context, wrong: learn.wrong, right: right,
+                                           model: ModelStore.shared.info.short, source: .cloud), cloud: files)
+                    noticeTraining()
+                }
+            }
             if !reply.text.isEmpty { say(reply.text) }
             if let mu = reply.memory { memoryCard(mu) }
             if !reply.commands.isEmpty { cloudCommandsCard(reply.commands) }

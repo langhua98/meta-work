@@ -309,6 +309,46 @@ final class OpenCodeClient {
         return p
     }
 
+    /// 本地模型理解错了（用户点了「不对」）：让云端猜用户真正想做什么，给 2～3 个候选指令
+    static func fixPrompt(text: String, context: String?, wrong: Command?, tasks: [TaskRef]) -> String {
+        let taskLines = tasks.map { "- \($0.name)：\($0.mapping.sourceLabel) → \($0.mapping.repo)" }.joined(separator: "\n")
+        let off = Connectors.disabledKinds
+        return """
+        你在帮 iPhone 上编码助手「小橘推送」的本地小模型纠错。不要跑命令、不要读文件、不要提问，直接回答。
+        用户说：\(text)
+        \(context.map { "当时的上下文：\($0)\n" } ?? "")小模型理解成了：\(wrong.map { "\($0.json)（\($0.summary)）" } ?? "没听懂")
+        用户说这不对。猜用户真正想让 App 做什么，按可能性从大到小给 2～3 个不同的指令。
+        推送任务：
+        \(taskLines.isEmpty ? "（没有）" : taskLines)
+        能用的指令（每个都是一个 JSON 对象）：
+        {"do":"push","task":任务名} {"do":"check","task":任务名} 这次跳过文件夹都可以加 "skip":["文件夹"]
+        {"do":"status"} {"do":"history","task":任务名} {"do":"exclude","task":任务名,"path":"文件夹"}（以后一直不推）
+        {"do":"find","keyword":"…"} {"do":"list","folder":"/"} {"do":"mkdir","path":"/…"} {"do":"rename","path":"/…","to":"新名字"}
+        {"do":"move","path":"/…","to":"/目标文件夹"} {"do":"trash","path":"/…"} {"do":"remember","text":"要记住的事"}
+        {"do":"run","cmd":"在手机工作区跑的命令，比如 grep -rn xx ."} {"do":"search","q":"上网搜的词"} {"do":"fetch","url":"网址"}
+        {"do":"shortcut","name":"快捷指令名"} {"do":"cloud","text":"\(text)"}（写代码、改 bug、解释、审查这类交给云端，text 用用户原话）
+        {"do":"answer","text":"简短回答"}（打招呼、问 App 怎么用这类直接回答）
+        \(off.isEmpty ? "" : "用户关掉了这些，不能用：" + off.sorted().joined(separator: "、") + "\n")不要再给小模型那个错的。只输出一个 ```json 代码块，里面是指令数组，前后不要别的字。
+        """
+    }
+
+    /// 从纠错回复里拿出候选指令（什么指令都认，包括 cloud / answer / remember）
+    static func fixOptions(_ reply: String) -> [Command] {
+        var json = reply
+        if let r = reply.range(of: "```json", options: .backwards),
+           let e = reply.range(of: "```", range: r.upperBound..<reply.endIndex) {
+            json = String(reply[r.upperBound..<e.lowerBound])
+        } else if let a = reply.firstIndex(of: "["), let b = reply.lastIndex(of: "]"), a < b {
+            json = String(reply[a...b])
+        }
+        guard let data = json.data(using: .utf8), let any = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        let list = (any as? [[String: Any]]) ?? ((any as? [String: Any]).map { [$0] } ?? [])
+        return list.compactMap { o in
+            guard let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8) else { return nil }
+            return Interpreter.parse(s)
+        }
+    }
+
     /// 从回复里拿出说明文字、指令、记忆改动、要显示的文件
     static func parse(_ reply: String) -> CloudReply {
         var text = reply
