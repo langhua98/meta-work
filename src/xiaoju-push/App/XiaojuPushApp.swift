@@ -162,7 +162,12 @@ struct HomeView: View {
             .onChange(of: store.openTask) { openFromNotification() }
             .onAppear { openFromNotification(); askFromShortcut() }
             .onChange(of: store.askText) { askFromShortcut() }
-            .onChange(of: phase) { if phase == .background { BackgroundCheck.schedule() } }
+            .onChange(of: phase) {
+                if phase == .background {
+                    BackgroundCheck.schedule()
+                    Task { await ChatModel.shared.flushLog() }
+                }
+            }
         }
     }
 

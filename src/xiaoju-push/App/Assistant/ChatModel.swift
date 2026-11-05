@@ -110,6 +110,7 @@ final class ChatModel: ObservableObject {
     private func add(_ k: ChatItem.Kind) -> UUID {
         let it = ChatItem(kind: k)
         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { items.append(it) }
+        ChatLog.shared.add(k)
         return it.id
     }
 
@@ -124,8 +125,10 @@ final class ChatModel: ObservableObject {
 
     private func tool(_ id: UUID, _ f: (inout ToolCard) -> Void) {
         guard let i = items.firstIndex(where: { $0.id == id }), case .tool(var t) = items[i].kind else { return }
+        let was = t.state
         f(&t)
         items[i].kind = .tool(t)
+        if was == .busy && t.state != .busy { ChatLog.shared.add(.tool(t)) }
     }
 
     private func resolveCard(_ id: UUID, _ status: String) {
@@ -133,15 +136,21 @@ final class ChatModel: ObservableObject {
         c.status = status
         c.buttons = []
         items[i].kind = .card(c)
+        ChatLog.shared.add("card", ["text": c.title, "status": status])
     }
 
     private func say(_ s: String) { add(.text(s)) }
+
+    /// 对话记录传到云盘 /小橘推送/对话/（令牌、密码抹掉）
+    func flushLog() async {
+        await ChatLog.shared.flush(files, secrets: [store.cloudToken, store.organizeToken, store.githubToken, store.openCodePassword])
+    }
 
     // MARK: 入口
 
     func start() {
         Task { await loadMemory() }
-        Task { await FixBook.shared.sync(files) }
+        Task { await FixBook.shared.sync(files); await flushLog() }
         watchBusy()
     }
 
@@ -367,6 +376,7 @@ final class ChatModel: ObservableObject {
             await work()
             // 只有最新的那件事做完才算空闲（被新的一句话顶掉的旧任务不管）
             if jobID == id { busy = false }
+            await self.flushLog()
         }
     }
 
@@ -436,6 +446,11 @@ final class ChatModel: ObservableObject {
         let secs = String(format: "%.1f", Date().timeIntervalSince(started))
         let context = ctx.isEmpty ? nil : ctx
         let parsed = Interpreter.parse(out)
+        // 本地模型的原始输出：训练时拿它跟用户后来的反应对照，找错在哪
+        var row: [String: Any] = ["text": text, "out": out, "model": ModelStore.shared.info.short, "secs": secs,
+                                  "fixes": fixes.count, "ok": parsed != nil]
+        if let context { row["context"] = context }
+        ChatLog.shared.add("model", row)
         // 照着纠错本做的，原话里不一定有「移」「删」这些字，不再拿关键词卡它
         let learned = parsed.map { c in fixes.contains { $0.right == c.json } } ?? false
         guard let cmd = parsed.flatMap({ learned || Interpreter.plausible($0, text) ? $0 : nil }) else {
@@ -473,6 +488,9 @@ final class ChatModel: ObservableObject {
     func wrong(_ id: UUID) {
         guard var t = fixable.removeValue(forKey: id) else { return }
         Haptics.tap()
+        var row: [String: Any] = ["text": t.text]
+        if let w = t.wrong?.json { row["wrong"] = w }
+        ChatLog.shared.add("wrong", row)
         // 这条是「再说一遍」记下的，也不对：删掉它，接着纠正最早那句
         if let saved = t.saved {
             FixBook.shared.remove(saved, cloud: files)
@@ -1209,8 +1227,10 @@ final class ChatModel: ObservableObject {
 
     private func shellCard(_ id: UUID, _ f: (inout ShellCard) -> Void) {
         guard let i = items.firstIndex(where: { $0.id == id }), case .shell(var c) = items[i].kind else { return }
+        let was = c.state
         f(&c)
         items[i].kind = .shell(c)
+        if was != c.state { ChatLog.shared.add(.shell(c)) }
     }
 
     /// 命令卡片上点了「运行」
@@ -1366,8 +1386,13 @@ final class ChatModel: ObservableObject {
 
     private func work(_ id: UUID, _ f: (inout WorkLog) -> Void) {
         guard let i = items.firstIndex(where: { $0.id == id }), case .work(var w) = items[i].kind else { return }
+        let was = w.running
         f(&w)
         items[i].kind = .work(w)
+        if was && !w.running {
+            ChatLog.shared.add("cloud", ["text": w.title, "status": w.status, "failed": w.failed,
+                                         "steps": w.steps.count, "failedSteps": w.failedSteps])
+        }
     }
 
     /// 下载 OpenCode 发来的文件，存到本机缓存，对话里按类型显示
