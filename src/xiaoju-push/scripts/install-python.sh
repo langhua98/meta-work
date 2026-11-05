@@ -9,16 +9,25 @@ set -euo pipefail
 APP=$1; XCF=$2; BID=$3
 
 SLICE="$XCF/ios-arm64"
-[ -d "$SLICE/lib" ] || { echo "::error::$SLICE/lib 不存在"; ls -R "$XCF" | head -50; exit 1; }
+trap 'echo "::error::install-python.sh 第 $LINENO 行出错"; find "$XCF" -maxdepth 3 | head -40' ERR
 mkdir -p "$APP/python/lib"
-rsync -a --delete "$SLICE/lib/" "$APP/python/lib/"
-VER=$(ls -1 "$APP/python/lib" | grep '^python3' | head -1)
-STD="$APP/python/lib/$VER"
-[ -d "$STD/lib-dynload" ] || { echo "::error::$STD/lib-dynload 不存在"; exit 1; }
+# 新版打包：纯 Python 的标准库在 xcframework 根目录的 lib/，二进制模块在各个 slice 的 lib-<架构>/；老版本都在 slice 的 lib/
+if [ -d "$XCF/lib" ]; then
+    rsync -a --delete "$XCF/lib/" "$APP/python/lib/"
+    [ -d "$SLICE/lib-arm64" ] && rsync -a "$SLICE/lib-arm64/" "$APP/python/lib/"
+else
+    rsync -a --delete "$SLICE/lib/" "$APP/python/lib/"
+fi
+DYN=$(find "$APP/python/lib" -type d -name lib-dynload | head -1)
+[ -n "$DYN" ] || { echo "::error::找不到 lib-dynload"; find "$APP/python/lib" -maxdepth 2; exit 1; }
+STD=$(dirname "$DYN")
+VER=$(basename "$STD")
+echo "标准库：${STD#"$APP/"}"
+[ -f "$STD/os.py" ] || { echo "::error::$STD 里没有 os.py（标准库不全）"; ls "$STD" | head; exit 1; }
 
 # pip：留下 ensurepip 里带的 pip 安装包，放到 python/pip.whl（在 PYTHONPATH 里，python3 -m pip 直接从它跑）
-whl=$(ls "$STD"/ensurepip/_bundled/pip-*.whl | head -1)
-[ -f "$whl" ] || { echo "::error::找不到 ensurepip 里的 pip"; exit 1; }
+whl=$(find "$STD/ensurepip" -name 'pip-*.whl' 2>/dev/null | head -1)
+[ -n "$whl" ] || { echo "::error::找不到 ensurepip 里的 pip"; exit 1; }
 cp "$whl" "$APP/python/pip.whl"
 
 # 手机上用不到的：测试、图形界面、给编译用的东西（省二三十 MB）
