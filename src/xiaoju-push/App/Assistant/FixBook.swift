@@ -235,6 +235,7 @@ struct FixBookView: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var book = FixBook.shared
     @State private var showAll = false
+    @ObservedObject private var log = ChatLog.shared
 
     private var cloud: CloudFiles {
         CloudFiles(base: store.cloudURL.isEmpty ? Store.defaultCloudURL : store.cloudURL,
@@ -292,6 +293,18 @@ struct FixBookView: View {
                     }
                 }
                 .tint(Theme.orange)
+                Toggle(isOn: $log.enabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("对话存到云盘")
+                        Text("每句话和小橘怎么理解、做没做成，存到 \(ChatLog.folder)/，看真实对话里错在哪、针对性训练。令牌和密码会抹掉。")
+                            .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    }
+                }
+                .tint(Theme.orange)
+            } footer: {
+                if log.enabled && log.pending > 0 {
+                    Text(store.organizeToken.isEmpty ? "有 \(log.pending) 条对话没传：云盘要填整理令牌才能写。" : "有 \(log.pending) 条对话还没传，做完下一件事时补传。")
+                }
             }
             .listRowBackground(Theme.card)
         }
