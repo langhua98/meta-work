@@ -20,7 +20,7 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if model.items.isEmpty { welcome }
                     ForEach(model.items) { it in
-                        row(it).id(it.id)
+                        row(it).modifier(CopyAll(text: Self.copyText(it))).id(it.id)
                             .transition(.asymmetric(insertion: .opacity.combined(with: .move(edge: .bottom)), removal: .opacity))
                     }
                     Color.clear.frame(height: 4).id("bottom")
@@ -95,6 +95,20 @@ struct ChatView: View {
     }
 
     // MARK: 每一条
+
+    /// 长按卡片「复制全部」时复制的内容（文字气泡本身能选中复制，不用这个）
+    static func copyText(_ it: ChatItem) -> String? {
+        let join = { (parts: [String?]) in parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n") }
+        switch it.kind {
+        case .tool(let t): return join([t.title, t.sub, t.detail])
+        case .card(let c): return join(([c.title] + c.lines).map { Optional($0) } + [c.note, c.status])
+        case .error(let s): return s
+        case .understood(let s, _): return s
+        case .pasted(let s): return s
+        case .link(let s, let u): return s + "\n" + u.absoluteString
+        default: return nil
+        }
+    }
 
     @ViewBuilder private func row(_ it: ChatItem) -> some View {
         switch it.kind {
@@ -650,6 +664,20 @@ private struct ActionCardView: View {
         switch s {
         case .push, .primary, .cloud: return Theme.onAccent
         case .plain: return Theme.text
+        }
+    }
+}
+
+/// 长按整张卡片 →「复制全部」
+struct CopyAll: ViewModifier {
+    let text: String?
+    func body(content: Content) -> some View {
+        if let text, !text.isEmpty {
+            content.contextMenu {
+                Button { UIPasteboard.general.string = text; Haptics.tap() } label: { Label("复制全部", systemImage: "doc.on.doc") }
+            }
+        } else {
+            content
         }
     }
 }
