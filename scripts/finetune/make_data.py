@@ -198,7 +198,7 @@ def example(tasks, current, disabled, memory):
     weights = {
         "push": 7, "push_skip": 3, "check": 7, "check_skip": 4, "status": 4, "history": 4, "exclude": 4, "find": 6,
         "list": 4, "list_dir": 4, "mkdir": 3, "rename": 3, "move": 3, "trash": 3, "remember": 4, "cloud": 12,
-        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4, "run": 12,
+        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4, "run": 12, "search": 6, "fetch": 4,
         "alias": 2 if "主项目" in memory else 0, "disabled_ask": 6 if disabled else 0,
     }
     kind = rnd.choices(list(weights), weights=list(weights.values()))[0]
@@ -296,6 +296,20 @@ def example(tasks, current, disabled, memory):
         x = rnd.choice(FACTS)
         s = pick(["记住{x}", "记一下：{x}", "以后{x}", "你记错了，{x}", "帮我记着，{x}", "记下来：{x}", "别忘了{x}"]).format(x=x)
         return fill(s), None, J(do="remember", text=x)
+    if kind == "search":
+        topic = rnd.choice(["SwiftUI 下拉刷新", "python 读 json", "git rebase 用法", "llama.cpp iOS", "Qwen3.5 发布",
+                            "xcodegen 配置", "HF Space 休眠", "async await 报错", "pip 装不上", "JavaScript 数组去重",
+                            "SQLite 建索引", "GitHub Actions 缓存", "iOS 18 新功能", "Rust 入门", "正则匹配邮箱"])
+        s = pick(["上网搜一下 {q}", "查查 {q}", "搜索 {q}", "网上找找 {q}", "帮我查一下 {q} 的资料", "百度一下 {q}", "google 一下 {q}",
+                  "{q} 怎么弄，上网查查", "搜搜看 {q}", "上网看看 {q} 的最新消息", "查一下 {q} 的文档", "找找 {q} 的教程"]).format(q=topic)
+        return fill(s), None, J(do="search", q=topic)
+    if kind == "fetch":
+        u = rnd.choice(["https://swift.org", "https://docs.python.org/3/", "https://github.com/ggml-org/llama.cpp",
+                        "https://developer.apple.com/documentation/swiftui", "https://huggingface.co/Qwen", "example.com",
+                        "https://news.ycombinator.com", "https://www.ruanyifeng.com/blog/", "https://sqlite.org/lang.html"])
+        s = pick(["打开 {u}", "读一下 {u}", "看看 {u} 写了什么", "{u} 这个网页讲的啥", "帮我看下 {u}", "访问 {u}",
+                  "把 {u} 的内容给我", "{u} 里面有什么"]).format(u=u)
+        return fill(s), None, J(do="fetch", url=u)
     if kind == "run":
         s, c = run_example()
         return (s if s.startswith("$") or s == c else fill(s)), None, J(do="run", cmd=c)
@@ -340,7 +354,7 @@ def example(tasks, current, disabled, memory):
             "push": "推送 {t}", "check": "检查一下 {t}", "status": "所有任务有改动吗", "history": "{t} 的推送记录",
             "exclude": "以后 {t} 的 {f} 都不要推", "find": "找一下 README", "list": "看看云盘里有什么", "mkdir": "在 /代码 新建一个 demo",
             "rename": "把 /代码/demo 改名为 demo2", "move": "把 /代码/demo 移到 /归档", "trash": "删掉 /临时/test",
-            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面", "run": "代码里哪里用了 apiKey",
+            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面", "run": "代码里哪里用了 apiKey", "search": "上网搜一下 SwiftUI 动画", "fetch": "读一下 https://swift.org",
         }
         s = asks[k].format(t=tr, f=f)
         label = run.LABELS[k]
@@ -355,7 +369,9 @@ def example(tasks, current, disabled, memory):
             (["OpenCode 能做什么", "云端模型能干嘛", "云端那个大模型会什么", "DeepSeek 能帮我干啥"],
              "云端 OpenCode 能写代码、改 bug、解释代码、跑命令，这些我会交给它。"),
             (["有哪些连接器", "连接器是什么", "你连了哪些服务"],
-             "四个：小橘云盘、GitHub、本机命令、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
+             "五个：小橘云盘、GitHub、本机命令、上网、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
+            (["你能上网吗", "能搜索吗", "会查资料吗", "能看网页吗", "上网那个连接器干嘛的", "你能联网搜东西吗"],
+             "能：上网搜资料（走你 HF 上的 SearXNG），或者打开一个网址读里面的文字。搜到的可以交给云端整理。"),
             (["本机命令能干嘛", "你能跑命令吗", "手机上能执行什么命令", "命令行能用吗", "本机命令有什么用", "你会用终端吗"],
              "能在当前任务的代码文件夹里跑命令：grep 搜代码、cat/head 看文件、ls/find 列文件、wc 数行数、git status/log、python3 跑脚本（只有标准库）。没有 npm、pip。"),
         ]

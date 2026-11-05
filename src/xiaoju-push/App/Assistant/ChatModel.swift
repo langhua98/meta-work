@@ -364,8 +364,7 @@ final class ChatModel: ObservableObject {
     private func handle(_ text: String) async {
         let ts = tasks
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
-            if case .run = c { add(.understood(c.summary, source: "你写的命令，直接跑")) }
-            else { add(.understood(c.summary, source: "快捷按钮")) }
+            add(.understood(c.summary, source: "快捷按钮"))
             await execute(c, original: text)
             return
         }
@@ -470,6 +469,10 @@ final class ChatModel: ObservableObject {
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
         case .run(let c):
             await shell(c, original: original)
+        case .search(let q):
+            await webSearch(q)
+        case .fetch(let u):
+            await webFetch(u)
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
             // 再带上用户上一句原话，「交给云端处理」这种短句云端才知道是哪件事
@@ -847,6 +850,78 @@ final class ChatModel: ObservableObject {
     }
 
     // MARK: 云端 OpenCode
+
+    // MARK: 上网（WebTools.swift）
+
+    /// 上一次搜到的结果，「读第一个」这种用
+    private var lastResults: [WebResult] = []
+
+    private func webSearch(_ q: String) async {
+        let t = add(.tool(ToolCard(icon: "magnifyingglass", title: "上网搜", sub: q)))
+        do {
+            let rs = try await WebTools.search(q)
+            lastResults = rs
+            tool(t) { $0.state = rs.isEmpty ? .failed : .ok; $0.sub = q + (rs.isEmpty ? " · 没搜到" : " · \(rs.count) 条") }
+            guard !rs.isEmpty else {
+                say("没搜到。换个说法试试，或者交给云端查。")
+                return
+            }
+            let list = rs.enumerated().map { i, r in
+                "\(i + 1). [\(r.title.replacingOccurrences(of: "]", with: "）"))](\(r.url.absoluteString))" + (r.snippet.isEmpty ? "" : "\n" + String(r.snippet.prefix(90)))
+            }
+            say(list.joined(separator: "\n"))
+            lastCommand = "上网搜了「\(q)」，结果：" + rs.prefix(3).enumerated().map { "\($0 + 1). \($1.title) \($1.url.absoluteString)" }.joined(separator: " | ")
+            if cloudReady {
+                let text = "用户想知道：\(q)\n下面是上网搜到的结果，请整理成简短的回答（中文），标出出处：\n"
+                    + rs.enumerated().map { "\($0 + 1). \($1.title)\n\($1.url.absoluteString)\n\($1.snippet)" }.joined(separator: "\n\n")
+                offerCloud(title: "让云端整理一下？", note: "把这些结果交给 OpenCode 总结成回答", text: text)
+            }
+        } catch {
+            tool(t) { $0.state = .failed }
+            add(.error(error.localizedDescription))
+        }
+    }
+
+    private func webFetch(_ raw: String) async {
+        var target = raw
+        // 「读第 2 个」：模型可能只给序号
+        if let n = Int(raw.filter(\.isNumber)), !raw.contains("."), n >= 1, n <= lastResults.count {
+            target = lastResults[n - 1].url.absoluteString
+        }
+        let t = add(.tool(ToolCard(icon: "globe", title: "读网页", sub: target)))
+        do {
+            let p = try await WebTools.fetch(target)
+            let lines = p.text.split(separator: "\n").prefix(8).joined(separator: "\n")
+            tool(t) {
+                $0.state = .ok
+                $0.title = p.title.isEmpty ? "读网页" : String(p.title.prefix(60))
+                $0.sub = (p.url.host ?? target) + " · \(p.text.count) 字"
+                $0.detail = lines
+            }
+            add(.link("在浏览器打开", p.url))
+            lastCommand = "读了网页 \(p.url.absoluteString)（\(p.title)），开头：" + String(p.text.prefix(300)).replacingOccurrences(of: "\n", with: " ")
+            if cloudReady {
+                offerCloud(title: "让云端总结这个网页？", note: "把正文（前 8000 字）交给 OpenCode",
+                           text: "请用中文简短总结这个网页，代码相关的要点列出来：\(p.url.absoluteString)\n标题：\(p.title)\n\n" + String(p.text.prefix(8000)))
+            }
+        } catch {
+            tool(t) { $0.state = .failed }
+            add(.error(error.localizedDescription))
+        }
+    }
+
+    /// 结果下面的小卡片：交给云端接着做（用户点了才发）
+    private func offerCloud(title: String, note: String, text: String) {
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: title, lines: [], note: note, tone: .cloud, buttons: [
+            CardButton(label: "交给云端", style: .cloud) { [weak self] in
+                guard let self else { return }
+                self.resolveCard(cid, "交给云端了")
+                self.run { await self.askCloud(text, kind: "ask", auto: false) }
+            },
+            CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "不用了") },
+        ])))
+    }
 
     // MARK: 本机命令（Shell/ShellRunner.swift）
 
