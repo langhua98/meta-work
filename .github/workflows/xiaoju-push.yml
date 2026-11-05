@@ -124,7 +124,7 @@ jobs:
           [ -f "$app/Frameworks/Python.framework/Python" ] || { echo "::error::Python.framework 没嵌进 App"; exit 1; }
           # ios_system 用 dlsym 在主程序里找这些命令
           for sym in xiaoju_python3_main xiaoju_pip_main xiaoju_sqlite3_main xiaoju_node_main; do
-            nm -gU "$app/XiaojuPush" | grep -q "_$sym\$" || { echo "::error::主程序里找不到 $sym（这个命令会跑不了）"; exit 1; }
+            nm -gU "$app/XiaojuPush" | grep -q "_$sym\$" || { echo "::error::主程序里找不到 ${sym}（这个命令会跑不了）"; exit 1; }
           done
           ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
           ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"

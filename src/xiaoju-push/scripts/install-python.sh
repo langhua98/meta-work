@@ -64,5 +64,5 @@ PLIST
     echo "${rel%.so}.fwork" > "$APP/$fw/$name.origin"
     n=$((n + 1))
 done < <(find "$STD/lib-dynload" -name '*.so')
-echo "Python $VER：标准库 $(du -sh "$APP/python" | cut -f1)，二进制模块 $n 个"
-[ "$n" -gt 20 ] || { echo "::error::二进制模块太少（$n）"; exit 1; }
+echo "Python ${VER}：标准库 $(du -sh "$APP/python" | cut -f1)，二进制模块 $n 个"
+[ "$n" -gt 20 ] || { echo "::error::二进制模块太少（${n}）"; exit 1; }
