@@ -272,7 +272,7 @@ final class ChatModel: ObservableObject {
         let t = add(.tool(ToolCard(icon: "doc.on.clipboard", title: "整理 \(blocks.count) 段代码", sub: m.sourceLabel)))
         var list: [String] = []
         do { list = try await taskFiles(m) } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            tool(t) { $0.state = .failed; $0.sub = error.shown }
             return
         }
         // 按内容找类名只在工作区里做（本地读，快）
@@ -339,7 +339,7 @@ final class ChatModel: ObservableObject {
                 if andPush { await self.preparePush(m) }
             } catch {
                 self.setPasteStatus(id, "没放进去")
-                self.add(.error(error.localizedDescription))
+                self.add(.error(error.shown))
             }
         }
     }
@@ -369,7 +369,7 @@ final class ChatModel: ObservableObject {
                 await self.ensureGitHistory(m, in: ws.root, force: true)
                 await self.store.refreshPending()
             } catch {
-                self.tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+                self.tool(t) { $0.state = .failed; $0.sub = error.shown }
             }
         }
     }
@@ -458,7 +458,7 @@ final class ChatModel: ObservableObject {
             return
         } catch {
             remove(thinking)
-            if !(error is CancellationError) && !Task.isCancelled { add(.error(error.localizedDescription)) }
+            if !(error is CancellationError) && !Task.isCancelled { add(.error(error.shown)) }
             return
         }
         remove(thinking)
@@ -535,7 +535,7 @@ final class ChatModel: ObservableObject {
             work(w) { $0.finished = Date(); $0.status = "完成" }
             options = OpenCodeClient.fixOptions(r.reply)
         } catch {
-            work(w) { $0.finished = Date(); $0.failed = true; $0.status = error.localizedDescription }
+            work(w) { $0.finished = Date(); $0.failed = !(error is CancellationError || Task.isCancelled); $0.status = error.shown }
             if Task.isCancelled { return }
         }
         let on = Connectors.enabledKinds
@@ -745,7 +745,7 @@ final class ChatModel: ObservableObject {
             if let c = ids.a { tool(c) { if $0.state == .busy { $0.state = .failed } } }
             if let c = ids.b { tool(c) { $0.state = .failed; $0.progress = nil } }
             if Task.isCancelled { say("检查停了。") }
-            else { add(.error(PushPhaseView.friendly(error.localizedDescription).title + "：" + error.localizedDescription)) }
+            else { add(.error(PushPhaseView.friendly(error.shown).title + "：" + error.shown)) }
             return nil
         }
     }
@@ -826,7 +826,7 @@ final class ChatModel: ObservableObject {
             tool(up) { if $0.state == .busy { $0.state = .failed; $0.progress = nil } }
             if let mk = ids.a { tool(mk) { if $0.state == .busy { $0.state = .failed } } }
             Haptics.error()
-            let f = PushPhaseView.friendly(error.localizedDescription)
+            let f = PushPhaseView.friendly(error.shown)
             add(.error("\(f.title)。\(f.advice)"))
         }
     }
@@ -889,7 +889,7 @@ final class ChatModel: ObservableObject {
             tool(t) { $0.state = .ok; $0.sub = "找到 \(hits.count) 个" }
             if hits.isEmpty { say("没找到。") } else { add(.entries(title: "找到 \(hits.count) 个", items: Array(hits.prefix(12)))) }
         } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            tool(t) { $0.state = .failed; $0.sub = error.shown }
         }
     }
 
@@ -918,7 +918,7 @@ final class ChatModel: ObservableObject {
             if all.isEmpty { say("这个文件夹是空的。"); return }
             add(.entries(title: "\(path == "/" ? "云盘根目录" : path) · \(dirs.count) 个文件夹、\(others.count) 个文件", items: Array((dirs + others).prefix(50))))
         } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            tool(t) { $0.state = .failed; $0.sub = error.shown }
         }
     }
 
@@ -947,7 +947,7 @@ final class ChatModel: ObservableObject {
                 })))
             }
         } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            tool(t) { $0.state = .failed; $0.sub = error.shown }
         }
     }
 
@@ -981,7 +981,7 @@ final class ChatModel: ObservableObject {
                         Haptics.success()
                     } catch {
                         self.resolveCard(cid, "没成功")
-                        self.add(.error(error.localizedDescription))
+                        self.add(.error(error.shown))
                         Haptics.error()
                     }
                 }
@@ -1030,7 +1030,7 @@ final class ChatModel: ObservableObject {
             }
         } catch {
             tool(t) { $0.state = .failed }
-            add(.error(error.localizedDescription))
+            add(.error(error.shown))
         }
     }
 
@@ -1058,7 +1058,7 @@ final class ChatModel: ObservableObject {
             }
         } catch {
             tool(t) { $0.state = .failed }
-            add(.error(error.localizedDescription))
+            add(.error(error.shown))
         }
     }
 
@@ -1167,7 +1167,7 @@ final class ChatModel: ObservableObject {
             try fm.moveItem(at: tmp.appendingPathComponent(".git"), to: git)
             try Data().write(to: stamp)
         } catch {
-            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            tool(t) { $0.state = .failed; $0.sub = error.shown }
             return false
         }
         tool(t) { $0.state = .ok; $0.sub = repo + (branch.isEmpty ? "" : " · \(branch)") + " · 现在 git log / diff 能用了" }
@@ -1207,7 +1207,7 @@ final class ChatModel: ObservableObject {
             let old = (try? FileManager.default.contentsOfDirectory(atPath: mirror.root.path))?.contains { !$0.hasPrefix(".") } ?? false
             tool(t) {
                 $0.state = .failed; $0.progress = nil
-                $0.sub = (old ? "同步失败，用上次的副本：" : "") + error.localizedDescription
+                $0.sub = (old ? "同步失败，用上次的副本：" : "") + error.shown
             }
             return old && !Task.isCancelled
         }
@@ -1399,8 +1399,8 @@ final class ChatModel: ObservableObject {
             if !reply.files.isEmpty { await showFiles(reply.files, client: client) }
             if reply.text.isEmpty && reply.memory == nil && reply.commands.isEmpty && reply.files.isEmpty { say("OpenCode 没给出结果。") }
         } catch {
-            work(w) { $0.finished = Date(); $0.failed = true; $0.status = error.localizedDescription }
-            if !Task.isCancelled { add(.error(error.localizedDescription)) }
+            work(w) { $0.finished = Date(); $0.failed = !(error is CancellationError || Task.isCancelled); $0.status = error.shown }
+            if !Task.isCancelled { add(.error(error.shown)) }
         }
     }
 
@@ -1427,7 +1427,7 @@ final class ChatModel: ObservableObject {
                 remove(t)
                 add(.attachment(Attachment(name: name, remotePath: p, url: url, size: data.count)))
             } catch {
-                tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+                tool(t) { $0.state = .failed; $0.sub = error.shown }
             }
         }
     }
@@ -1519,7 +1519,7 @@ final class ChatModel: ObservableObject {
                 ok += 1
                 recent.append(c.summary)
             } catch {
-                failed.append("\(c.summary)：\(error.localizedDescription)")
+                failed.append("\(c.summary)：\(error.shown)")
             }
             tool(t) { $0.sub = "\(i + 1) / \(cmds.count)"; $0.progress = Double(i + 1) / Double(cmds.count) }
         }
@@ -1554,7 +1554,7 @@ final class ChatModel: ObservableObject {
                         Haptics.success()
                     } catch {
                         self.resolveCard(cid, "没写进去")
-                        self.add(.error(error.localizedDescription))
+                        self.add(.error(error.shown))
                     }
                 }
             },
@@ -1667,4 +1667,13 @@ enum LocalModelIsLoaded {
 final class IDBox: @unchecked Sendable {
     var a: UUID?
     var b: UUID?
+}
+
+extension Error {
+    /// 给人看的错误：点了停止（取消）就说「停了」，不露出 Swift.CancellationError 这种英文
+    var shown: String {
+        if self is CancellationError { return "停了" }
+        if let u = self as? URLError, u.code == .cancelled { return "停了" }
+        return localizedDescription
+    }
 }
