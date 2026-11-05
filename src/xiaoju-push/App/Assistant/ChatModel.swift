@@ -847,15 +847,48 @@ final class ChatModel: ObservableObject {
 
     // MARK: 本机命令（Shell/ShellRunner.swift）
 
-    /// 命令在哪里跑：当前任务是工作区就进它的文件夹，不然在「工作区」总文件夹
+    /// 命令在哪里跑：工作区任务进它的文件夹；云盘任务进它在手机上的副本（CloudMirror）；没选任务在「工作区」总文件夹
     private func shellFolder() -> (URL, String) {
         if let m = currentTask, m.workspace {
             let w = Workspace(mapping: m)
             try? w.ensure()
             return (w.root, "工作区 / " + w.root.lastPathComponent)
         }
+        if let m = currentTask, !m.cloudPath.isEmpty {
+            return (CloudMirror(mapping: m, engine: store.engine()).root, "云盘副本 / " + m.title)
+        }
         try? FileManager.default.createDirectory(at: Workspace.base, withIntermediateDirectories: true)
         return (Workspace.base, "工作区")
+    }
+
+    /// 云盘任务：跑命令前先把云盘代码同步到手机（只下新的和改过的）。失败返回 false。
+    private func syncMirrorIfNeeded() async -> Bool {
+        guard let m = currentTask, !m.workspace, !m.cloudPath.isEmpty else { return true }
+        guard !store.cloudToken.isEmpty else {
+            say("「\(m.title)」的代码在云盘里，要先在「设置 → 连接器 → 小橘云盘」填令牌，才能同步到手机上跑命令。")
+            return false
+        }
+        let t = add(.tool(ToolCard(icon: "arrow.down.circle", title: "把云盘里的 \(m.title) 同步到手机", sub: "看看有哪些文件…")))
+        do {
+            let r = try await CloudMirror(mapping: m, engine: store.engine()).sync { [weak self] done, total in
+                self?.tool(t) {
+                    $0.sub = total == 0 ? "都是最新的" : "下载 \(done) / \(total)"
+                    $0.progress = total == 0 ? nil : Double(done) / Double(total)
+                }
+            }
+            tool(t) {
+                $0.state = .ok; $0.progress = nil
+                var parts = ["\(r.total) 个文件"]
+                if r.downloaded > 0 { parts.append("新下载 \(r.downloaded) 个") } else { parts.append("都是最新的") }
+                if r.removed > 0 { parts.append("删了 \(r.removed) 个") }
+                if r.skipped > 0 { parts.append("\(r.skipped) 个太大没下") }
+                $0.sub = parts.joined(separator: " · ")
+            }
+            return true
+        } catch {
+            tool(t) { $0.state = .failed; $0.progress = nil; $0.sub = error.localizedDescription }
+            return false
+        }
     }
 
     private func shell(_ command: String, original: String) async {
@@ -878,7 +911,9 @@ final class ChatModel: ObservableObject {
                 say("手机上没有 \(name) 这个命令。能用的有 grep、sed、awk、git、curl、tar 这些。")
             }
         case .confirm(let why):
-            add(.shell(ShellCard(command: command, folder: shellFolder().1, state: .pending(why))))
+            let copy = currentTask.map { !$0.workspace && !$0.cloudPath.isEmpty } ?? false
+            add(.shell(ShellCard(command: command, folder: shellFolder().1,
+                                 state: .pending(why + (copy ? "（这是云盘代码在手机上的副本，改了不会传回云盘）" : "")))))
         }
     }
 
@@ -901,6 +936,11 @@ final class ChatModel: ObservableObject {
     }
 
     private func runShell(_ command: String, card: UUID? = nil) async {
+        guard await syncMirrorIfNeeded() else {
+            if let card { shellCard(card) { $0.state = .rejected } }
+            return
+        }
+        if Task.isCancelled { return }
         let (dir, label) = shellFolder()
         await prepareGit()
         let t: UUID
