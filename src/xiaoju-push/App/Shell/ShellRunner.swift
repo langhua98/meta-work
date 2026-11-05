@@ -66,6 +66,9 @@ final class ShellRunner: @unchecked Sendable {
         let std = lib.appendingPathComponent(ver)
         setenv("XIAOJU_PYTHON_LIB", fw.path, 1)
         setenv("PYTHONHOME", home.path, 1)
+        // iOS 上 zlib、ssl 这些 C 模块放在 App 的 Frameworks 里，Python 按 sys.executable 所在目录去找。
+        // ios_system 默认把它设成 "python3"（没有目录），就一个都加载不了（pip 报 zlib not available），这里改成 App 本身。
+        if let exe = Bundle.main.executablePath { setenv("PYTHONEXECUTABLE", exe, 1) }
         // pip 装的包放 资源库/python/site-packages（「文件」App 里看不到）；pip 本身从 App 里的 pip.whl 跑
         let site = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("python/site-packages")
         try? FileManager.default.createDirectory(at: site, withIntermediateDirectories: true)
