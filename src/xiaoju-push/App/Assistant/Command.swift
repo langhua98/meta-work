@@ -89,11 +89,6 @@ enum Interpreter {
 
     static func keyword(_ text: String, tasks: [TaskRef], current: Mapping?) -> Command? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 「运行命令 xxx」「$ xxx」：用户自己写好了命令，直接跑，不用模型猜
-        for p in ["运行命令", "跑命令", "执行命令", "运行", "$"] where t.hasPrefix(p) {
-            let c = t.dropFirst(p.count).trimmingCharacters(in: CharacterSet(charactersIn: " ：:\t"))
-            if let first = c.split(separator: " ").first, ShellRunner.commands.contains(String(first)) { return .run(c) }
-        }
         // 只认快捷按钮发出来的原话（一个字不差），其他都让模型自己理解
         switch t {
         case "检查一下有什么改动": return .check(task: nil)
@@ -174,6 +169,8 @@ enum Interpreter {
         看看云盘里有哪些文件夹 → {"do":"list","folder":"/"}
         代码里哪里用了 cloudToken → {"do":"run","cmd":"grep -rn cloudToken ."}
         工作区里 git 改了哪些 → {"do":"run","cmd":"git status"}
+        看看 README.md 写了什么 → {"do":"run","cmd":"cat README.md"}
+        $ ls -la → {"do":"run","cmd":"ls -la"}
         你是谁 → {"do":"answer","text":"我是小橘推送里的本地模型 Qwen3.5-2B，在你手机上跑，不联网。"}
         早上好 → {"do":"answer","text":"早上好！今天要推哪个项目？"}
         （上一句：把这个函数改成异步）交给云端处理 → {"do":"cloud","text":"把这个函数改成异步"}

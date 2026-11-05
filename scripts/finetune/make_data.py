@@ -121,6 +121,58 @@ def ref(t):
     return path.rsplit("/", 1)[-1]
 
 
+SRC_FILES = ["README.md", "ChatView.swift", "config.json", "main.py", "package.json", "Dockerfile", "requirements.txt",
+             "todo.md", "app.js", "nginx.conf", "Store.swift", "project.yml", "index.html", ".gitignore", "LocalModel.swift"]
+KEYWORDS = ["cloudToken", "TODO", "PushEngine", "fetchUser", "apiKey", "localhost", "ShellRunner", "viewDidLoad", "FIXME",
+            "password", "baseURL", "print(", "useState", "@MainActor", "timeout"]
+EXTS = [("swift", "swift"), ("py", "Python"), ("js", "js"), ("md", "Markdown"), ("json", "json"), ("html", "html")]
+LITERAL = ["ls -la", "pwd", "git status", "git log --oneline -5", "wc -l README.md", "cat package.json", "grep -rn TODO .",
+           "find . -name \"*.swift\"", "echo hello", "head -n 30 main.py", "du -sh .", "git diff --stat"]
+
+
+def run_example():
+    k = rnd.choice(KEYWORDS)
+    f = rnd.choice(SRC_FILES)
+    ext, ename = rnd.choice(EXTS)
+    n = rnd.choice([10, 20, 30, 50])
+    r = rnd.random()
+    if r < 0.3:
+        s = pick(["代码里哪里用了 {k}", "搜一下 {k} 在哪些文件里", "{k} 在哪定义的", "grep 一下 {k}", "哪些文件提到了 {k}",
+                  "全局搜索 {k}", "代码里有没有 {k}", "查一下哪里调用了 {k}", "在代码里找 {k}", "搜代码 {k}",
+                  "{k} 出现在哪几行", "帮我 grep {k}"]).format(k=k)
+        return s, "grep -rn " + (f'"{k}"' if "(" in k or " " in k else k) + " ."
+    if r < 0.48:
+        s = pick(["看看 {f} 写了什么", "打开 {f}", "显示 {f} 的内容", "{f} 里面是什么", "cat 一下 {f}", "读一下 {f}",
+                  "把 {f} 给我看看", "{f} 内容是啥", "看下 {f}", "{f} 写的什么", "输出 {f}", "我想看 {f}"]).format(f=f)
+        return s, "cat " + f
+    if r < 0.56:
+        s = pick(["{f} 前 {n} 行", "看下 {f} 开头", "{f} 最前面几行", "head 一下 {f}", "{f} 开头 {n} 行给我看",
+                  "只看 {f} 前面一点"]).format(f=f, n=n)
+        return s, f"head -n {n} {f}" if str(n) in s else f"head {f}"
+    if r < 0.64:
+        s = pick(["{f} 有多少行", "数一下 {f} 几行", "{f} 多长", "{f} 一共几行代码", "wc 一下 {f}", "{f} 行数"]).format(f=f)
+        return s, "wc -l " + f
+    if r < 0.72:
+        s = pick(["这个项目有多少个 {e} 文件", "数一下有几个 {x} 文件", "列出所有 {x} 文件", "有哪些 .{x} 文件",
+                  "找出全部 {e} 文件", "代码里一共几个 {x} 文件"]).format(e=ename, x=ext)
+        c = f'find . -name "*.{ext}"'
+        return s, c + " | wc -l" if ("多少" in s or "几个" in s) else c
+    if r < 0.8:
+        s = pick(["代码文件夹里有哪些文件", "ls 一下", "列一下代码目录", "当前目录有什么", "项目根目录有啥文件",
+                  "代码里都有哪些文件", "列出代码文件夹", "目录结构看一下"])
+        return s, "ls -la" if "ls" in s or rnd.random() < 0.5 else "ls"
+    if r < 0.9:
+        s = pick(["git 状态", "git status 看下", "工作区 git 改了哪些", "git 最近提交了什么", "看下 git log", "git 有没有没提交的",
+                  "最近几次 git 提交", "git diff 看看"])
+        if "log" in s or "提交了" in s or "几次" in s:
+            return s, "git log --oneline -10"
+        return s, "git diff" if "diff" in s else "git status"
+    c = rnd.choice(LITERAL)
+    s = pick(["$ {c}", "运行命令 {c}", "跑一下 {c}", "执行 {c}", "帮我跑 {c}", "{c}", "运行 {c}", "跑命令 {c}",
+              "执行命令：{c}", "命令 {c} 跑一下"]).format(c=c)
+    return s, c
+
+
 def example(tasks, current, disabled, memory):
     """返回 (用户这句, 上下文或 None, 期望 JSON)"""
     names = [t[0] for t in tasks]
@@ -130,7 +182,7 @@ def example(tasks, current, disabled, memory):
     weights = {
         "push": 7, "push_skip": 3, "check": 7, "check_skip": 4, "status": 4, "history": 4, "exclude": 4, "find": 6,
         "list": 4, "list_dir": 4, "mkdir": 3, "rename": 3, "move": 3, "trash": 3, "remember": 4, "cloud": 12,
-        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4,
+        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4, "run": 12,
         "alias": 2 if "主项目" in memory else 0, "disabled_ask": 6 if disabled else 0,
     }
     kind = rnd.choices(list(weights), weights=list(weights.values()))[0]
@@ -228,6 +280,9 @@ def example(tasks, current, disabled, memory):
         x = rnd.choice(FACTS)
         s = pick(["记住{x}", "记一下：{x}", "以后{x}", "你记错了，{x}", "帮我记着，{x}", "记下来：{x}", "别忘了{x}"]).format(x=x)
         return fill(s), None, J(do="remember", text=x)
+    if kind == "run":
+        s, c = run_example()
+        return (s if s.startswith("$") or s == c else fill(s)), None, J(do="run", cmd=c)
     if kind == "cloud":
         s = fill(pick(CODE_ASKS).format(t=tr))
         return s, None, J(do="cloud", text=s)
@@ -269,7 +324,7 @@ def example(tasks, current, disabled, memory):
             "push": "推送 {t}", "check": "检查一下 {t}", "status": "所有任务有改动吗", "history": "{t} 的推送记录",
             "exclude": "以后 {t} 的 {f} 都不要推", "find": "找一下 README", "list": "看看云盘里有什么", "mkdir": "在 /代码 新建一个 demo",
             "rename": "把 /代码/demo 改名为 demo2", "move": "把 /代码/demo 移到 /归档", "trash": "删掉 /临时/test",
-            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面",
+            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面", "run": "代码里哪里用了 apiKey",
         }
         s = asks[k].format(t=tr, f=f)
         label = run.LABELS[k]
@@ -284,7 +339,9 @@ def example(tasks, current, disabled, memory):
             (["OpenCode 能做什么", "云端模型能干嘛", "云端那个大模型会什么", "DeepSeek 能帮我干啥"],
              "云端 OpenCode 能写代码、改 bug、解释代码、跑命令，这些我会交给它。"),
             (["有哪些连接器", "连接器是什么", "你连了哪些服务"],
-             "三个：小橘云盘、GitHub、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
+             "四个：小橘云盘、GitHub、本机命令、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
+            (["本机命令能干嘛", "你能跑命令吗", "手机上能执行什么命令", "命令行能用吗", "本机命令有什么用", "你会用终端吗"],
+             "能在当前任务的代码文件夹里跑命令：grep 搜代码、cat/head 看文件、ls/find 列文件、wc 数行数、git status/log。没有 npm、python。"),
         ]
         qs, a = rnd.choice(qa)
         return fill(pick(qs)), None, J(do="answer", text=a)
