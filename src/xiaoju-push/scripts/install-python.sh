@@ -25,6 +25,17 @@ VER=$(basename "$STD")
 echo "标准库：${STD#"$APP/"}"
 [ -f "$STD/os.py" ] || { echo "::error::$STD 里没有 os.py（标准库不全）"; ls "$STD" | head; exit 1; }
 
+# iOS 版 Python 启动时会把 print 的输出全转去系统日志（_apple_support.init_streams），命令卡片上就什么都看不到。
+# 换成什么都不做：输出留在 1、2 号文件描述符上，PythonCommand.c 已经把它们接到这条命令的管道。
+[ -f "$STD/_apple_support.py" ] || { echo "::error::$STD 里没有 _apple_support.py"; exit 1; }
+cat >> "$STD/_apple_support.py" <<'EOF'
+
+
+# 小橘推送：输出不送系统日志，留在 stdout / stderr（命令卡片要显示）
+def init_streams(log_write, stdout_level, stderr_level):
+    pass
+EOF
+
 # pip：留下 ensurepip 里带的 pip 安装包，放到 python/pip.whl（在 PYTHONPATH 里，python3 -m pip 直接从它跑）
 whl=$(find "$STD/ensurepip" -name 'pip-*.whl' 2>/dev/null | head -1)
 [ -n "$whl" ] || { echo "::error::找不到 ensurepip 里的 pip"; exit 1; }
