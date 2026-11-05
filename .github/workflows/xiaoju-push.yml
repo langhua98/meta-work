@@ -75,6 +75,19 @@ jobs:
           https://github.com/holzschu/libssh2-apple/releases/download/v1.11.0/libssh2-dynamic.xcframework.zip cacfe1789b197b727119f7e32f561eaf9acc27bf38cd19975b74fce107f868a6
           EOF
           ls Vendor
+      - name: Download Python (python3 命令)
+        working-directory: src/xiaoju-push
+        run: |
+          # BeeWare 打包的官方 CPython 3.13 iOS 版（PEP 730），固定版本
+          url=https://github.com/beeware/Python-Apple-support/releases/download/3.13-b18/Python-3.13-iOS-support.b18.tar.gz
+          curl -fsSL --retry 3 -o /tmp/python-ios.tar.gz "$url"
+          shasum -a 256 /tmp/python-ios.tar.gz
+          mkdir -p /tmp/python-ios Vendor
+          tar -xzf /tmp/python-ios.tar.gz -C /tmp/python-ios
+          rm -rf Vendor/Python.xcframework
+          mv /tmp/python-ios/Python.xcframework Vendor/
+          cat /tmp/python-ios/VERSIONS || true
+          ls Vendor/Python.xcframework Vendor/Python.xcframework/ios-arm64
       - name: Build
         working-directory: src/xiaoju-push
         run: |
@@ -90,6 +103,9 @@ jobs:
             exit 1
           fi
           # 没签名编译不会写入 entitlements，SideStore 就不知道要 App Group。用 ldid 先假签名写进去（先小组件，再主程序）。
+          scripts/install-python.sh "$app" Vendor/Python.xcframework com.langhua98.xiaoju.push
+          [ -f "$app/Frameworks/Python.framework/Python" ] || { echo "::error::Python.framework 没嵌进 App"; exit 1; }
+          nm -gU "$app/XiaojuPush" | grep -q '_xiaoju_python3_main$' || { echo "::error::主程序里找不到 xiaoju_python3_main（python3 命令会跑不了）"; exit 1; }
           ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
           ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"
           for f in ios_system files text shell awk tar curl_ios dash lg2 openssl libssh2; do

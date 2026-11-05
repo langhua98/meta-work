@@ -12,6 +12,10 @@ OpenSSL 1.1.1w
   This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/)
 libssh2 1.11.0
   https://github.com/holzschu/libssh2-apple  BSD 3-Clause License
+Python 3.13（python3 命令）
+  CPython：https://www.python.org  Python Software Foundation License Version 2
+  iOS 版打包：https://github.com/beeware/Python-Apple-support  BSD 3-Clause License, Copyright (c) Russell Keith-Magee
+  其中带的 OpenSSL 3、libffi、XZ、bzip2、mpdecimal 各自的许可证见 https://docs.python.org/3/license.html
 cacert.pem
   Mozilla CA 证书包（来自 a-Shell 仓库），MPL 2.0
 

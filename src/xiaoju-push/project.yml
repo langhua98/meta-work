@@ -37,12 +37,17 @@ targets:
       - { framework: Vendor/lg2.xcframework, embed: true, link: false }
       - { framework: Vendor/openssl.xcframework, embed: true, link: false }
       - { framework: Vendor/libssh2.xcframework, embed: true, link: false }
+      # python3：BeeWare 打包的官方 CPython（PSF 许可），workflow 下载。只嵌不链接，跑 python3 时 App/Shell/PythonCommand.c 才 dlopen；
+      # 标准库编译后由 scripts/install-python.sh 装进 App 的 python/ 文件夹
+      - { framework: Vendor/Python.xcframework, embed: true, link: false }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.push
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: App/XiaojuPush.entitlements
+        # ios_system 用 dlsym 在主程序里找 xiaoju_python3_main，符号不能被去掉
+        STRIP_STYLE: non-global
     info:
       path: App/Info.plist
       properties:

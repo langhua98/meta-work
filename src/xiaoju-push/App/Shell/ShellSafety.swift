@@ -49,6 +49,9 @@ enum ShellSafety {
                 if rest.contains(where: { ["-delete", "-exec", "-execdir", "-ok"].contains($0) }) { return .confirm("会对找到的文件做操作") }
             case "awk":
                 if seg.contains("system(") || seg.contains("print >") { return .confirm("awk 会写文件或跑别的命令") }
+            case "python3", "python":
+                if rest == ["-V"] || rest == ["--version"] { continue }
+                return .confirm("会运行 Python 代码，可能读写文件")
             case "rm", "rmdir", "unlink": return .confirm("会删除文件")
             case "mv": return .confirm("会移动或改名文件")
             case "curl":

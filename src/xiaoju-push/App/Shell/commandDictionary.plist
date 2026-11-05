@@ -499,5 +499,19 @@
 		<string>0E:I:J:L:n:oP:pR:s:tx</string>
 		<string>no</string>
 	</array>
+	<key>python3</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_python3_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
+	<key>python</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_python3_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
 </dict>
 </plist>

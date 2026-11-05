@@ -13,6 +13,9 @@ struct ShellResult {
     var ok: Bool { status == 0 && !killed }
 }
 
+/// PythonCommand.c
+@_silgen_name("xiaoju_python3_interrupt") private func xiaoju_python3_interrupt() -> Int32
+
 final class ShellRunner: @unchecked Sendable {
     static let shared = ShellRunner()
 
@@ -45,8 +48,29 @@ final class ShellRunner: @unchecked Sendable {
         setenv("CLICOLOR", "0", 1)
         setenv("PAGER", "cat", 1)
         setenv("GIT_PAGER", "cat", 1)
+        setupPython()
         ios_switchSession(session)
         ios_setContext(session)
+    }
+
+    /// python3：App 里带的官方 CPython（App/Shell/PythonCommand.c）。标准库在 App 包的 python/lib/python3.x/
+    private func setupPython() {
+        let home = Bundle.main.bundleURL.appendingPathComponent("python")
+        let lib = home.appendingPathComponent("lib")
+        guard let ver = (try? FileManager.default.contentsOfDirectory(atPath: lib.path))?.first(where: { $0.hasPrefix("python3") }),
+              let fw = Bundle.main.privateFrameworksURL?.appendingPathComponent("Python.framework/Python") else { return }
+        let std = lib.appendingPathComponent(ver)
+        setenv("XIAOJU_PYTHON_LIB", fw.path, 1)
+        setenv("PYTHONHOME", home.path, 1)
+        setenv("PYTHONPATH", std.path + ":" + std.appendingPathComponent("lib-dynload").path, 1)
+        setenv("PYTHONUTF8", "1", 1)
+        setenv("PYTHONUNBUFFERED", "1", 1)
+        setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
+        // pip 装的纯 Python 包放 资源库/python（「文件」App 里看不到）
+        let user = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("python")
+        setenv("PYTHONUSERBASE", user.path, 1)
+        // ios_system 默认按名字轮换 6 个 Python 解释器（pythonA、pythonB…），我们只有一个
+        numPythonInterpreters = 1
     }
 
     /// git 的全局配置写在 资源库/Preferences/git/config（ios_system 把 XDG_CONFIG_HOME 指到那里，「文件」App 里看不到）。
@@ -81,12 +105,23 @@ final class ShellRunner: @unchecked Sendable {
         }
     }
 
-    /// 停掉正在跑的命令
+    /// 停掉正在跑的命令。
+    /// Python 先像 Ctrl-C 一样让它自己停（硬停会把解释器卡在半路，之后的 python3 都跑不了），5 秒还没停再硬停。
+    /// 其他命令用 ios_kill（a-Shell 的 Ctrl-C）；不能直接发 SIGINT，命令没装处理函数时会把整个 App 杀掉。
     func stop() {
         lock.lock(); defer { lock.unlock() }
         guard runningPid != 0 else { return }
         killedByUs = true
-        _ = ios_killpid(runningPid, SIGINT)
+        let pid = runningPid
+        if xiaoju_python3_interrupt() == 1 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
+                self.lock.lock(); let still = self.runningPid == pid; self.lock.unlock()
+                if still { _ = ios_kill() }
+            }
+            return
+        }
+        _ = ios_kill()
     }
 
     private func runSync(_ command: String, cwd: URL, output: @escaping (String) -> Void) -> ShellResult {

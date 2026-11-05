@@ -127,7 +127,14 @@ KEYWORDS = ["cloudToken", "TODO", "PushEngine", "fetchUser", "apiKey", "localhos
             "password", "baseURL", "print(", "useState", "@MainActor", "timeout"]
 EXTS = [("swift", "swift"), ("py", "Python"), ("js", "js"), ("md", "Markdown"), ("json", "json"), ("html", "html")]
 LITERAL = ["ls -la", "pwd", "git status", "git log --oneline -5", "wc -l README.md", "cat package.json", "grep -rn TODO .",
-           "find . -name \"*.swift\"", "echo hello", "head -n 30 main.py", "du -sh .", "git diff --stat"]
+           "find . -name \"*.swift\"", "echo hello", "head -n 30 main.py", "du -sh .", "git diff --stat", "python3 main.py",
+           "python3 --version"]
+PY_ASKS = [("用 python 算一下 2 的 100 次方", 'python3 -c "print(2**100)"'), ("python 跑一下 main.py", "python3 main.py"),
+           ("运行 test.py", "python3 test.py"), ("用 python 看看 config.json 格式对不对", "python3 -m json.tool config.json"),
+           ("python 版本是多少", "python3 --version"), ("跑一下 scripts/build.py", "python3 scripts/build.py"),
+           ("用 Python 数一下 main.py 有几个函数", "grep -c \"def \" main.py"), ("执行一下这个脚本 tools/check.py", "python3 tools/check.py"),
+           ("用 python 算 365 乘 24", 'python3 -c "print(365*24)"'), ("今天几号，用 python 看", 'python3 -c "import datetime;print(datetime.date.today())"'),
+           ("python 运行 app.py", "python3 app.py"), ("帮我跑 hello.py", "python3 hello.py")]
 
 
 def run_example():
@@ -161,6 +168,9 @@ def run_example():
         s = pick(["代码文件夹里有哪些文件", "ls 一下", "列一下代码目录", "当前目录有什么", "项目根目录有啥文件",
                   "代码里都有哪些文件", "列出代码文件夹", "目录结构看一下"])
         return s, "ls -la" if "ls" in s or rnd.random() < 0.5 else "ls"
+    if r < 0.84:
+        s, c = pick(PY_ASKS)
+        return s, c
     if r < 0.9:
         s = pick(["git 状态", "git status 看下", "工作区 git 改了哪些", "git 最近提交了什么", "看下 git log", "git 有没有没提交的",
                   "最近几次 git 提交", "git diff 看看"])
@@ -341,7 +351,7 @@ def example(tasks, current, disabled, memory):
             (["有哪些连接器", "连接器是什么", "你连了哪些服务"],
              "四个：小橘云盘、GitHub、本机命令、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
             (["本机命令能干嘛", "你能跑命令吗", "手机上能执行什么命令", "命令行能用吗", "本机命令有什么用", "你会用终端吗"],
-             "能在当前任务的代码文件夹里跑命令：grep 搜代码、cat/head 看文件、ls/find 列文件、wc 数行数、git status/log。没有 npm、python。"),
+             "能在当前任务的代码文件夹里跑命令：grep 搜代码、cat/head 看文件、ls/find 列文件、wc 数行数、git status/log、python3 跑脚本（只有标准库）。没有 npm、pip。"),
         ]
         qs, a = rnd.choice(qa)
         return fill(pick(qs)), None, J(do="answer", text=a)
