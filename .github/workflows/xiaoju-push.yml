@@ -152,6 +152,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete xiaoju-push --yes --cleanup-tag || true
-          gh release create xiaoju-push "$IPA" --prerelease --target "$GITHUB_SHA" \
+          # 再放一份固定名字的，链接永远是 .../releases/download/xiaoju-push/XiaojuPush-latest.ipa
+          cp "$IPA" XiaojuPush-latest.ipa
+          gh release create xiaoju-push "$IPA" XiaojuPush-latest.ipa --prerelease --target "$GITHUB_SHA" \
             --title "小橘推送 ${VERSION}（构建 ${GITHUB_RUN_NUMBER}）" \
             --notes "没签名的测试版（${GITHUB_REF_NAME} ${GITHUB_SHA::7}），需要用 SideStore 或自己的证书签名后安装。见 src/xiaoju-push/README.md。"
