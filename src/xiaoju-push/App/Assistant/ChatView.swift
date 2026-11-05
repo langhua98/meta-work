@@ -104,6 +104,9 @@ struct ChatView: View {
         case .understood(let s, let src): UnderstoodChip(text: s, source: src)
         case .thinking(let s): ThinkingRow(text: s)
         case .tool(let t): ToolCardView(card: t)
+        case .shell(let c):
+            ShellCardView(card: c, approve: { model.shellApprove(it.id) }, reject: { model.shellReject(it.id) },
+                          stop: { ShellRunner.shared.stop() })
         case .text(let s): AnswerText(text: s)
         case .changes(let p): ChangesCard(plan: p)
         case .entries(let title, let items): EntriesCard(title: title, items: items)

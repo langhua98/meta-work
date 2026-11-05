@@ -51,6 +51,8 @@ struct ChatItem: Identifiable {
         case pasted(String)
         /// 粘贴的代码整理成的文件，等确认
         case paste(PasteDraft)
+        /// 本机命令（Shell/ShellCardView.swift）
+        case shell(ShellCard)
     }
     let id = UUID()
     var kind: Kind
@@ -144,6 +146,7 @@ final class ChatModel: ObservableObject {
                     case .thinking: return true
                     case .tool(let t): return t.state == .busy
                     case .work(let w): return w.running
+                    case .shell(let c): return c.state == .running
                     default: return false
                     }
                 }
@@ -176,6 +179,10 @@ final class ChatModel: ObservableObject {
             case .tool(var t) where t.state == .busy:
                 t.state = .failed; t.progress = nil; t.sub = "停了"
                 items[i].kind = .tool(t)
+            case .shell(var c) where c.state == .running:
+                c.state = .killed
+                c.seconds = c.started.map { Date().timeIntervalSince($0) }
+                items[i].kind = .shell(c)
             default: break
             }
         }
@@ -871,39 +878,52 @@ final class ChatModel: ObservableObject {
                 say("手机上没有 \(name) 这个命令。能用的有 grep、sed、awk、git、curl、tar 这些。")
             }
         case .confirm(let why):
-            var cid = UUID()
-            cid = add(.card(ActionCard(title: "跑这条命令？", lines: ["$ " + command],
-                                       note: why + "。在「\(shellFolder().1)」里跑。", tone: .primary, buttons: [
-                CardButton(label: "运行", style: .primary) { [weak self] in
-                    guard let self else { return }
-                    self.resolveCard(cid, "已确认")
-                    self.run { await self.runShell(command) }
-                },
-                CardButton(label: "不要", style: .plain) { [weak self] in self?.resolveCard(cid, "没跑") },
-            ])))
+            add(.shell(ShellCard(command: command, folder: shellFolder().1, state: .pending(why))))
         }
     }
 
-    private func runShell(_ command: String) async {
+    private func shellCard(_ id: UUID, _ f: (inout ShellCard) -> Void) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .shell(var c) = items[i].kind else { return }
+        f(&c)
+        items[i].kind = .shell(c)
+    }
+
+    /// 命令卡片上点了「运行」
+    func shellApprove(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .shell(let c) = items[i].kind,
+              case .pending = c.state else { return }
+        run { await self.runShell(c.command, card: id) }
+    }
+
+    /// 命令卡片上点了「不要」
+    func shellReject(_ id: UUID) {
+        shellCard(id) { $0.state = .rejected }
+    }
+
+    private func runShell(_ command: String, card: UUID? = nil) async {
         let (dir, label) = shellFolder()
         await prepareGit()
-        let t = add(.tool(ToolCard(icon: "terminal", title: "$ " + command, sub: "在「\(label)」里跑", detail: "")))
+        let t: UUID
+        if let card {
+            t = card
+            shellCard(t) { $0.state = .running; $0.started = Date(); $0.folder = label }
+        } else {
+            t = add(.shell(ShellCard(command: command, folder: label, state: .running, started: Date())))
+        }
         let box = ShellOutputBox()
         // 输出在后台线程来，攒起来每 0.2 秒刷一次界面
         let ticker = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                if let d = box.takeIfChanged() { self?.tool(t) { $0.detail = ShellOutputBox.tail(d) } }
+                if let d = box.takeIfChanged() { self?.shellCard(t) { $0.output = d } }
             }
         }
         let r = await ShellRunner.shared.run(command, cwd: dir) { box.append($0) }
         ticker.cancel()
-        let secs = r.seconds < 10 ? String(format: "%.1f 秒", r.seconds) : "\(Int(r.seconds)) 秒"
-        let out = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        tool(t) {
-            $0.state = r.ok ? .ok : .failed
-            $0.detail = out.isEmpty ? (r.ok ? "（没有输出）" : nil) : ShellOutputBox.tail(out)
-            $0.sub = r.killed ? "停了 · \(secs)" : (r.ok ? "\(label) · \(secs)" : "出错了（退出码 \(r.status)）· \(secs)")
+        shellCard(t) {
+            $0.output = r.output
+            $0.seconds = r.seconds
+            $0.state = r.killed ? .killed : (r.ok ? .ok : .failed(r.status))
         }
         lastCommand = "跑了命令 \(command)" + (r.ok ? "" : "，出错了")
     }
