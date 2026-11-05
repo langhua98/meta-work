@@ -30,6 +30,13 @@ struct ShellCardView: View {
     let reject: () -> Void
     let stop: () -> Void
     @State private var expanded = false
+    @State private var copied = false
+
+    /// 复制按钮：命令 + 完整输出（收起来的也算）
+    private var copyAll: String {
+        let out = card.output.trimmingCharacters(in: .newlines)
+        return "$ " + card.command + (out.isEmpty ? "" : "\n" + out)
+    }
 
     private static let foldAt = 10
     private static let keep = 6
@@ -78,6 +85,15 @@ struct ShellCardView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
             time
+            if card.state == .ok || isFailed {
+                Button { Haptics.tap(); UIPasteboard.general.string = copyAll; copied = true } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.system(size: 12))
+                        .foregroundStyle(Color(dark: 0xa6a39b, light: 0xb5b2aa))
+                        .frame(width: 32, height: 32)
+                }
+                .frame(width: 36, height: 44)
+                .accessibilityLabel("复制命令和全部输出")
+            }
             if card.state == .running {
                 Button { Haptics.tap(); stop() } label: {
                     Image(systemName: "stop.fill").font(.system(size: 10))
@@ -89,7 +105,7 @@ struct ShellCardView: View {
                 .accessibilityLabel("停止这条命令")
             }
         }
-        .padding(.leading, 12).padding(.trailing, card.state == .running ? 0 : 12)
+        .padding(.leading, 12).padding(.trailing, card.state == .running ? 0 : (card.state == .ok || isFailed ? 4 : 12))
         .frame(minHeight: 44)
         .overlay(alignment: .bottom) { if !lines.isEmpty || card.state == .running { line.frame(height: 1) } }
     }
