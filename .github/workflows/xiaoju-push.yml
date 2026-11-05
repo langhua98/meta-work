@@ -86,6 +86,8 @@ jobs:
           https://github.com/holzschu/libgit2/releases/download/ios_1.0/lg2.xcframework.zip 7d205a771be8d120a80d2f7281135dfffd21a3713c86eb4f1957638f6b4b365e
           https://github.com/holzschu/openssl-apple/releases/download/v1.1.1w/openssl-dynamic.xcframework.zip 329e8317cf9bee8e138da5d032330a7a1bd2473cf44c9c083cb2f0636abb8b80
           https://github.com/holzschu/libssh2-apple/releases/download/v1.11.0/libssh2-dynamic.xcframework.zip cacfe1789b197b727119f7e32f561eaf9acc27bf38cd19975b74fce107f868a6
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/ssh_cmd.xcframework.zip 0943d53cfec57909fbdb121bafa3d1845a82e7accf896e1dd7864aa640a57836
+          https://github.com/fprimex/jq/releases/download/ios/jq.xcframework.zip d3c4486e5ed788995b0ad9586465d3407e463d90f4e91b843846cabfe21f297f
           EOF
           ls Vendor
       - name: Download Python (python3 命令)
@@ -120,10 +122,13 @@ jobs:
           # 没签名编译不会写入 entitlements，SideStore 就不知道要 App Group。用 ldid 先假签名写进去（先小组件，再主程序）。
           scripts/install-python.sh "$app" Vendor/Python.xcframework com.langhua98.xiaoju.push
           [ -f "$app/Frameworks/Python.framework/Python" ] || { echo "::error::Python.framework 没嵌进 App"; exit 1; }
-          nm -gU "$app/XiaojuPush" | grep -q '_xiaoju_python3_main$' || { echo "::error::主程序里找不到 xiaoju_python3_main（python3 命令会跑不了）"; exit 1; }
+          # ios_system 用 dlsym 在主程序里找这些命令
+          for sym in xiaoju_python3_main xiaoju_pip_main xiaoju_sqlite3_main xiaoju_node_main; do
+            nm -gU "$app/XiaojuPush" | grep -q "_$sym\$" || { echo "::error::主程序里找不到 $sym（这个命令会跑不了）"; exit 1; }
+          done
           ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
           ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"
-          for f in ios_system files text shell awk tar curl_ios dash lg2 openssl libssh2; do
+          for f in ios_system files text shell awk tar curl_ios dash lg2 openssl libssh2 ssh_cmd jq; do
             [ -d "$app/Frameworks/$f.framework" ] || { echo "::error::$f.framework 没嵌进 App"; exit 1; }
           done
           [ -f "$app/commandDictionary.plist" ] || { echo "::error::commandDictionary.plist 不在 App 根目录"; exit 1; }

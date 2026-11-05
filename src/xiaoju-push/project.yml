@@ -40,6 +40,9 @@ targets:
       # python3：BeeWare 打包的官方 CPython（PSF 许可），workflow 下载。只嵌不链接，跑 python3 时 App/Shell/PythonCommand.c 才 dlopen；
       # 标准库编译后由 scripts/install-python.sh 装进 App 的 python/ 文件夹
       - { framework: Vendor/Python.xcframework, embed: true, link: false }
+      # ssh / scp / sftp（ios_system 同一版本）和 jq（a-Shell 用的 fprimex/jq 编译版）
+      - { framework: Vendor/ssh_cmd.xcframework, embed: true, link: false }
+      - { framework: Vendor/jq.xcframework, embed: true, link: false }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.push

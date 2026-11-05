@@ -16,7 +16,7 @@ enum ShellSafety {
     static let readOnly: Set<String> = [
         "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "wc", "find", "pwd", "echo", "diff", "stat", "du",
         "sort", "uniq", "date", "uname", "md5", "sha1", "sha256", "cksum", "sum", "basename", "dirname", "realpath",
-        "readlink", "printenv", "env", "whoami", "uptime", "true", "type", "tr", "cd", "awk",
+        "readlink", "printenv", "env", "whoami", "uptime", "true", "type", "tr", "cd", "awk", "jq",
     ]
     /// git 里只看不改的子命令
     static let gitReadOnly: Set<String> = ["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "describe", "version", "help", "cat-file", "for-each-ref", "ls-remote"]
@@ -49,9 +49,15 @@ enum ShellSafety {
                 if rest.contains(where: { ["-delete", "-exec", "-execdir", "-ok"].contains($0) }) { return .confirm("会对找到的文件做操作") }
             case "awk":
                 if seg.contains("system(") || seg.contains("print >") { return .confirm("awk 会写文件或跑别的命令") }
-            case "python3", "python":
+            case "python3", "python", "node", "js":
                 if rest == ["-V"] || rest == ["--version"] { continue }
-                return .confirm("会运行 Python 代码，可能读写文件")
+                return .confirm("会运行\(name.hasPrefix("py") ? " Python " : " JavaScript ")代码，可能读写文件")
+            case "pip", "pip3":
+                if let sub = rest.first, ["list", "show", "--version", "freeze"].contains(sub) { continue }
+                return .confirm("会从网上下载安装 Python 包")
+            case "sqlite3": return .confirm("会读写数据库文件")
+            case "ssh", "scp", "sftp": return .confirm("会连到别的服务器")
+            case "ssh-keygen": return .confirm("会生成或改 SSH 密钥")
             case "rm", "rmdir", "unlink": return .confirm("会删除文件")
             case "mv": return .confirm("会移动或改名文件")
             case "curl":

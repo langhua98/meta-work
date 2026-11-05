@@ -128,13 +128,19 @@ KEYWORDS = ["cloudToken", "TODO", "PushEngine", "fetchUser", "apiKey", "localhos
 EXTS = [("swift", "swift"), ("py", "Python"), ("js", "js"), ("md", "Markdown"), ("json", "json"), ("html", "html")]
 LITERAL = ["ls -la", "pwd", "git status", "git log --oneline -5", "wc -l README.md", "cat package.json", "grep -rn TODO .",
            "find . -name \"*.swift\"", "echo hello", "head -n 30 main.py", "du -sh .", "git diff --stat", "python3 main.py",
-           "python3 --version"]
+           "python3 --version", "pip install requests", "node app.js", "jq . package.json", "sqlite3 data.db \".tables\"",
+           "pip list", "node -e \"console.log(1+1)\"", "ssh -V"]
 PY_ASKS = [("用 python 算一下 2 的 100 次方", 'python3 -c "print(2**100)"'), ("python 跑一下 main.py", "python3 main.py"),
            ("运行 test.py", "python3 test.py"), ("用 python 看看 config.json 格式对不对", "python3 -m json.tool config.json"),
            ("python 版本是多少", "python3 --version"), ("跑一下 scripts/build.py", "python3 scripts/build.py"),
            ("用 Python 数一下 main.py 有几个函数", "grep -c \"def \" main.py"), ("执行一下这个脚本 tools/check.py", "python3 tools/check.py"),
            ("用 python 算 365 乘 24", 'python3 -c "print(365*24)"'), ("今天几号，用 python 看", 'python3 -c "import datetime;print(datetime.date.today())"'),
-           ("python 运行 app.py", "python3 app.py"), ("帮我跑 hello.py", "python3 hello.py")]
+           ("python 运行 app.py", "python3 app.py"), ("帮我跑 hello.py", "python3 hello.py"),
+           ("装一下 requests 这个库", "pip install requests"), ("用 pip 装 pyyaml", "pip install pyyaml"),
+           ("装了哪些 python 包", "pip list"), ("用 node 跑 index.js", "node index.js"), ("js 跑一下 app.js", "node app.js"),
+           ("格式化一下 package.json", "jq . package.json"), ("package.json 里的版本号", "jq .version package.json"),
+           ("看看 data.db 有哪些表", "sqlite3 data.db \".tables\""), ("查 data.db 里 users 表前 10 行", "sqlite3 data.db \"select * from users limit 10\""),
+           ("用 js 算 3 的 20 次方", "node -p \"3**20\""), ("ssh 版本", "ssh -V")]
 
 
 def run_example():
@@ -420,8 +426,9 @@ def one():
     prefix, _ = run.build(tasks=[t[:3] for t in tasks], current=current, disabled=disabled, memory=memory)
     prefix = prefix.replace("Qwen3.5-2B", MODEL)
     user, ctx, ans = example(tasks, current, disabled, memory)
-    user = noisy(user)
     a = json.loads(ans)
+    if not (a["do"] == "run" and a["cmd"] in user):  # 原样写出来的命令不能去空格
+        user = noisy(user)
     if a["do"] == "cloud" and ctx is None:
         a["text"] = user  # 交给云端的是用户原话，一个字不改
         ans = J(**a)

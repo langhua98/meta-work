@@ -33,6 +33,7 @@ final class ShellRunner: @unchecked Sendable {
     private let session: UnsafeMutablePointer<CChar> = strdup("xiaoju-shell")
 
     private init() {}
+    nonisolated(unsafe) static var keep: UnsafeRawPointer?
 
     /// 只做一次：环境变量、证书、git 配置
     private func setup() {
@@ -49,6 +50,9 @@ final class ShellRunner: @unchecked Sendable {
         setenv("PAGER", "cat", 1)
         setenv("GIT_PAGER", "cat", 1)
         setupPython()
+        // node 命令只被 ios_system 用 dlsym 找，没人直接调用；存一下地址，免得编译时被当成没用的代码删掉
+        ShellRunner.keep = unsafeBitCast(xiaojuNodeMain as @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32,
+                                         to: UnsafeRawPointer.self)
         ios_switchSession(session)
         ios_setContext(session)
     }
@@ -62,13 +66,20 @@ final class ShellRunner: @unchecked Sendable {
         let std = lib.appendingPathComponent(ver)
         setenv("XIAOJU_PYTHON_LIB", fw.path, 1)
         setenv("PYTHONHOME", home.path, 1)
-        setenv("PYTHONPATH", std.path + ":" + std.appendingPathComponent("lib-dynload").path, 1)
+        // pip 装的包放 资源库/python/site-packages（「文件」App 里看不到）；pip 本身从 App 里的 pip.whl 跑
+        let site = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("python/site-packages")
+        try? FileManager.default.createDirectory(at: site, withIntermediateDirectories: true)
+        setenv("PYTHONPATH", [std.path, std.appendingPathComponent("lib-dynload").path, site.path,
+                              home.appendingPathComponent("pip.whl").path].joined(separator: ":"), 1)
+        setenv("PIP_TARGET", site.path, 1)
+        setenv("PIP_UPGRADE", "1", 1)                  // --target 装过的再装会报「已存在」，直接覆盖
+        setenv("PIP_ONLY_BINARY", ":all:", 1)          // 手机上编译不了源码包，只要现成的
+        setenv("PIP_DISABLE_PIP_VERSION_CHECK", "1", 1)
+        setenv("PIP_NO_INPUT", "1", 1)
+        setenv("PIP_CACHE_DIR", FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("pip").path, 1)
         setenv("PYTHONUTF8", "1", 1)
         setenv("PYTHONUNBUFFERED", "1", 1)
         setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
-        // pip 装的纯 Python 包放 资源库/python（「文件」App 里看不到）
-        let user = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("python")
-        setenv("PYTHONUSERBASE", user.path, 1)
         // ios_system 默认按名字轮换 6 个 Python 解释器（pythonA、pythonB…），我们只有一个
         numPythonInterpreters = 1
     }

@@ -16,6 +16,11 @@ VER=$(ls -1 "$APP/python/lib" | grep '^python3' | head -1)
 STD="$APP/python/lib/$VER"
 [ -d "$STD/lib-dynload" ] || { echo "::error::$STD/lib-dynload 不存在"; exit 1; }
 
+# pip：留下 ensurepip 里带的 pip 安装包，放到 python/pip.whl（在 PYTHONPATH 里，python3 -m pip 直接从它跑）
+whl=$(ls "$STD"/ensurepip/_bundled/pip-*.whl | head -1)
+[ -f "$whl" ] || { echo "::error::找不到 ensurepip 里的 pip"; exit 1; }
+cp "$whl" "$APP/python/pip.whl"
+
 # 手机上用不到的：测试、图形界面、给编译用的东西（省二三十 MB）
 rm -rf "$STD/test" "$STD"/*/tests "$STD/idlelib" "$STD/tkinter" "$STD/turtledemo" "$STD/turtle.py" \
        "$STD/ensurepip" "$STD/lib2to3" "$STD/pydoc_data" "$STD/config-"* "$APP/python/lib/pkgconfig" 2>/dev/null || true

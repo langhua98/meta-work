@@ -28,7 +28,12 @@
 对话里说「找一下哪里用了 cloudToken」「git 改了哪些」，本地模型输出 `{"do":"run","cmd":"…"}`，命令在当前任务的代码文件夹里跑，输出实时显示在对话里：工作区任务就是它的工作区；云盘任务先把云盘文件夹同步一份到手机（`资源库/Caches/云盘副本/`，只下新的和改过的，5 MB 以上的文件不下），在副本里跑，改了不会传回云盘；没选任务在「工作区」总文件夹。
 
 - 用 a-Shell 作者的 [ios_system](https://github.com/holzschu/ios_system)（BSD-3）：iPhone 不让 App 启动别的程序，它把每个命令做成框架，在 App 自己进程里调用。
-- 带的命令：ls cp mv rm mkdir find grep sed awk sort uniq wc diff head tail cat tar gzip curl dash（sh 脚本）和 git（lg2，libgit2）等 70 多条，见 `App/Shell/commandDictionary.plist`。还有 python3（官方 CPython 3.13 的 iOS 版，BeeWare 打包，只有标准库，没有 pip）。没有 bash、npm。
+- 带的命令：ls cp mv rm mkdir find grep sed awk sort uniq wc diff head tail cat tar gzip curl dash（sh 脚本）和 git（lg2，libgit2）等 70 多条，见 `App/Shell/commandDictionary.plist`。还有：
+  - `python3`：官方 CPython 3.13 的 iOS 版（BeeWare 打包）。`pip install 包名` 只能装纯 Python 的包，装在 资源库/python/site-packages。
+  - `sqlite3`：Python 自带的 sqlite3 命令行（`sqlite3 数据库 "SQL"`）。
+  - `node` / `js`：iPhone 自带的 JavaScriptCore，有 console、process、`require("fs")`、`require("path")`，没有 npm。
+  - `jq`、`ssh` / `scp` / `sftp` / `ssh-keygen`（密钥在 ~/.ssh）。
+  - 没有 bash、npm。
 - 只看不改的直接跑；删文件、写文件（>）、`sed -i`、git commit / push / reset 这类先出确认卡片（`App/Shell/ShellSafety.swift`）。一条命令最多 2 分钟，停止键能停。
 - git：提交作者用 GitHub 用户名；push / pull 用 GitHub 连接器的令牌（写在 资源库/Preferences/git/config，「文件」App 里看不到）。
 - 框架由 workflow 按固定版本和 sha256 下载到 `Vendor/`（设备上一共约 10 MB）。开源许可见 `App/Shell/NOTICES.txt`。

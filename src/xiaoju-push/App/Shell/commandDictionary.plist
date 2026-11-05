@@ -219,6 +219,20 @@
 		<string></string>
 		<string>no</string>
 	</array>
+	<key>jq</key>
+	<array>
+		<string>jq.framework/jq</string>
+		<string>main</string>
+		<string>cnesrRCMS</string>
+		<string>file</string>
+	</array>
+	<key>js</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_node_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
 	<key>lg2</key>
 	<array>
 		<string>lg2.framework/lg2</string>
@@ -268,6 +282,27 @@
 		<string>finv</string>
 		<string>file</string>
 	</array>
+	<key>node</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_node_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
+	<key>pip</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_pip_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
+	<key>pip3</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_pip_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
 	<key>printenv</key>
 	<array>
 		<string>shell.framework/shell</string>
@@ -281,6 +316,20 @@
 		<string>pwd_main</string>
 		<string>LP</string>
 		<string>no</string>
+	</array>
+	<key>python</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_python3_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
+	<key>python3</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_python3_main</string>
+		<string></string>
+		<string>file</string>
 	</array>
 	<key>readlink</key>
 	<array>
@@ -310,6 +359,13 @@
 		<string>p</string>
 		<string>directory</string>
 	</array>
+	<key>scp</key>
+	<array>
+		<string>ssh_cmd.framework/ssh_cmd</string>
+		<string>scp_main</string>
+		<string>12346ABCTdfpqrtvF:J:P:S:c:i:l:o:</string>
+		<string>file</string>
+	</array>
 	<key>sed</key>
 	<array>
 		<string>text.framework/text</string>
@@ -323,6 +379,13 @@
 		<string>setenv_main</string>
 		<string></string>
 		<string>no</string>
+	</array>
+	<key>sftp</key>
+	<array>
+		<string>ssh_cmd.framework/ssh_cmd</string>
+		<string>sftp_main</string>
+		<string>1246AafhNpqrvCc:D:i:l:o:s:S:b:B:F:J:P:R:</string>
+		<string>file</string>
 	</array>
 	<key>sh</key>
 	<array>
@@ -364,6 +427,27 @@
 		<string>shell.framework/shell</string>
 		<string>source</string>
 		<string></string>
+		<string>file</string>
+	</array>
+	<key>sqlite3</key>
+	<array>
+		<string>MAIN</string>
+		<string>xiaoju_sqlite3_main</string>
+		<string></string>
+		<string>file</string>
+	</array>
+	<key>ssh</key>
+	<array>
+		<string>ssh_cmd.framework/ssh_cmd</string>
+		<string>ssh_main</string>
+		<string>1246ab:c:e:fgi:kl:m:no:p:qstvxAB:CD:E:F:GI:J:KL:MNO:PQ:R:S:TVw:W:XYy</string>
+		<string>no</string>
+	</array>
+	<key>ssh-keygen</key>
+	<array>
+		<string>ssh_cmd.framework/ssh_cmd</string>
+		<string>sshkeygen_main</string>
+		<string>ABHLQXceghiklopquvxyC:D:E:F:G:I:J:K:M:N:O:P:R:S:T:V:W:Z:a:b:f:g:j:m:n:r:s:t:z:</string>
 		<string>file</string>
 	</array>
 	<key>stat</key>
@@ -498,20 +582,6 @@
 		<string>xargs_main</string>
 		<string>0E:I:J:L:n:oP:pR:s:tx</string>
 		<string>no</string>
-	</array>
-	<key>python3</key>
-	<array>
-		<string>MAIN</string>
-		<string>xiaoju_python3_main</string>
-		<string></string>
-		<string>file</string>
-	</array>
-	<key>python</key>
-	<array>
-		<string>MAIN</string>
-		<string>xiaoju_python3_main</string>
-		<string></string>
-		<string>file</string>
 	</array>
 </dict>
 </plist>

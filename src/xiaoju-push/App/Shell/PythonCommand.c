@@ -19,8 +19,7 @@ typedef int (*py_bytes_main)(int, char **);
 
 static pthread_mutex_t running = PTHREAD_MUTEX_INITIALIZER;
 
-__attribute__((used, visibility("default")))
-int xiaoju_python3_main(int argc, char **argv) {
+static int run_python(int argc, char **argv) {
     const char *lib = getenv("XIAOJU_PYTHON_LIB");
     void *h = lib ? dlopen(lib, RTLD_NOW | RTLD_GLOBAL) : NULL;
     py_bytes_main run = h ? (py_bytes_main)dlsym(h, "Py_BytesMain") : NULL;
@@ -51,6 +50,32 @@ int xiaoju_python3_main(int argc, char **argv) {
     pthread_mutex_unlock(&running);
     return status;
 }
+
+__attribute__((used, visibility("default")))
+int xiaoju_python3_main(int argc, char **argv) { return run_python(argc, argv); }
+
+/// 在原参数前面插几个参数再交给 Python：pip → python3 -m pip …，sqlite3 → python3 -m sqlite3 …
+static int run_module(int argc, char **argv, const char *module) {
+    char **args = calloc((size_t)argc + 3, sizeof(char *));
+    if (!args) return 1;
+    args[0] = "python3"; args[1] = "-m"; args[2] = (char *)module;
+    for (int i = 1; i < argc; i++) args[i + 2] = argv[i];
+    int status = run_python(argc + 2, args);
+    free(args);
+    return status;
+}
+
+/// pip / pip3：只装纯 Python 的包，装到 PIP_TARGET（ShellRunner 里设好，也在 PYTHONPATH 里）
+__attribute__((used, visibility("default")))
+int xiaoju_pip_main(int argc, char **argv) { return run_module(argc, argv, "pip"); }
+
+/// sqlite3：用 Python 自带的 sqlite3 命令行（python3 -m sqlite3 数据库 "SQL"）
+__attribute__((used, visibility("default")))
+int xiaoju_sqlite3_main(int argc, char **argv) { return run_module(argc, argv, "sqlite3"); }
+
+/// 给 Swift 写的命令（node）用：这条命令的输入输出
+__attribute__((used, visibility("default"))) FILE *xiaoju_thread_stdout(void) { return thread_stdout; }
+__attribute__((used, visibility("default"))) FILE *xiaoju_thread_stderr(void) { return thread_stderr; }
 
 /// 让正在跑的 Python 停下（和按 Ctrl-C 一样，抛 KeyboardInterrupt）。没在跑就什么都不做。返回 1 表示发出去了。
 __attribute__((used, visibility("default")))
