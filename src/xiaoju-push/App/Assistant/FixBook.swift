@@ -280,7 +280,7 @@ struct FixBookView: View {
                     }
                 } footer: {
                     Text("左滑删掉记错的。存在云盘 \(FixBook.folder)/，换手机也在。"
-                         + (book.unsynced ? (store.organizeToken.isEmpty ? "云盘那份要填整理令牌才能写。" : "有几条还没传到云盘，下次打开对话时补传。") : ""))
+                         + (book.unsynced ? (!cloud.canWrite ? "这个云盘令牌没有写的权限，云盘那份写不进去。" : "有几条还没传到云盘，下次打开对话时补传。") : ""))
                 }
                 .listRowBackground(Theme.card)
             }
@@ -303,7 +303,7 @@ struct FixBookView: View {
                 .tint(Theme.orange)
             } footer: {
                 if log.enabled && log.pending > 0 {
-                    Text(store.organizeToken.isEmpty ? "有 \(log.pending) 条对话没传：云盘要填整理令牌才能写。" : "有 \(log.pending) 条对话还没传，做完下一件事时补传。")
+                    Text(!cloud.canWrite ? "有 \(log.pending) 条对话没传：这个云盘令牌没有写的权限。" : "有 \(log.pending) 条对话还没传，做完下一件事时补传。")
                 }
             }
             .listRowBackground(Theme.card)

@@ -327,7 +327,7 @@ final class ChatModel: ObservableObject {
                     try ws.ensure()
                     for f in files { try ws.write(f.path, Data(f.code.utf8)) }
                 } else {
-                    guard self.files.canWrite else { throw PushError("写云盘要先在设置里填整理令牌") }
+                    guard self.files.canWrite else { throw PushError("这个云盘令牌没有写的权限") }
                     for f in files {
                         let path = "/" + (PushEngine.clean(m.cloudPath) + PushEngine.clean(f.path)).joined(separator: "/")
                         try await self.files.upload(path, Data(f.code.utf8))
@@ -964,7 +964,7 @@ final class ChatModel: ObservableObject {
         }()
         let note: String? = {
             if case .trash = cmd { return "在回收站里随时可以放回来，不会永久删除" }
-            if !files.canWrite { return "还没填整理令牌，可能会失败" }
+            if !files.canWrite { return "云盘令牌没有写的权限，可能会失败" }
             return entry?.isFolder == true ? "里面的文件一起处理" : nil
         }()
         var cid = UUID()

@@ -187,8 +187,8 @@ struct ConnectorDetailView: View {
                 case "cloud":
                     TextField("地址", text: $store.cloudURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    SecureField("xa_ 开头的令牌（只读）", text: $store.cloudToken)
-                    SecureField("整理令牌（新建、移动、删除要用）", text: $store.organizeToken)
+                    SecureField("xa_ 开头的令牌", text: $store.cloudToken)
+                    SecureField("整理令牌（可不填：上面那个能写就不用）", text: $store.organizeToken)
                 case "github":
                     SecureField("GitHub 令牌", text: $store.githubToken)
                 case "shell":
