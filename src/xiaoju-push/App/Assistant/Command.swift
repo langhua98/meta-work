@@ -170,6 +170,7 @@ enum Interpreter {
         代码里哪里用了 cloudToken → {"do":"run","cmd":"grep -rn cloudToken ."}
         工作区里 git 改了哪些 → {"do":"run","cmd":"git status"}
         看看 README.md 写了什么 → {"do":"run","cmd":"cat README.md"}
+        代码里有几个 py 文件 → {"do":"run","cmd":"find . -name '*.py' | wc -l"}
         $ ls -la → {"do":"run","cmd":"ls -la"}
         你是谁 → {"do":"answer","text":"我是小橘推送里的本地模型 Qwen3.5-2B，在你手机上跑，不联网。"}
         早上好 → {"do":"answer","text":"早上好！今天要推哪个项目？"}

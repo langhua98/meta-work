@@ -58,7 +58,7 @@ jobs:
           while read -r url sum; do
             [ -n "$url" ] || continue
             f=/tmp/iosys/$(basename "$url")
-            curl -fsSL --retry 3 -o "$f" "$url"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f" "$url"
             echo "$sum  $f" | shasum -a 256 -c -
             unzip -qo "$f" -d Vendor
           done <<'EOF'
@@ -80,7 +80,7 @@ jobs:
         run: |
           # BeeWare 打包的官方 CPython 3.13 iOS 版（PEP 730），固定版本
           url=https://github.com/beeware/Python-Apple-support/releases/download/3.13-b18/Python-3.13-iOS-support.b18.tar.gz
-          curl -fsSL --retry 3 -o /tmp/python-ios.tar.gz "$url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/python-ios.tar.gz "$url"
           shasum -a 256 /tmp/python-ios.tar.gz
           mkdir -p /tmp/python-ios Vendor
           tar -xzf /tmp/python-ios.tar.gz -C /tmp/python-ios
