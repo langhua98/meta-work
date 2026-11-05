@@ -50,6 +50,31 @@ jobs:
           rm -rf Vendor/llama.xcframework
           mv /tmp/llama/build-apple/llama.xcframework Vendor/
           ls Vendor/llama.xcframework
+      - name: Download ios_system frameworks (本机命令)
+        working-directory: src/xiaoju-push
+        run: |
+          # a-Shell 作者发布的编译好的框架；版本和校验值跟 a-Shell 的 xcfs/Package.swift 一致
+          mkdir -p Vendor /tmp/iosys
+          while read -r url sum; do
+            [ -n "$url" ] || continue
+            f=/tmp/iosys/$(basename "$url")
+            curl -fsSL --retry 3 -o "$f" "$url"
+            echo "$sum  $f" | shasum -a 256 -c -
+            unzip -qo "$f" -d Vendor
+          done <<'EOF'
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/ios_system.xcframework.zip d429e68102926f58bedd8e8b7105dcd169478cd6da1cef494a5f468482d1c8f5
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/files.xcframework.zip b0ee1f58c65ba306f178cd559fd6bce79ec8f275280526908c2a992bfcafedd5
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/text.xcframework.zip 6fed763c6e941817b2a2af2051871bdfb8a1af4177fad1ab7837f72023dffb79
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/shell.xcframework.zip 855ff9b12bfbbdbd5298324377d91e18e6ac97dbb19d3c9311ce5a023ee51b2e
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/awk.xcframework.zip 283f368df6c44ed9d49d15651ca4281706cdd86eb2b6ddb81808c8a3b18a4f7d
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/tar.xcframework.zip 207ab260f8dfb3101938c9e2a949cfd7b76f0e90a000637bbfd6aff47b014a68
+          https://github.com/holzschu/ios_system/releases/download/v3.0.5/curl_ios.xcframework.zip d7e2f05c9f2689d103db32f83ab045bfb6ab28ce84e3017e0c23e4b4db7ab169
+          https://github.com/holzschu/ios_system/releases/download/Auxiliary/dash.xcframework.zip 9a30ac6b3780dd68d2268d10467902214e32333e980c59090faa6099f0d250fc
+          https://github.com/holzschu/libgit2/releases/download/ios_1.0/lg2.xcframework.zip 7d205a771be8d120a80d2f7281135dfffd21a3713c86eb4f1957638f6b4b365e
+          https://github.com/holzschu/openssl-apple/releases/download/v1.1.1w/openssl-dynamic.xcframework.zip 329e8317cf9bee8e138da5d032330a7a1bd2473cf44c9c083cb2f0636abb8b80
+          https://github.com/holzschu/libssh2-apple/releases/download/v1.11.0/libssh2-dynamic.xcframework.zip cacfe1789b197b727119f7e32f561eaf9acc27bf38cd19975b74fce107f868a6
+          EOF
+          ls Vendor
       - name: Build
         working-directory: src/xiaoju-push
         run: |
@@ -67,6 +92,11 @@ jobs:
           # 没签名编译不会写入 entitlements，SideStore 就不知道要 App Group。用 ldid 先假签名写进去（先小组件，再主程序）。
           ldid -S"Widget/XiaojuPushWidget.entitlements" "$app/PlugIns/XiaojuPushWidget.appex/XiaojuPushWidget"
           ldid -S"App/XiaojuPush.entitlements" "$app/XiaojuPush"
+          for f in ios_system files text shell awk tar curl_ios dash lg2 openssl libssh2; do
+            [ -d "$app/Frameworks/$f.framework" ] || { echo "::error::$f.framework 没嵌进 App"; exit 1; }
+          done
+          [ -f "$app/commandDictionary.plist" ] || { echo "::error::commandDictionary.plist 不在 App 根目录"; exit 1; }
+          du -sh "$app/Frameworks"/*.framework
           if [ ! -d "$app/Frameworks/llama.framework" ]; then
             echo "::error::llama.framework 没嵌进 App"
             exit 1

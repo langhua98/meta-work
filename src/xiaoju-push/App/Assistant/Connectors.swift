@@ -38,7 +38,12 @@ struct Connector: Identifiable {
         ConnectorTool(id: "opencode.ask", name: "交给云端处理", kinds: ["cloud"]),
     ])
 
-    static let all = [cloud, github, opencode]
+    static let shell = Connector(id: "shell", name: "本机命令", icon: "terminal", note: "在手机工作区里跑 grep、git 这些命令", tools: [
+        // 只看不改的直接跑；会改东西的（删文件、git commit/push…）每次先确认，见 ShellSafety
+        ConnectorTool(id: "shell.run", name: "运行命令", kinds: ["run"]),
+    ])
+
+    static let all = [cloud, github, shell, opencode]
 }
 
 enum Connectors {
@@ -90,6 +95,7 @@ extension Command {
         case .move: return "move"
         case .trash: return "trash"
         case .remember: return "remember"
+        case .run: return "run"
         case .cloud: return "cloud"
         case .say: return "say"
         case .answer: return "answer"
@@ -149,6 +155,7 @@ struct ConnectorDetailView: View {
         switch c.id {
         case "cloud": return !store.cloudToken.isEmpty
         case "github": return !store.githubToken.isEmpty
+        case "shell": return true
         default: return !store.openCodePassword.isEmpty
         }
     }
@@ -172,6 +179,9 @@ struct ConnectorDetailView: View {
                     SecureField("整理令牌（新建、移动、删除要用）", text: $store.organizeToken)
                 case "github":
                     SecureField("GitHub 令牌", text: $store.githubToken)
+                case "shell":
+                    Text("不用登录。命令在手机里跑，只有 curl、git push / pull 这类会联网。")
+                        .font(.footnote).foregroundStyle(Theme.muted)
                 default:
                     TextField("地址", text: $store.openCodeURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
@@ -225,6 +235,7 @@ struct ConnectorDetailView: View {
     private var footer: String {
         switch connector.id {
         case "cloud": return "在网盘网页的「Agent 令牌」里新建。只读令牌够找文件、检查改动；新建、改名、移动、放回收站、写记忆要带「整理」权限的令牌。令牌存在手机钥匙串里。"
+        case "shell": return "用的是 a-Shell 作者的 ios_system（BSD-3 开源）：ls、grep、sed、awk、tar、curl、git 等 70 多条命令。只看不改的直接跑；删文件、git commit / push 这类每次先问你。"
         case "github": return "GitHub → Settings → Developer settings → Personal access tokens 新建，要能写目标仓库（Contents: Read and write）。令牌存在手机钥匙串里。"
         default: return "密码是 Space 里的 OPENCODE_SERVER_PASSWORD。快速模式用 DeepSeek Flash，快很多；关掉用 V4 Pro，难题更稳但慢。云端只出方案，改东西前都会先问你。"
         }
@@ -237,6 +248,14 @@ struct ConnectorDetailView: View {
         let e = store.engine()
         let id = connector.id
         Task {
+            if id == "shell" {
+                try? FileManager.default.createDirectory(at: Workspace.base, withIntermediateDirectories: true)
+                let r = await ShellRunner.shared.run("echo 本机命令能用 && pwd && git version", cwd: Workspace.base) { _ in }
+                result = (r.ok ? "✓ " : "✗ ") + r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if r.ok { Haptics.success() } else { Haptics.error() }
+                testing = false
+                return
+            }
             do {
                 result = id == "cloud" ? "✓ 连上了：\(try await e.checkCloud())" : "✓ 连上了：\(try await e.whoami())"
                 Haptics.success()

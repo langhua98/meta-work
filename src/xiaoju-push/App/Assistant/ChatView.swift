@@ -434,7 +434,8 @@ private struct ToolCardView: View {
             }
             if let d = card.detail, !d.isEmpty {
                 Text(d).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
-                    .lineLimit(6)
+                    .lineLimit(card.icon == "terminal" ? 14 : 6)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
                     .background(Theme.bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))

@@ -48,9 +48,9 @@ LABELS = {
     "find": "小橘云盘 · 找文件", "list": "小橘云盘 · 看文件夹", "mkdir": "小橘云盘 · 新建文件夹", "rename": "小橘云盘 · 改名",
     "move": "小橘云盘 · 移动", "trash": "小橘云盘 · 放进回收站", "remember": "小橘云盘 · 读写记忆",
     "check": "GitHub · 检查改动", "status": "GitHub · 检查改动", "history": "GitHub · 推送记录", "push": "GitHub · 推送",
-    "exclude": "GitHub · 设置不推的文件夹", "cloud": "OpenCode（云端） · 交给云端处理",
+    "exclude": "GitHub · 设置不推的文件夹", "run": "本机命令 · 运行命令", "cloud": "OpenCode（云端） · 交给云端处理",
 }
-ALL_KINDS = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "cloud", "say", "answer"]
+ALL_KINDS = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "run", "cloud", "say", "answer"]
 
 
 def build(tasks=None, current=None, disabled=(), memory=""):

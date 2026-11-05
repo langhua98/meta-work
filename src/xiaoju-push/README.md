@@ -23,6 +23,16 @@
 
 代码在 `App/Assistant/`。llama.xcframework（llama.cpp 最新正式版）由 workflow 编译时下载到 `Vendor/`，不进仓库。
 
+## 本机命令（shell）
+
+对话里说「找一下哪里用了 cloudToken」「git 改了哪些」，本地模型输出 `{"do":"run","cmd":"…"}`，命令在当前任务的手机工作区里跑（不是工作区任务就在「工作区」总文件夹），输出实时显示在对话里。
+
+- 用 a-Shell 作者的 [ios_system](https://github.com/holzschu/ios_system)（BSD-3）：iPhone 不让 App 启动别的程序，它把每个命令做成框架，在 App 自己进程里调用。
+- 带的命令：ls cp mv rm mkdir find grep sed awk sort uniq wc diff head tail cat tar gzip curl dash（sh 脚本）和 git（lg2，libgit2）等 70 多条，见 `App/Shell/commandDictionary.plist`。没有 bash、npm、python。
+- 只看不改的直接跑；删文件、写文件（>）、`sed -i`、git commit / push / reset 这类先出确认卡片（`App/Shell/ShellSafety.swift`）。一条命令最多 2 分钟，停止键能停。
+- git：提交作者用 GitHub 用户名；push / pull 用 GitHub 连接器的令牌（写在 资源库/Preferences/git/config，「文件」App 里看不到）。
+- 框架由 workflow 按固定版本和 sha256 下载到 `Vendor/`（设备上一共约 10 MB）。开源许可见 `App/Shell/NOTICES.txt`。
+
 ## 编译和安装
 
 推送 `src/xiaoju-push/` 的改动后，`.github/workflows/xiaoju-push.yml` 在 GitHub 的 Mac 机器上编译，
