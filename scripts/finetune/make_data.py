@@ -23,10 +23,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "local-model-test"))
 import run  # noqa: E402  build() 拼系统提示
+import v3_data  # noqa: E402  v3 新增：手写口语、纠错提示、追问、纠错本
 
 MODEL = "Qwen3.5-4B"
 rnd = random.Random(42)
 MODE = "train"  # 或 "eval"：只用留给考试的说法
+V3_SHARE = 0.4  # 多少比例用 v3 新增的几种（手写口语、追问、纠错提示）
+FIXBOOK = os.path.join(HERE, "data", "fixbook.jsonl")  # 纠错本，训练前从云盘拷过来，没有就跳过
 
 # 任务名池（名字, 云盘路径, 仓库, 口头叫法）
 TASK_POOL = [
@@ -427,10 +430,79 @@ REAL = [
 ]
 
 
-def render(prefix, user, ctx, answer):
+def render(prefix, user, ctx, answer, hint=""):
+    # 和 App 一样：纠错提示在最前，然后是上一句/上一步，再是这一句
     last = f"（{ctx}）\n" if ctx else ""
-    return (prefix + f"<|im_start|>user\n{last}{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    return (prefix + f"<|im_start|>user\n{hint}{last}{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
             + answer + "<|im_end|>\n")
+
+
+def app_json(o):
+    """App 里纠错提示的写法（FixBook.swift Command.json）："do" 在前，其余按键名排序"""
+    rest = {k: o[k] for k in sorted(o) if k != "do"}
+    body = json.dumps(rest, ensure_ascii=False, separators=(",", ":"))
+    return '{"do":"%s"' % o["do"] + ("}" if body == "{}" else "," + body[1:])
+
+
+def v3_example(tasks, current, disabled):
+    """v3 新增的几种，返回 (这一句, 上下文, 答案 dict, 提示) 或 None（这次不合适就退回原来的）"""
+    T = rnd.choice(tasks)
+    t, tr = T[0], ref(T)
+    f = rnd.choice(FOLDERS)
+    r = rnd.random()
+    hint = ""
+    if r < 0.45:
+        items = [x for i, x in enumerate(v3_data.NATURAL) if v3_data.held(i, MODE)]
+        u, a = rnd.choice(items)
+        k = rnd.choice(KEYWORDS[:3] + ["TODO", "apiKey", "fetchUser", "baseURL"]) if "grep" in json.dumps(a) else rnd.choice(FILES)
+        # 没说是哪个任务的（「以后 node_modules 别再推了」）：用当前任务，没有当前任务又不止一个就不出这题
+        if "{t}" not in u and "{t}" in json.dumps(a, ensure_ascii=False) and a["do"] != "remember":
+            if current:
+                t = current
+            elif len(tasks) == 1:
+                t = tasks[0][0]
+            else:
+                return None
+        user = u.replace("{t}", tr).replace("{f}", f).replace("{k}", k)
+        ans = v3_data.fill_obj(a, t=t, f=f, k=k)
+        ctx = None
+    elif r < 0.7:
+        others = [x[0] for x in tasks if x[0] != t]
+        if not others:
+            others = [x[0] for x in TASK_POOL if x[0] != t]
+        user, ctx, ans = v3_data.followup(rnd, MODE, t, rnd.choice(others), f, rnd.choice(FILES[:6]))
+        if '"task"' in json.dumps(ans) and ans.get("task") not in [x[0] for x in tasks]:
+            return None
+    else:
+        # 纠错提示
+        (hs, ha), (us, ua) = v3_data.odd_pair(rnd, t, f)
+        c2 = None
+        if rnd.random() < 0.6:
+            # 相关：怪说法只有看提示才懂，照提示换参数
+            lines = [(hs, ha)]
+            user, ans = us, ua
+        else:
+            # 不相关：提示是别的事，这句照常理解
+            u2, c2, a2 = example(tasks, current, disabled, "")
+            lines = [(hs, ha)]
+            user, ans = u2, json.loads(a2)
+            if ans["do"] in ("cloud",) or user == hs:
+                return None
+        # 再随机加 0～2 条不相干的
+        for _ in range(rnd.choice([0, 0, 1, 2])):
+            (xs, xa), _ = v3_data.odd_pair(rnd, rnd.choice(tasks)[0], rnd.choice(FOLDERS))
+            if xa["do"] != ans["do"]:
+                lines.insert(rnd.randint(0, len(lines)), (xs, xa))
+        for _, a in lines:
+            if a["do"] == "cloud":
+                a["text"] = _
+        hint = v3_data.hint_block([(s, app_json(a)) for s, a in lines])
+        ctx = c2
+        if "task" in ans and ans["task"] not in [x[0] for x in tasks]:
+            return None
+    if ans["do"] in disabled or (ans["do"] == "list" and "list" in disabled):
+        return None
+    return user, ctx, ans, hint
 
 
 def one():
@@ -446,14 +518,20 @@ def one():
         disabled = tuple(rnd.sample(["push", "trash", "move", "rename", "mkdir", "exclude", "remember", "cloud", "history"], rnd.randint(1, 3)))
     prefix, _ = run.build(tasks=[t[:3] for t in tasks], current=current, disabled=disabled, memory=memory)
     prefix = prefix.replace("Qwen3.5-2B", MODEL)
-    user, ctx, ans = example(tasks, current, disabled, memory)
+    hint = ""
+    got = v3_example(tasks, current, disabled) if rnd.random() < V3_SHARE else None
+    if got:
+        user, ctx, a, hint = got
+        ans = J(**a)
+    else:
+        user, ctx, ans = example(tasks, current, disabled, memory)
     a = json.loads(ans)
     if not (a["do"] == "run" and a["cmd"] in user):  # 原样写出来的命令不能去空格
         user = noisy(user)
     if a["do"] == "cloud" and ctx is None:
         a["text"] = user  # 交给云端的是用户原话，一个字不改
         ans = J(**a)
-    return render(prefix, user, ctx, ans)
+    return render(prefix, user, ctx, ans, hint)
 
 
 def main():
@@ -471,9 +549,22 @@ def main():
             prefix, _ = run.build(tasks=[t[:3] for t in tasks], current=rnd.choice([None, tasks[0][0]]))
             prefix = prefix.replace("Qwen3.5-2B", MODEL)
             train.append(render(prefix, user, ctx, J(**ans)))
+    # 纠错本：每条 6 遍（任务列表随机），2 成留给考试
+    fb_train, fb_test = v3_data.fixbook(FIXBOOK)
+    def real(user, ctx, ans):
+        tasks = rnd.sample(TASK_POOL, rnd.randint(1, 4))
+        t = ans.get("task")
+        if t and not any(x[0] == t for x in tasks):
+            tasks[0] = next((x for x in TASK_POOL if x[0] == t), (t, "/" + t, "langhua98/" + t, []))
+        prefix, _ = run.build(tasks=[x[:3] for x in tasks], current=rnd.choice([None, tasks[0][0]]))
+        return render(prefix.replace("Qwen3.5-2B", MODEL), user, ctx, J(**ans))
+    for user, ctx, ans in fb_train:
+        for _ in range(6):
+            train.append(real(user, ctx, ans))
     MODE = "eval"
     rnd.seed(7)
     evals = [one() for _ in range(n_eval)]
+    evals += [real(u, c, a) for u, c, a in fb_test]
     rnd.shuffle(train)
     out = os.path.join(HERE, "data")
     os.makedirs(out, exist_ok=True)
@@ -481,7 +572,7 @@ def main():
         with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
             for r in part:
                 fh.write(json.dumps({"text": r}, ensure_ascii=False) + "\n")
-    print(f"train {len(train)} 条，eval {len(evals)} 条（考试只用留出来的说法）→ {out}")
+    print(f"train {len(train)} 条，eval {len(evals)} 条（考试只用留出来的说法；纠错本训练 {len(fb_train)} 条、考试 {len(fb_test)} 条）→ {out}")
 
 
 if __name__ == "__main__":
