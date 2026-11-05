@@ -50,15 +50,28 @@ jobs:
           rm -rf Vendor/llama.xcframework
           mv /tmp/llama/build-apple/llama.xcframework Vendor/
           ls Vendor/llama.xcframework
+      # 下载过的框架留着下次用（GitHub 下载偶尔一直 504）
+      - uses: actions/cache@v4
+        with:
+          path: ~/dl-cache
+          key: xiaoju-vendor-${{ hashFiles('.github/workflows/xiaoju-push.yml') }}
+          restore-keys: xiaoju-vendor-
       - name: Download ios_system frameworks (本机命令)
         working-directory: src/xiaoju-push
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # a-Shell 作者发布的编译好的框架；版本和校验值跟 a-Shell 的 xcfs/Package.swift 一致
-          mkdir -p Vendor /tmp/iosys
+          mkdir -p Vendor ~/dl-cache
           while read -r url sum; do
             [ -n "$url" ] || continue
-            f=/tmp/iosys/$(basename "$url")
-            curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f" "$url"
+            f=~/dl-cache/$(basename "$url")
+            if ! echo "$sum  $f" | shasum -a 256 -c - >/dev/null 2>&1; then
+              # 直链不行就走 API 下（github.com/OWNER/REPO/releases/download/TAG/NAME）
+              IFS=/ read -r _ _ _ owner repo _ _ tag name <<< "$url"
+              curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$f" "$url" ||
+                gh release download "$tag" -R "$owner/$repo" -p "$name" -D ~/dl-cache --clobber
+            fi
             echo "$sum  $f" | shasum -a 256 -c -
             unzip -qo "$f" -d Vendor
           done <<'EOF'
@@ -80,10 +93,12 @@ jobs:
         run: |
           # BeeWare 打包的官方 CPython 3.13 iOS 版（PEP 730），固定版本
           url=https://github.com/beeware/Python-Apple-support/releases/download/3.13-b18/Python-3.13-iOS-support.b18.tar.gz
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/python-ios.tar.gz "$url"
-          shasum -a 256 /tmp/python-ios.tar.gz
-          mkdir -p /tmp/python-ios Vendor
-          tar -xzf /tmp/python-ios.tar.gz -C /tmp/python-ios
+          f=~/dl-cache/$(basename "$url")
+          mkdir -p ~/dl-cache /tmp/python-ios Vendor
+          [ -s "$f" ] || curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$f" "$url" ||
+            GH_TOKEN=${{ github.token }} gh release download 3.13-b18 -R beeware/Python-Apple-support -p "$(basename "$url")" -D ~/dl-cache --clobber
+          shasum -a 256 "$f"
+          tar -xzf "$f" -C /tmp/python-ios
           rm -rf Vendor/Python.xcframework
           mv /tmp/python-ios/Python.xcframework Vendor/
           cat /tmp/python-ios/VERSIONS || true
