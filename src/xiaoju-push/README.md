@@ -25,7 +25,7 @@
 
 ## 本机命令（shell）
 
-对话里说「找一下哪里用了 cloudToken」「git 改了哪些」，本地模型输出 `{"do":"run","cmd":"…"}`，命令在当前任务的手机工作区里跑（不是工作区任务就在「工作区」总文件夹），输出实时显示在对话里。
+对话里说「找一下哪里用了 cloudToken」「git 改了哪些」，本地模型输出 `{"do":"run","cmd":"…"}`，命令在当前任务的代码文件夹里跑，输出实时显示在对话里：工作区任务就是它的工作区；云盘任务先把云盘文件夹同步一份到手机（`资源库/Caches/云盘副本/`，只下新的和改过的，5 MB 以上的文件不下），在副本里跑，改了不会传回云盘；没选任务在「工作区」总文件夹。
 
 - 用 a-Shell 作者的 [ios_system](https://github.com/holzschu/ios_system)（BSD-3）：iPhone 不让 App 启动别的程序，它把每个命令做成框架，在 App 自己进程里调用。
 - 带的命令：ls cp mv rm mkdir find grep sed awk sort uniq wc diff head tail cat tar gzip curl dash（sh 脚本）和 git（lg2，libgit2）等 70 多条，见 `App/Shell/commandDictionary.plist`。没有 bash、npm、python。
