@@ -23,6 +23,20 @@ targets:
       # 本地模型：llama.cpp 官方 XCFramework（最新正式版），编译时由 workflow 下载到 Vendor/（不进仓库）
       - framework: Vendor/llama.xcframework
         embed: true
+      # 本机命令：a-Shell 作者的 ios_system（BSD-3）和命令框架，workflow 按固定版本 + 校验值下载到 Vendor/。
+      # 只链接 ios_system；命令框架只嵌进去，跑命令时由 ios_system 按 Shell/commandDictionary.plist 加载
+      - framework: Vendor/ios_system.xcframework
+        embed: true
+      - { framework: Vendor/files.xcframework, embed: true, link: false }
+      - { framework: Vendor/text.xcframework, embed: true, link: false }
+      - { framework: Vendor/shell.xcframework, embed: true, link: false }
+      - { framework: Vendor/awk.xcframework, embed: true, link: false }
+      - { framework: Vendor/tar.xcframework, embed: true, link: false }
+      - { framework: Vendor/curl_ios.xcframework, embed: true, link: false }
+      - { framework: Vendor/dash.xcframework, embed: true, link: false }
+      - { framework: Vendor/lg2.xcframework, embed: true, link: false }
+      - { framework: Vendor/openssl.xcframework, embed: true, link: false }
+      - { framework: Vendor/libssh2.xcframework, embed: true, link: false }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.push

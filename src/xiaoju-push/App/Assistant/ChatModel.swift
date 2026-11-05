@@ -458,6 +458,8 @@ final class ChatModel: ObservableObject {
         case .remember(let s):
             if cloudReady { await askCloud(s, kind: "remember", auto: true) }
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
+        case .run(let c):
+            await shell(c, original: original)
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
             // 再带上用户上一句原话，「交给云端处理」这种短句云端才知道是哪件事
@@ -836,6 +838,94 @@ final class ChatModel: ObservableObject {
 
     // MARK: 云端 OpenCode
 
+    // MARK: 本机命令（Shell/ShellRunner.swift）
+
+    /// 命令在哪里跑：当前任务是工作区就进它的文件夹，不然在「工作区」总文件夹
+    private func shellFolder() -> (URL, String) {
+        if let m = currentTask, m.workspace {
+            let w = Workspace(mapping: m)
+            try? w.ensure()
+            return (w.root, "工作区 / " + w.root.lastPathComponent)
+        }
+        try? FileManager.default.createDirectory(at: Workspace.base, withIntermediateDirectories: true)
+        return (Workspace.base, "工作区")
+    }
+
+    private func shell(_ command: String, original: String) async {
+        switch ShellSafety.check(command) {
+        case .safe:
+            await runShell(command)
+        case .missing(let name):
+            if cloudReady {
+                var cid = UUID()
+                cid = add(.card(ActionCard(title: "手机上没有 \(name) 这个命令", lines: ["$ " + command],
+                                           note: "要交给云端 OpenCode 去跑吗？", tone: .cloud, buttons: [
+                    CardButton(label: "交给云端", style: .cloud) { [weak self] in
+                        guard let self else { return }
+                        self.resolveCard(cid, "交给云端了")
+                        self.run { await self.askCloud(original.isEmpty ? command : original, kind: "ask", auto: false) }
+                    },
+                    CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "没跑") },
+                ])))
+            } else {
+                say("手机上没有 \(name) 这个命令。能用的有 grep、sed、awk、git、curl、tar 这些。")
+            }
+        case .confirm(let why):
+            var cid = UUID()
+            cid = add(.card(ActionCard(title: "跑这条命令？", lines: ["$ " + command],
+                                       note: why + "。在「\(shellFolder().1)」里跑。", tone: .primary, buttons: [
+                CardButton(label: "运行", style: .primary) { [weak self] in
+                    guard let self else { return }
+                    self.resolveCard(cid, "已确认")
+                    self.run { await self.runShell(command) }
+                },
+                CardButton(label: "不要", style: .plain) { [weak self] in self?.resolveCard(cid, "没跑") },
+            ])))
+        }
+    }
+
+    private func runShell(_ command: String) async {
+        let (dir, label) = shellFolder()
+        await prepareGit()
+        let t = add(.tool(ToolCard(icon: "terminal", title: "$ " + command, sub: "在「\(label)」里跑", detail: "")))
+        let box = ShellOutputBox()
+        // 输出在后台线程来，攒起来每 0.2 秒刷一次界面
+        let ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if let d = box.takeIfChanged() { self?.tool(t) { $0.detail = ShellOutputBox.tail(d) } }
+            }
+        }
+        let r = await ShellRunner.shared.run(command, cwd: dir) { box.append($0) }
+        ticker.cancel()
+        let secs = r.seconds < 10 ? String(format: "%.1f 秒", r.seconds) : "\(Int(r.seconds)) 秒"
+        let out = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        tool(t) {
+            $0.state = r.ok ? .ok : .failed
+            $0.detail = out.isEmpty ? (r.ok ? "（没有输出）" : nil) : ShellOutputBox.tail(out)
+            $0.sub = r.killed ? "停了 · \(secs)" : (r.ok ? "\(label) · \(secs)" : "出错了（退出码 \(r.status)）· \(secs)")
+        }
+        lastCommand = "跑了命令 \(command)" + (r.ok ? "" : "，出错了")
+    }
+
+    /// git 配置：提交作者用 GitHub 用户名，推送用 GitHub 令牌。只在第一次跑命令时问一下 GitHub 你是谁。
+    private func prepareGit() async {
+        let d = UserDefaults.standard
+        if d.string(forKey: "gitLogin") == nil, !store.githubToken.isEmpty {
+            var req = URLRequest(url: URL(string: "https://api.github.com/user")!)
+            req.setValue("Bearer \(store.githubToken)", forHTTPHeaderField: "Authorization")
+            req.timeoutInterval = 8
+            if let (data, _) = try? await URLSession.shared.data(for: req),
+               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let login = o["login"] as? String, let id = o["id"] as? Int {
+                d.set(login, forKey: "gitLogin")
+                d.set("\(id)+\(login)@users.noreply.github.com", forKey: "gitEmail")
+            }
+        }
+        ShellRunner.writeGitConfig(name: d.string(forKey: "gitLogin") ?? "", email: d.string(forKey: "gitEmail") ?? "",
+                                   token: store.githubToken)
+    }
+
     private func confirmCloud(_ text: String) {
         var cid = UUID()
         cid = add(.card(ActionCard(title: "交给云端大模型？",
@@ -1064,6 +1154,34 @@ final class ChatModel: ObservableObject {
 }
 
 /// 给界面判断模型是不是已经在内存里（只用来换提示文字）
+/// 命令输出从后台线程攒到这里，界面定时来取
+final class ShellOutputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var text = ""
+    private var changed = false
+
+    func append(_ s: String) {
+        lock.lock(); defer { lock.unlock() }
+        text += s
+        if text.count > 20_000 { text = String(text.suffix(10_000)) }
+        changed = true
+    }
+
+    func takeIfChanged() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard changed else { return nil }
+        changed = false
+        return text
+    }
+
+    /// 卡片上只放最后 12 行
+    static func tail(_ s: String) -> String {
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 12 else { return s }
+        return "…（前面 \(lines.count - 12) 行收起来了）\n" + lines.suffix(12).joined(separator: "\n")
+    }
+}
+
 enum LocalModelIsLoaded {
     @MainActor static var value = false
 }
