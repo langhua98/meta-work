@@ -198,7 +198,7 @@ def example(tasks, current, disabled, memory):
     weights = {
         "push": 7, "push_skip": 3, "check": 7, "check_skip": 4, "status": 4, "history": 4, "exclude": 4, "find": 6,
         "list": 4, "list_dir": 4, "mkdir": 3, "rename": 3, "move": 3, "trash": 3, "remember": 4, "cloud": 12,
-        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4, "run": 12, "search": 6, "fetch": 4,
+        "confusable": 7, "handoff": 4, "followup": 6, "answer": 12, "connector_q": 4, "say": 4, "current": 4, "run": 12, "search": 6, "fetch": 4, "shortcut": 3,
         "alias": 2 if "主项目" in memory else 0, "disabled_ask": 6 if disabled else 0,
     }
     kind = rnd.choices(list(weights), weights=list(weights.values()))[0]
@@ -303,6 +303,11 @@ def example(tasks, current, disabled, memory):
         s = pick(["上网搜一下 {q}", "查查 {q}", "搜索 {q}", "网上找找 {q}", "帮我查一下 {q} 的资料", "百度一下 {q}", "google 一下 {q}",
                   "{q} 怎么弄，上网查查", "搜搜看 {q}", "上网看看 {q} 的最新消息", "查一下 {q} 的文档", "找找 {q} 的教程"]).format(q=topic)
         return fill(s), None, J(do="search", q=topic)
+    if kind == "shortcut":
+        n = rnd.choice(["下班打卡", "早报", "备份照片", "打开热点", "记账", "专注模式", "发微信给妈妈", "每日总结"])
+        s = pick(["运行快捷指令 {n}", "跑一下快捷指令「{n}」", "执行快捷指令 {n}", "用快捷指令 {n}", "帮我运行 {n} 这个快捷指令",
+                  "启动快捷指令{n}", "打开快捷指令 {n} 跑一下"]).format(n=n)
+        return fill(s), None, J(do="shortcut", name=n)
     if kind == "fetch":
         u = rnd.choice(["https://swift.org", "https://docs.python.org/3/", "https://github.com/ggml-org/llama.cpp",
                         "https://developer.apple.com/documentation/swiftui", "https://huggingface.co/Qwen", "example.com",
@@ -354,7 +359,7 @@ def example(tasks, current, disabled, memory):
             "push": "推送 {t}", "check": "检查一下 {t}", "status": "所有任务有改动吗", "history": "{t} 的推送记录",
             "exclude": "以后 {t} 的 {f} 都不要推", "find": "找一下 README", "list": "看看云盘里有什么", "mkdir": "在 /代码 新建一个 demo",
             "rename": "把 /代码/demo 改名为 demo2", "move": "把 /代码/demo 移到 /归档", "trash": "删掉 /临时/test",
-            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面", "run": "代码里哪里用了 apiKey", "search": "上网搜一下 SwiftUI 动画", "fetch": "读一下 https://swift.org",
+            "remember": "记住提交说明用中文", "cloud": "帮我写个登录页面", "run": "代码里哪里用了 apiKey", "search": "上网搜一下 SwiftUI 动画", "fetch": "读一下 https://swift.org", "shortcut": "运行快捷指令 下班打卡",
         }
         s = asks[k].format(t=tr, f=f)
         label = run.LABELS[k]
@@ -369,7 +374,7 @@ def example(tasks, current, disabled, memory):
             (["OpenCode 能做什么", "云端模型能干嘛", "云端那个大模型会什么", "DeepSeek 能帮我干啥"],
              "云端 OpenCode 能写代码、改 bug、解释代码、跑命令，这些我会交给它。"),
             (["有哪些连接器", "连接器是什么", "你连了哪些服务"],
-             "五个：小橘云盘、GitHub、本机命令、上网、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
+             "六个：小橘云盘、GitHub、本机命令、上网、快捷指令、云端 OpenCode。在「设置 → 连接器」里能看和开关每个工具。"),
             (["你能上网吗", "能搜索吗", "会查资料吗", "能看网页吗", "上网那个连接器干嘛的", "你能联网搜东西吗"],
              "能：上网搜资料（走你 HF 上的 SearXNG），或者打开一个网址读里面的文字。搜到的可以交给云端整理。"),
             (["本机命令能干嘛", "你能跑命令吗", "手机上能执行什么命令", "命令行能用吗", "本机命令有什么用", "你会用终端吗"],

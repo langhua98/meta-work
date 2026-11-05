@@ -476,6 +476,8 @@ final class ChatModel: ObservableObject {
             await webSearch(q)
         case .fetch(let u):
             await webFetch(u)
+        case .shortcut(let n):
+            confirmShortcut(n)
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
             // 再带上用户上一句原话，「交给云端处理」这种短句云端才知道是哪件事
@@ -911,6 +913,22 @@ final class ChatModel: ObservableObject {
             tool(t) { $0.state = .failed }
             add(.error(error.localizedDescription))
         }
+    }
+
+    /// 运行快捷指令：快捷指令什么都能做，每次先问
+    private func confirmShortcut(_ name: String) {
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: "运行快捷指令「\(name)」？", lines: [],
+                                   note: "会跳到「快捷指令」App 去跑。名字要和快捷指令里的一模一样。", tone: .primary, buttons: [
+            CardButton(label: "运行", style: .primary) { [weak self] in
+                guard let self else { return }
+                self.resolveCard(cid, "跳到快捷指令了")
+                Task { @MainActor in
+                    if !(await ShortcutRunner.run(name)) { self.add(.error("打不开「快捷指令」App")) }
+                }
+            },
+            CardButton(label: "不要", style: .plain) { [weak self] in self?.resolveCard(cid, "没运行") },
+        ])))
     }
 
     /// 结果下面的小卡片：交给云端接着做（用户点了才发）

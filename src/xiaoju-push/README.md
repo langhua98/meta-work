@@ -34,6 +34,8 @@
   - `node` / `js`：iPhone 自带的 JavaScriptCore，有 console、process、`require("fs")`、`require("path")`，没有 npm。
   - `jq`、`ssh` / `scp` / `sftp` / `ssh-keygen`（密钥在 ~/.ssh）。
   - 没有 bash、npm。
+- 快捷指令：快捷指令 App 里能找到「问小橘」（带一句话打开小橘发出去，可以配合「自动化」定时跑）；对小橘说「运行快捷指令 xxx」会先确认，再跳到快捷指令去跑。
+- 上网：「上网搜 xxx」走自己 HF 上的 SearXNG；「打开 网址」读网页正文。结果可以一键交给云端整理。
 - git 历史：任务对着整个仓库时，第一次跑 git log / diff / blame 会先从 GitHub clone 一份，只把 `.git` 放进命令文件夹（文件本身不动），半小时内不重拿；工作区「从 GitHub 拉」时也会顺便更新。所以 `git status` / `git diff` 看到的是手机上和 GitHub 的差别。
 - 只看不改的直接跑；删文件、写文件（>）、`sed -i`、git commit / push / reset 这类先出确认卡片（`App/Shell/ShellSafety.swift`）。一条命令最多 2 分钟，停止键能停。
 - git：提交作者用 GitHub 用户名；push / pull 用 GitHub 连接器的令牌（写在 资源库/Preferences/git/config，「文件」App 里看不到）。
