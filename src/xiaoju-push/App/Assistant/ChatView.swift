@@ -101,7 +101,8 @@ struct ChatView: View {
         case .user(let s): UserBubble(text: s)
         case .pasted(let s): PastedBubble(text: s)
         case .paste(let p): PasteCard(draft: p, itemID: it.id, model: model)
-        case .understood(let s, let src): UnderstoodChip(text: s, source: src)
+        case .understood(let s, let src):
+            UnderstoodChip(text: s, source: src, wrong: model.fixable[it.id] == nil ? nil : { model.wrong(it.id) })
         case .thinking(let s): ThinkingRow(text: s)
         case .tool(let t): ToolCardView(card: t)
         case .shell(let c):
@@ -386,11 +387,26 @@ private struct PasteCard: View {
 private struct UnderstoodChip: View {
     let text: String
     let source: String
+    /// 本地模型理解的才有：点了纠正，记进纠错本
+    var wrong: (() -> Void)?
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "sparkle").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.orange)
             Text(text).font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(2)
             Text("· \(source)").font(.system(size: 12)).foregroundStyle(Theme.faint).lineLimit(1)
+            if let wrong {
+                Spacer(minLength: 4)
+                Button(action: wrong) {
+                    Text("不对").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.orangeText)
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(Theme.orangeSoft, in: Capsule())
+                        .overlay(Capsule().stroke(Theme.orange.opacity(0.6), lineWidth: 1))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("理解得不对，纠正一下")
+            }
         }
     }
 }

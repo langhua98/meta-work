@@ -137,7 +137,8 @@ enum Interpreter {
 
     // MARK: 模型
 
-    static func prompt(tasks: [TaskRef], current: Mapping?, memoryIndex: String, last: String?) -> (prefix: String, suffix: (String) -> String) {
+    /// fixes：纠错本里跟这句话最像的几条。放在这一句前面（不放进系统提示，不然缓存好的前缀每次都要重算，慢好几秒）
+    static func prompt(tasks: [TaskRef], current: Mapping?, memoryIndex: String, last: String?, fixes: [Fix] = []) -> (prefix: String, suffix: (String) -> String) {
         let taskLines = tasks.map { "- \($0.name)：\($0.mapping.sourceLabel) → \($0.mapping.repo)" }.joined(separator: "\n")
         let cur = current.flatMap { c in tasks.first { $0.mapping.id == c.id }?.name }
         var sys = """
@@ -206,8 +207,12 @@ enum Interpreter {
         }
         let prefix = "<|im_start|>system\n\(sys)<|im_end|>\n"
         let lastLine = last.map { "（\($0)）\n" } ?? ""
+        // 连接器里关掉的工具，纠正过也不提
+        let usable = fixes.filter { f in !off.contains { f.right.hasPrefix("{\"do\":\"\($0)\"") } }
+        let fixLines = usable.isEmpty ? "" : "（用户以前纠正过的说法，意思一样就照这样做：\n"
+            + usable.map { "\(String($0.text.prefix(100)).replacingOccurrences(of: "\n", with: " ")) → \($0.right)" }.joined(separator: "\n") + "）\n"
         return (prefix, { text in
-            "<|im_start|>user\n\(lastLine)\(text)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            "<|im_start|>user\n\(fixLines)\(lastLine)\(text)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         })
     }
 
