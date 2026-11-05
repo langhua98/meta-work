@@ -920,10 +920,14 @@ final class ChatModel: ObservableObject {
         }
         let r = await ShellRunner.shared.run(command, cwd: dir) { box.append($0) }
         ticker.cancel()
+        // grep 没搜到返回 1，不算出错
+        let first = command.split(separator: " ").first.map(String.init) ?? ""
+        let notFound = ["grep", "egrep", "fgrep"].contains(first) && r.status == 1 && !r.killed
+            && r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         shellCard(t) {
-            $0.output = r.output
+            $0.output = notFound ? "（没找到）" : r.output
             $0.seconds = r.seconds
-            $0.state = r.killed ? .killed : (r.ok ? .ok : .failed(r.status))
+            $0.state = r.killed ? .killed : (r.ok || notFound ? .ok : .failed(r.status))
         }
         lastCommand = "跑了命令 \(command)" + (r.ok ? "" : "，出错了")
     }

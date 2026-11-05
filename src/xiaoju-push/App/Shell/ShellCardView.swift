@@ -124,7 +124,7 @@ struct ShellCardView: View {
     @ViewBuilder private var outputView: some View {
         let all = lines
         let shown: [Substring] = (!expanded && all.count > Self.foldAt) ? Array(all.suffix(Self.keep)) : all
-        if !all.isEmpty || card.state == .running || isFailed {
+        if !all.isEmpty || card.state == .running || isFailed || card.state == .ok {
             VStack(alignment: .leading, spacing: 2) {
                 if !expanded && all.count > Self.foldAt {
                     Text("…（前面 \(all.count - Self.keep) 行收起来了）").foregroundStyle(Color(dark: 0x7a776f, light: 0x9a978f))
@@ -140,6 +140,10 @@ struct ShellCardView: View {
                 }
                 if card.state == .killed {
                     Text("✗ 停了").foregroundStyle(Theme.red)
+                }
+                if card.state == .ok || isFailed {
+                    Text("在「\(card.folder)」里跑").font(.system(size: 11)).foregroundStyle(Color(dark: 0x7a776f, light: 0x9a978f))
+                        .padding(.top, 4)
                 }
             }
             .font(.system(size: 12, design: .monospaced))
