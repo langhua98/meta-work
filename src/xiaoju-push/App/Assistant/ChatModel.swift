@@ -51,9 +51,20 @@ struct ChatItem: Identifiable {
         case pasted(String)
         /// 粘贴的代码整理成的文件，等确认
         case paste(PasteDraft)
+        /// 本机命令（Shell/ShellCardView.swift）
+        case shell(ShellCard)
     }
     let id = UUID()
     var kind: Kind
+}
+
+/// 一次理解：原话、当时的上下文、模型给的指令（被说「不对」时用来记纠错本）
+struct FixTarget {
+    let text: String
+    let context: String?
+    let wrong: Command?
+    /// 这一条本身是「再说一遍」的结果、已经记进纠错本的那条（这条也不对就删掉它）
+    var saved: String?
 }
 
 @MainActor
@@ -72,9 +83,15 @@ final class ChatModel: ObservableObject {
     private var jobID = UUID()
     private var plans: [UUID: Plan] = [:]
     private var lastCommand: String?
+    /// 云盘任务的手机副本上次同步时间
+    private var mirrorSynced: [UUID: Date] = [:]
     private var recent: [String] = []
     private var memoryIndex = ""
     private var memoryLoaded = false
+    /// 本地模型理解出来的那行字后面可以点「不对」（键是那行的 id）
+    @Published private(set) var fixable: [UUID: FixTarget] = [:]
+    /// 点了「不对 → 我再说一遍」：下一句话做成的指令记成这句的纠正
+    private var pendingFix: FixTarget?
 
     init(store: Store) {
         self.store = store
@@ -124,6 +141,40 @@ final class ChatModel: ObservableObject {
 
     func start() {
         Task { await loadMemory() }
+        Task { await FixBook.shared.sync(files) }
+        watchBusy()
+    }
+
+    private var watching = false
+    private var idleTicks = 0
+
+    /// 保险：转圈中但界面上已经没有任何在跑的东西（没在想、没有转圈的卡片、云端没在干活）超过 6 秒，
+    /// 就把发送键变回来。正常不会触发；万一哪里没收尾，不让人一直对着停止键。
+    private func watchBusy() {
+        guard !watching else { return }
+        watching = true
+        Task { @MainActor [weak self] in
+            while let self {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard self.busy else { self.idleTicks = 0; continue }
+                let active = self.items.suffix(8).contains { it in
+                    switch it.kind {
+                    case .thinking: return true
+                    case .tool(let t): return t.state == .busy
+                    case .work(let w): return w.running
+                    case .shell(let c): return c.state == .running
+                    default: return false
+                    }
+                }
+                self.idleTicks = active ? 0 : self.idleTicks + 1
+                if self.idleTicks >= 3 {
+                    self.idleTicks = 0
+                    self.jobID = UUID()
+                    self.job = nil
+                    self.busy = false
+                }
+            }
+        }
     }
 
     /// 从首页点了某个任务：只换当前任务，不自动检查（要检查点「检查改动」或直接说）
@@ -135,7 +186,23 @@ final class ChatModel: ObservableObject {
     func stop() {
         job?.cancel()
         job = nil
+        jobID = UUID()
         busy = false
+        // 还在转圈的都收掉、标成停了，不留一个一直转的
+        items.removeAll { if case .thinking = $0.kind { return true }; return false }
+        for i in items.indices {
+            switch items[i].kind {
+            case .tool(var t) where t.state == .busy:
+                t.state = .failed; t.progress = nil; t.sub = "停了"
+                items[i].kind = .tool(t)
+            case .shell(var c) where c.state == .running:
+                c.state = .killed
+                c.seconds = c.started.map { Date().timeIntervalSince($0) }
+                items[i].kind = .shell(c)
+            default: break
+            }
+        }
+        add(.text("停了。"))
     }
 
     /// 离开对话页：云端在干的活照样跑完，回来还能看到；只把本地模型从内存里放掉
@@ -281,6 +348,9 @@ final class ChatModel: ObservableObject {
                 self.tool(t) { $0.state = .ok; $0.sub = "拉了 \(r.written) 个文件" }
                 self.say(r.kept.isEmpty ? "工作区和 GitHub 一样了。"
                          : "工作区更新好了。这 \(r.kept.count) 个你改过还没推，没覆盖：\(r.kept.prefix(5).joined(separator: "、"))")
+                // 顺便把 git 历史也拿过来（git log / diff / blame 能用）
+                let ws = Workspace(mapping: m)
+                await self.ensureGitHistory(m, in: ws.root, force: true)
                 await self.store.refreshPending()
             } catch {
                 self.tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
@@ -310,9 +380,11 @@ final class ChatModel: ObservableObject {
 
     private func handle(_ text: String) async {
         let ts = tasks
+        // 上一条点了「不对、我再说一遍」：这一句做成的就是那句的正确做法（只管紧接着的这一句）
+        let pf = pendingFix
+        pendingFix = nil
         if let c = Interpreter.keyword(text, tasks: ts, current: currentTask) {
-            if case .say(let q) = c { say(q); return }
-            add(.understood(c.summary, source: "直接认出来"))
+            add(.understood(c.summary, source: "快捷按钮"))
             await execute(c, original: text)
             return
         }
@@ -320,14 +392,19 @@ final class ChatModel: ObservableObject {
             if cloudReady && store.autoCloud {
                 await askCloud(text, kind: "ask", auto: true)
             } else {
-                say("这句话我要用本地模型才听得懂。去「设置 → 本地模型」下载一下（1.28 GB），或者说得简单点，比如「推送 \(ts.first?.name ?? "任务名")」。")
+                say("这句话我要用本地模型才听得懂。去「设置 → 本地模型」下载一下（\(ByteCountFormatter.string(fromByteCount: ModelStore.shared.info.bytes, countStyle: .file))），或者说得简单点，比如「推送 \(ts.first?.name ?? "任务名")」。")
             }
             return
         }
         await loadMemory()
         let thinking = add(.thinking(LocalModelIsLoaded.value ? "本地模型在理解你的话" : "加载本地模型…"))
         let started = Date()
-        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: lastCommand)
+        // 上一句话和上一步一起给模型，「交给云端」「再移回来」这种才知道说的是什么
+        let ctx = [previousUserText().map { "上一句：\(String($0.prefix(200)))" }, lastCommand.map { "上一步：\($0)" }]
+            .compactMap { $0 }.joined(separator: "；")
+        // 纠错本里跟这句最像的几条，一起给模型看
+        let fixes = FixBook.shared.similar(text)
+        let p = Interpreter.prompt(tasks: ts, current: currentTask, memoryIndex: memoryIndex, last: ctx.isEmpty ? nil : ctx, fixes: fixes)
         let grammar = Interpreter.grammar(tasks: ts)
         let path = ModelStore.shared.fileURL.path
         let suffix = p.suffix(text)
@@ -336,18 +413,34 @@ final class ChatModel: ObservableObject {
             try await LocalModel.shared.load(path: path)
             LocalModelIsLoaded.value = true
             update(thinking, .thinking("本地模型在理解你的话"))
-            out = try await LocalModel.shared.generate(prefix: p.prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
+            // 每秒更新一下秒数，看得出它在算、没卡死
+            let ticker = Task { @MainActor [weak self] in
+                var n = 0
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    n += 1
+                    if n >= 2 { self?.update(thinking, .thinking("本地模型在理解你的话（\(n) 秒）")) }
+                }
+            }
+            defer { ticker.cancel() }
+            // 提示里写的是 2B，换成现在用的模型名（问「你是谁」时答对）
+            let prefix = p.prefix.replacingOccurrences(of: "Qwen3.5-2B", with: ModelStore.shared.info.short)
+            out = try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
         } catch {
             remove(thinking)
-            add(.error(error.localizedDescription))
+            if !(error is CancellationError) && !Task.isCancelled { add(.error(error.localizedDescription)) }
             return
         }
         remove(thinking)
         if Task.isCancelled { return }
         let secs = String(format: "%.1f", Date().timeIntervalSince(started))
-        guard let cmd = Interpreter.parse(out).flatMap({ Interpreter.plausible($0, text) ? $0 : nil }) else {
+        let context = ctx.isEmpty ? nil : ctx
+        let parsed = Interpreter.parse(out)
+        // 照着纠错本做的，原话里不一定有「移」「删」这些字，不再拿关键词卡它
+        let learned = parsed.map { c in fixes.contains { $0.right == c.json } } ?? false
+        guard let cmd = parsed.flatMap({ learned || Interpreter.plausible($0, text) ? $0 : nil }) else {
             // 小模型没听懂或者瞎猜（比如闲聊被翻成「找文件」），不乱执行
-            if cloudReady && store.autoCloud { await askCloud(text, kind: "ask", auto: true) }
+            if cloudReady && store.autoCloud { await askCloud(text, kind: "ask", auto: true, learn: pf ?? FixTarget(text: text, context: context, wrong: parsed)) }
             else { say("这句我没把握，就不乱做了。可以说得具体点，比如「推送 \(ts.first?.name ?? "任务名")」「找一下 PushEngine」；写代码、解释代码这类要在设置里填 OpenCode 密码交给云端。") }
             return
         }
@@ -355,26 +448,118 @@ final class ChatModel: ObservableObject {
         case .say(let q) where cloudReady && store.autoCloud:
             // 小模型想反问的，先让云端带着记忆试一下
             add(.understood("本地模型没把握（\(q)）", source: "\(secs) 秒 · 没联网"))
-            await askCloud(text, kind: "ask", auto: true)
+            await askCloud(text, kind: "ask", auto: true, learn: pf ?? FixTarget(text: text, context: context, wrong: cmd))
         default:
-            add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网"))
+            let via = Connectors.label(for: cmd.kind).map { " · " + $0 } ?? ""
+            let id = add(.understood(cmd.summary, source: "\(secs) 秒 · 没联网" + via + (learned ? " · 参考了纠正" : "")))
+            var target = FixTarget(text: text, context: context, wrong: cmd)
+            if let pf {
+                // 交给云端的，记原来那句话（云端拿到的是用户原话）
+                let right: Command = { if case .cloud = cmd { return .cloud(pf.text) }; return cmd }()
+                let n = FixBook.shared.add(Fix(text: pf.text, context: pf.context, wrong: pf.wrong, right: right,
+                                               model: ModelStore.shared.info.short, source: .user), cloud: files)
+                target = FixTarget(text: pf.text, context: pf.context, wrong: pf.wrong, saved: FixBook.shared.fixes.last?.id)
+                say("记进纠错本了（第 \(n) 条）：以后说「\(String(pf.text.prefix(30)))」就这样做。这次也不对就再点「不对」。")
+                noticeTraining()
+            }
+            fixable[id] = target
             await execute(cmd, original: text)
+        }
+    }
+
+    // MARK: 纠错
+
+    /// 理解那行字后面的「不对」
+    func wrong(_ id: UUID) {
+        guard var t = fixable.removeValue(forKey: id) else { return }
+        Haptics.tap()
+        // 这条是「再说一遍」记下的，也不对：删掉它，接着纠正最早那句
+        if let saved = t.saved {
+            FixBook.shared.remove(saved, cloud: files)
+            t.saved = nil
+        }
+        guard cloudReady else {
+            pendingFix = t
+            say("没连云端，没法帮你猜对的做法。换个说法再说一遍，我照新的做，并记进纠错本。")
+            return
+        }
+        run { await self.askFixOptions(t) }
+    }
+
+    private func askFixOptions(_ t: FixTarget) async {
+        let client = OpenCodeClient(base: store.openCodeURL, password: store.openCodePassword)
+        let w = add(.work(WorkLog(title: "问云端该怎么做", status: "连接…")))
+        let prompt = OpenCodeClient.fixPrompt(text: t.text, context: t.context, wrong: t.wrong, tasks: tasks)
+        var options: [Command] = []
+        do {
+            let r = try await client.ask(prompt, sessionID: nil, fast: true,
+                                         status: { s in Task { @MainActor in self.work(w) { $0.status = s } } })
+            work(w) { $0.finished = Date(); $0.status = "完成" }
+            options = OpenCodeClient.fixOptions(r.reply)
+        } catch {
+            work(w) { $0.finished = Date(); $0.failed = true; $0.status = error.localizedDescription }
+            if Task.isCancelled { return }
+        }
+        let on = Connectors.enabledKinds
+        options = options.filter { $0 != t.wrong && on.contains($0.kind) }
+        var seen = Set<String>()
+        options = Array(options.filter { seen.insert($0.json).inserted }.prefix(3))
+        var cid = UUID()
+        var buttons: [CardButton] = options.map { c in
+            CardButton(label: Self.optionLabel(c), style: .primary) { [weak self] in
+                guard let self else { return }
+                let n = FixBook.shared.add(Fix(text: t.text, context: t.context, wrong: t.wrong, right: c,
+                                               model: ModelStore.shared.info.short, source: .user), cloud: self.files)
+                self.resolveCard(cid, "✓ 记进纠错本了（第 \(n) 条），下次这样说就照这个做")
+                self.noticeTraining()
+                self.add(.understood(c.summary, source: "你纠正的"))
+                self.run { await self.execute(c, original: t.text) }
+            }
+        }
+        buttons.append(CardButton(label: "都不是，我再说一遍", style: .plain) { [weak self] in
+            guard let self else { return }
+            self.pendingFix = t
+            self.resolveCard(cid, "好，再说一遍你要做什么")
+        })
+        cid = add(.card(ActionCard(title: "你想让我做的是？", lines: [],
+                                   note: options.isEmpty ? "云端没猜出来，直接再说一遍吧。" : "选项是云端看了你的原话给的。会改东西的，选了还会再让你确认。",
+                                   tone: .primary, buttons: buttons)))
+    }
+
+    private static func optionLabel(_ c: Command) -> String {
+        switch c {
+        case .cloud(let s): return "交给云端：" + String(s.prefix(20))
+        case .answer(let s): return "直接回答：" + String(s.prefix(20))
+        case .say(let s): return "先问我：" + String(s.prefix(20))
+        default: return c.summary
+        }
+    }
+
+    /// 刚攒够数就提醒一次
+    private func noticeTraining() {
+        if FixBook.shared.shouldNoticeTraining() {
+            say("纠错本攒够 \(FixBook.trainAt) 条了，可以拿去训新一版本地模型了。在「设置 → 纠错本」里能看到都有哪些。")
         }
     }
 
     // MARK: 执行
 
     private func execute(_ cmd: Command, original: String) async {
+        // 连接器里关掉的工具不做
+        if !Connectors.enabledKinds.contains(cmd.kind), let hit = Connectors.tool(for: cmd.kind) {
+            say("「\(hit.0.name) · \(hit.1.name)」在连接器里关掉了，要用就去「设置 → 连接器 → \(hit.0.name)」打开。")
+            return
+        }
         if let line = cmd.memoryLine { lastCommand = line }
         switch cmd {
-        case .check(let t):
+        case .check(let t, let skip):
             guard let m = taskOrComplain(t) else { return }
-            let (mm, extra) = withSpokenExcludes(m, original)
+            let (mm, extra) = withSkips(m, skip)
             await check(mm)
             offerKeepExcludes(m, extra)
-        case .push(let t):
+        case .push(let t, let skip):
             guard let m = taskOrComplain(t) else { return }
-            let (mm, extra) = withSpokenExcludes(m, original)
+            let (mm, extra) = withSkips(m, skip)
             await preparePush(mm)
             offerKeepExcludes(m, extra)
         case .status:
@@ -386,7 +571,7 @@ final class ChatModel: ObservableObject {
             guard let m = taskOrComplain(t) else { return }
             confirmExclude(m, path)
         case .find(let k, let folder):
-            await find(k, folder)
+            await find(k, folder, hint: original)
         case .mkdir(let p):
             confirmFileOp(.mkdir(path: p), entry: nil)
         case .rename(let p, _), .move(let p, _), .trash(let p):
@@ -394,9 +579,21 @@ final class ChatModel: ObservableObject {
         case .remember(let s):
             if cloudReady { await askCloud(s, kind: "remember", auto: true) }
             else { say("记忆要交给云端整理，先在设置里填 OpenCode 密码。") }
+        case .run(let c):
+            await shell(c, original: original)
+        case .search(let q):
+            await webSearch(q)
+        case .fetch(let u):
+            await webFetch(u)
+        case .shortcut(let n):
+            confirmShortcut(n)
         case .cloud(let s):
             // 用户原话交给云端（小模型转述常会抄错），云端自己给的指令才用它的文字
-            let ask = original.isEmpty || original == cmd.summary ? s : original
+            // 再带上用户上一句原话，「交给云端处理」这种短句云端才知道是哪件事
+            var ask = original.isEmpty || original == cmd.summary ? s : original
+            if !original.isEmpty, original != cmd.summary, let prev = previousUserText() {
+                ask = "用户上一句：\(prev)\n用户这一句：\(original)"
+            }
             if cloudReady && store.autoCloud { await askCloud(ask, kind: "ask", auto: true) }
             else if cloudReady { confirmCloud(ask) }
             else { say("这件事要交给云端大模型，先在设置里填 OpenCode 密码。") }
@@ -405,9 +602,9 @@ final class ChatModel: ObservableObject {
         }
     }
 
-    /// 话里说了「除了 7day 不用检查」「跳过 docs」：这次检查 / 推送先跳过这些文件夹（规则认，不靠小模型）
-    private func withSpokenExcludes(_ m: Mapping, _ text: String) -> (Mapping, [String]) {
-        let extra = ExcludeWords.parse(text, taskNames: tasks.map(\.name))
+    /// 模型听出来「这次跳过 7day」：这次检查 / 推送先跳过这些文件夹
+    private func withSkips(_ m: Mapping, _ skip: [String]) -> (Mapping, [String]) {
+        let extra = skip
             .map { m.relativeToCloud($0) }
             .filter { !$0.isEmpty && !m.excludedPaths.contains($0) }
         guard !extra.isEmpty else { return (m, []) }
@@ -432,6 +629,17 @@ final class ChatModel: ObservableObject {
             },
             CardButton(label: "只这一次", style: .plain) { [weak self] in self?.resolveCard(cid, "只跳过这一次") },
         ])))
+    }
+
+    /// 这一句之前用户说的最后一句（跳过同样是「交给云端」的话）
+    private func previousUserText() -> String? {
+        var seenCurrent = false
+        for it in items.reversed() {
+            guard case .user(let s) = it.kind else { continue }
+            if !seenCurrent { seenCurrent = true; continue }
+            return s
+        }
+        return nil
     }
 
     private func taskOrComplain(_ name: String?) -> Mapping? {
@@ -625,8 +833,14 @@ final class ChatModel: ObservableObject {
 
     // MARK: 云盘文件
 
-    private func find(_ keyword: String, _ folder: String?) async {
+    private func find(_ keyword: String, _ folder: String?, hint: String = "") async {
         guard !store.cloudToken.isEmpty else { add(.error("先在设置里填云盘令牌")); return }
+        // 没有关键词（或者小模型把「云盘」「文件夹」当成了关键词）= 看看文件夹里有什么
+        let k = keyword.trimmingCharacters(in: .whitespaces)
+        if k.isEmpty || ["云盘", "文件夹", "目录", "文件", "所有文件", "全部"].contains(k) {
+            await listFolder(folder, hint: hint)
+            return
+        }
         let t = add(.tool(ToolCard(icon: "magnifyingglass", title: "在云盘里找「\(keyword)」", sub: folder ?? "整个云盘")))
         do {
             var hits = try await files.search(keyword, in: folder)
@@ -636,6 +850,35 @@ final class ChatModel: ObservableObject {
             }
             tool(t) { $0.state = .ok; $0.sub = "找到 \(hits.count) 个" }
             if hits.isEmpty { say("没找到。") } else { add(.entries(title: "找到 \(hits.count) 个", items: Array(hits.prefix(12)))) }
+        } catch {
+            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+        }
+    }
+
+    /// 列出云盘某个文件夹里有什么。没指定文件夹时，拿原话去对根目录里真实的文件夹名，
+    /// 话里提到了哪个就列哪个，都没提到就列根目录（不再把「读取」「小橘」这种词当文件夹名）
+    private func listFolder(_ folder: String?, hint: String = "") async {
+        var path = folder.map { CloudFiles.clean($0) } ?? "/"
+        if path.isEmpty { path = "/" }
+        let t = add(.tool(ToolCard(icon: Self.iconFolder, title: "看看云盘", sub: "读取…")))
+        do {
+            if path != "/", try await files.item(path) == nil {
+                path = try await files.resolve(path).first(where: \.isFolder)?.fullPath ?? "/"
+            }
+            if path == "/", !hint.isEmpty {
+                func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "") }
+                let said = norm(hint)
+                let root = try await files.list("/", limit: 200).filter(\.isFolder)
+                if let hit = root.filter({ said.contains(norm($0.name)) && norm($0.name).count >= 2 })
+                    .max(by: { $0.name.count < $1.name.count }) {
+                    path = hit.fullPath
+                }
+            }
+            let all = try await files.list(path, limit: 200)
+            let dirs = all.filter(\.isFolder), others = all.filter { !$0.isFolder }
+            tool(t) { $0.state = .ok; $0.title = "看看云盘 \(path == "/" ? "根目录" : path)"; $0.sub = "\(dirs.count) 个文件夹 · \(others.count) 个文件" }
+            if all.isEmpty { say("这个文件夹是空的。"); return }
+            add(.entries(title: "\(path == "/" ? "云盘根目录" : path) · \(dirs.count) 个文件夹、\(others.count) 个文件", items: Array((dirs + others).prefix(50))))
         } catch {
             tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
         }
@@ -722,6 +965,323 @@ final class ChatModel: ObservableObject {
 
     // MARK: 云端 OpenCode
 
+    // MARK: 上网（WebTools.swift）
+
+    /// 上一次搜到的结果，「读第一个」这种用
+    private var lastResults: [WebResult] = []
+
+    private func webSearch(_ q: String) async {
+        let t = add(.tool(ToolCard(icon: "magnifyingglass", title: "上网搜", sub: q)))
+        do {
+            let rs = try await WebTools.search(q)
+            lastResults = rs
+            tool(t) { $0.state = rs.isEmpty ? .failed : .ok; $0.sub = q + (rs.isEmpty ? " · 没搜到" : " · \(rs.count) 条") }
+            guard !rs.isEmpty else {
+                say("没搜到。换个说法试试，或者交给云端查。")
+                return
+            }
+            let list = rs.enumerated().map { i, r in
+                "\(i + 1). [\(r.title.replacingOccurrences(of: "]", with: "）"))](\(r.url.absoluteString))" + (r.snippet.isEmpty ? "" : "\n" + String(r.snippet.prefix(90)))
+            }
+            say(list.joined(separator: "\n"))
+            lastCommand = "上网搜了「\(q)」，结果：" + rs.prefix(3).enumerated().map { "\($0 + 1). \($1.title) \($1.url.absoluteString)" }.joined(separator: " | ")
+            if cloudReady {
+                let text = "用户想知道：\(q)\n下面是上网搜到的结果，请整理成简短的回答（中文），标出出处：\n"
+                    + rs.enumerated().map { "\($0 + 1). \($1.title)\n\($1.url.absoluteString)\n\($1.snippet)" }.joined(separator: "\n\n")
+                offerCloud(title: "让云端整理一下？", note: "把这些结果交给 OpenCode 总结成回答", text: text)
+            }
+        } catch {
+            tool(t) { $0.state = .failed }
+            add(.error(error.localizedDescription))
+        }
+    }
+
+    private func webFetch(_ raw: String) async {
+        var target = raw
+        // 「读第 2 个」：模型可能只给序号
+        if let n = Int(raw.filter(\.isNumber)), !raw.contains("."), n >= 1, n <= lastResults.count {
+            target = lastResults[n - 1].url.absoluteString
+        }
+        let t = add(.tool(ToolCard(icon: "globe", title: "读网页", sub: target)))
+        do {
+            let p = try await WebTools.fetch(target)
+            let lines = p.text.split(separator: "\n").prefix(8).joined(separator: "\n")
+            tool(t) {
+                $0.state = .ok
+                $0.title = p.title.isEmpty ? "读网页" : String(p.title.prefix(60))
+                $0.sub = (p.url.host ?? target) + " · \(p.text.count) 字"
+                $0.detail = lines
+            }
+            add(.link("在浏览器打开", p.url))
+            lastCommand = "读了网页 \(p.url.absoluteString)（\(p.title)），开头：" + String(p.text.prefix(300)).replacingOccurrences(of: "\n", with: " ")
+            if cloudReady {
+                offerCloud(title: "让云端总结这个网页？", note: "把正文（前 8000 字）交给 OpenCode",
+                           text: "请用中文简短总结这个网页，代码相关的要点列出来：\(p.url.absoluteString)\n标题：\(p.title)\n\n" + String(p.text.prefix(8000)))
+            }
+        } catch {
+            tool(t) { $0.state = .failed }
+            add(.error(error.localizedDescription))
+        }
+    }
+
+    /// 运行快捷指令：快捷指令什么都能做，每次先问
+    private func confirmShortcut(_ name: String) {
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: "运行快捷指令「\(name)」？", lines: [],
+                                   note: "会跳到「快捷指令」App 去跑。名字要和快捷指令里的一模一样。", tone: .primary, buttons: [
+            CardButton(label: "运行", style: .primary) { [weak self] in
+                guard let self else { return }
+                self.resolveCard(cid, "跳到快捷指令了")
+                Task { @MainActor in
+                    if !(await ShortcutRunner.run(name)) { self.add(.error("打不开「快捷指令」App")) }
+                }
+            },
+            CardButton(label: "不要", style: .plain) { [weak self] in self?.resolveCard(cid, "没运行") },
+        ])))
+    }
+
+    /// 结果下面的小卡片：交给云端接着做（用户点了才发）
+    private func offerCloud(title: String, note: String, text: String) {
+        var cid = UUID()
+        cid = add(.card(ActionCard(title: title, lines: [], note: note, tone: .cloud, buttons: [
+            CardButton(label: "交给云端", style: .cloud) { [weak self] in
+                guard let self else { return }
+                self.resolveCard(cid, "交给云端了")
+                self.run { await self.askCloud(text, kind: "ask", auto: false) }
+            },
+            CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "不用了") },
+        ])))
+    }
+
+    // MARK: 本机命令（Shell/ShellRunner.swift）
+
+    /// 命令在哪里跑：工作区任务进它的文件夹；云盘任务进它在手机上的副本（CloudMirror）；没选任务在「工作区」总文件夹
+    private func shellFolder() -> (URL, String) {
+        if let m = currentTask, m.workspace {
+            let w = Workspace(mapping: m)
+            try? w.ensure()
+            return (w.root, "工作区 / " + w.root.lastPathComponent)
+        }
+        if let m = currentTask, !m.cloudPath.isEmpty {
+            return (CloudMirror(mapping: m, engine: store.engine()).root, "云盘副本 / " + m.title)
+        }
+        try? FileManager.default.createDirectory(at: Workspace.base, withIntermediateDirectories: true)
+        return (Workspace.base, "工作区")
+    }
+
+    /// git 命令要在 git 仓库里跑。工作区是 ZIP 下载的、云盘副本也没有 .git，先说清楚，不让它报一串看不懂的错
+    private func notAGitRepo(_ command: String) -> String? {
+        let words = command.split(separator: " ").map(String.init)
+        guard let first = words.first, first == "git" || first == "lg2" else { return nil }
+        let sub = words.dropFirst().first(where: { !$0.hasPrefix("-") }) ?? ""
+        if ["clone", "init", "version", "help", "config", "ls-remote"].contains(sub) { return nil }
+        let (dir, label) = shellFolder()
+        var u = dir
+        for _ in 0..<12 {
+            if FileManager.default.fileExists(atPath: u.appendingPathComponent(".git").path) { return nil }
+            let up = u.deletingLastPathComponent()
+            if up.path == u.path { break }
+            u = up
+        }
+        if let m = currentTask, !m.workspace {
+            return "「\(label)」是云盘代码在手机上的副本，里面没有 git 记录，git \(sub) 用不了。想看这次改了什么，说「检查改动」就行（直接和 GitHub 上的比）。"
+        }
+        return "「\(label)」里是从 GitHub 下载的文件，不是 git 仓库，git \(sub) 用不了。想看改了什么，说「检查改动」就行（直接和 GitHub 上的比）。"
+    }
+
+    /// 让命令文件夹里有一份真的 git 历史：从 GitHub clone 到旁边的临时文件夹，只把 .git 搬过来。
+    /// 文件本身不动（工作区还是「从 GitHub 拉」那套，云盘副本还是从云盘同步），所以 git status / diff 看到的是这边和 GitHub 的差别。
+    /// 半小时内拿过就不重拿；force 时一定重拿。只支持对着整个仓库的任务（填了「仓库里的目录」的不行）。
+    @discardableResult
+    func ensureGitHistory(_ m: Mapping, in dir: URL, force: Bool = false) async -> Bool {
+        let repo = m.repo.trimmingCharacters(in: .whitespaces)
+        guard repo.contains("/"), PushEngine.clean(m.repoPath).isEmpty else { return false }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let git = dir.appendingPathComponent(".git")
+        let stamp = git.appendingPathComponent("xiaoju-cloned")
+        if !force, let d = (try? fm.attributesOfItem(atPath: stamp.path))?[.modificationDate] as? Date, Date().timeIntervalSince(d) < 30 * 60 {
+            return true
+        }
+        await prepareGit()
+        let t = add(.tool(ToolCard(icon: "clock.arrow.circlepath", title: "从 GitHub 拿 git 历史", sub: repo + "…")))
+        let tmpName = ".xiaoju-clone-" + String(UUID().uuidString.prefix(8))
+        let parent = dir.deletingLastPathComponent()
+        let tmp = parent.appendingPathComponent(tmpName)
+        defer { try? fm.removeItem(at: tmp) }
+        let r = await ShellRunner.shared.run("git clone https://github.com/\(repo).git \(tmpName)", cwd: parent) { _ in }
+        guard r.ok, fm.fileExists(atPath: tmp.appendingPathComponent(".git").path) else {
+            tool(t) { $0.state = .failed; $0.sub = "clone 失败：" + String(r.output.trimmingCharacters(in: .whitespacesAndNewlines).suffix(120)) }
+            return false
+        }
+        // 不是默认分支就切过去
+        let branch = m.branch.trimmingCharacters(in: .whitespaces)
+        if !branch.isEmpty, let head = try? String(contentsOf: tmp.appendingPathComponent(".git/HEAD"), encoding: .utf8),
+           !head.contains("refs/heads/\(branch)") {
+            let c = await ShellRunner.shared.run("git checkout \(branch)", cwd: tmp) { _ in }
+            if !c.ok {
+                tool(t) { $0.state = .failed; $0.sub = "仓库里切不到分支 \(branch)" }
+                return false
+            }
+        }
+        do {
+            if fm.fileExists(atPath: git.path) { try fm.removeItem(at: git) }
+            try fm.moveItem(at: tmp.appendingPathComponent(".git"), to: git)
+            try Data().write(to: stamp)
+        } catch {
+            tool(t) { $0.state = .failed; $0.sub = error.localizedDescription }
+            return false
+        }
+        tool(t) { $0.state = .ok; $0.sub = repo + (branch.isEmpty ? "" : " · \(branch)") + " · 现在 git log / diff 能用了" }
+        return true
+    }
+
+    /// 云盘任务：跑命令前先把云盘代码同步到手机（只下新的和改过的）。失败返回 false。
+    private func syncMirrorIfNeeded() async -> Bool {
+        guard let m = currentTask, !m.workspace, !m.cloudPath.isEmpty else { return true }
+        guard !store.cloudToken.isEmpty else {
+            say("「\(m.title)」的代码在云盘里，要先在「设置 → 连接器 → 小橘云盘」填令牌，才能同步到手机上跑命令。")
+            return false
+        }
+        // 连着跑几条命令时不用每次都去云盘对一遍（列文件夹要好几次请求）
+        if let last = mirrorSynced[m.id], Date().timeIntervalSince(last) < 120 { return true }
+        let mirror = CloudMirror(mapping: m, engine: store.engine())
+        let t = add(.tool(ToolCard(icon: "arrow.down.circle", title: "把云盘里的 \(m.title) 同步到手机", sub: "看看有哪些文件…")))
+        do {
+            let r = try await mirror.sync { [weak self] done, total in
+                self?.tool(t) {
+                    $0.sub = total == 0 ? "都是最新的" : "下载 \(done) / \(total)"
+                    $0.progress = total == 0 ? nil : Double(done) / Double(total)
+                }
+            }
+            tool(t) {
+                $0.state = .ok; $0.progress = nil
+                var parts = ["\(r.total) 个文件"]
+                if r.downloaded > 0 { parts.append("新下载 \(r.downloaded) 个") } else { parts.append("都是最新的") }
+                if r.removed > 0 { parts.append("删了 \(r.removed) 个") }
+                if r.skipped > 0 { parts.append("\(r.skipped) 个太大没下") }
+                $0.sub = parts.joined(separator: " · ")
+            }
+            mirrorSynced[m.id] = Date()
+            return true
+        } catch {
+            // 连不上云盘但以前同步过：用旧的副本接着跑，说一声
+            let old = (try? FileManager.default.contentsOfDirectory(atPath: mirror.root.path))?.contains { !$0.hasPrefix(".") } ?? false
+            tool(t) {
+                $0.state = .failed; $0.progress = nil
+                $0.sub = (old ? "同步失败，用上次的副本：" : "") + error.localizedDescription
+            }
+            return old && !Task.isCancelled
+        }
+    }
+
+    private func shell(_ raw: String, original: String) async {
+        let command = ShellSafety.normalize(raw)
+        if let why = notAGitRepo(command) {
+            // 没有 .git：任务对着整个仓库的话，先从 GitHub clone 一份历史过来再跑
+            let (dir, _) = shellFolder()
+            guard let m = currentTask, await ensureGitHistory(m, in: dir) else { say(why); return }
+        }
+        switch ShellSafety.check(command) {
+        case .safe:
+            await runShell(command)
+        case .missing(let name):
+            if cloudReady {
+                var cid = UUID()
+                cid = add(.card(ActionCard(title: "手机上没有 \(name) 这个命令", lines: ["$ " + command],
+                                           note: "要交给云端 OpenCode 去跑吗？", tone: .cloud, buttons: [
+                    CardButton(label: "交给云端", style: .cloud) { [weak self] in
+                        guard let self else { return }
+                        self.resolveCard(cid, "交给云端了")
+                        self.run { await self.askCloud(original.isEmpty ? command : original, kind: "ask", auto: false) }
+                    },
+                    CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "没跑") },
+                ])))
+            } else {
+                say("手机上没有 \(name) 这个命令。能用的有 grep、sed、awk、git、curl、tar 这些。")
+            }
+        case .confirm(let why):
+            let copy = currentTask.map { !$0.workspace && !$0.cloudPath.isEmpty } ?? false
+            add(.shell(ShellCard(command: command, folder: shellFolder().1,
+                                 state: .pending(why + (copy ? "（这是云盘代码在手机上的副本，改了不会传回云盘）" : "")))))
+        }
+    }
+
+    private func shellCard(_ id: UUID, _ f: (inout ShellCard) -> Void) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .shell(var c) = items[i].kind else { return }
+        f(&c)
+        items[i].kind = .shell(c)
+    }
+
+    /// 命令卡片上点了「运行」
+    func shellApprove(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }), case .shell(let c) = items[i].kind,
+              case .pending = c.state else { return }
+        run { await self.runShell(c.command, card: id) }
+    }
+
+    /// 命令卡片上点了「不要」
+    func shellReject(_ id: UUID) {
+        shellCard(id) { $0.state = .rejected }
+    }
+
+    private func runShell(_ command: String, card: UUID? = nil) async {
+        guard await syncMirrorIfNeeded() else {
+            if let card { shellCard(card) { $0.state = .rejected } }
+            return
+        }
+        if Task.isCancelled { return }
+        let (dir, label) = shellFolder()
+        await prepareGit()
+        let t: UUID
+        if let card {
+            t = card
+            shellCard(t) { $0.state = .running; $0.started = Date(); $0.folder = label }
+        } else {
+            t = add(.shell(ShellCard(command: command, folder: label, state: .running, started: Date())))
+        }
+        let box = ShellOutputBox()
+        // 输出在后台线程来，攒起来每 0.2 秒刷一次界面
+        let ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if let d = box.takeIfChanged() { self?.shellCard(t) { $0.output = d } }
+            }
+        }
+        let r = await ShellRunner.shared.run(command, cwd: dir) { box.append($0) }
+        ticker.cancel()
+        // grep 没搜到返回 1，不算出错
+        let first = command.split(separator: " ").first.map(String.init) ?? ""
+        let notFound = ["grep", "egrep", "fgrep"].contains(first) && r.status == 1 && !r.killed
+            && r.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        shellCard(t) {
+            $0.output = notFound ? "（没找到）" : r.output
+            $0.seconds = r.seconds
+            $0.state = r.killed ? .killed : (r.ok || notFound ? .ok : .failed(r.status))
+        }
+        // 下一句话的上下文：命令 + 结果前几行（「打开第一个文件」这种才知道指的是什么）
+        let head = (notFound ? "没找到" : r.output).split(separator: "\n").prefix(3).joined(separator: " | ")
+        lastCommand = "跑了命令 \(command)" + (r.ok || notFound ? "" : "，出错了") + (head.isEmpty ? "" : "，结果：" + String(head.prefix(200)))
+    }
+
+    /// git 配置：提交作者用 GitHub 用户名，推送用 GitHub 令牌。只在第一次跑命令时问一下 GitHub 你是谁。
+    private func prepareGit() async {
+        let d = UserDefaults.standard
+        if d.string(forKey: "gitLogin") == nil, !store.githubToken.isEmpty {
+            var req = URLRequest(url: URL(string: "https://api.github.com/user")!)
+            req.setValue("Bearer \(store.githubToken)", forHTTPHeaderField: "Authorization")
+            req.timeoutInterval = 8
+            if let (data, _) = try? await URLSession.shared.data(for: req),
+               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let login = o["login"] as? String, let id = o["id"] as? Int {
+                d.set(login, forKey: "gitLogin")
+                d.set("\(id)+\(login)@users.noreply.github.com", forKey: "gitEmail")
+            }
+        }
+        ShellRunner.writeGitConfig(name: d.string(forKey: "gitLogin") ?? "", email: d.string(forKey: "gitEmail") ?? "",
+                                   token: store.githubToken)
+    }
+
     private func confirmCloud(_ text: String) {
         var cid = UUID()
         cid = add(.card(ActionCard(title: "交给云端大模型？",
@@ -739,7 +1299,7 @@ final class ChatModel: ObservableObject {
         ])))
     }
 
-    private func askCloud(_ text: String, kind: String, auto: Bool) async {
+    private func askCloud(_ text: String, kind: String, auto: Bool, learn: FixTarget? = nil) async {
         let client = OpenCodeClient(base: store.openCodeURL, password: store.openCodePassword)
         let w = add(.work(WorkLog(title: auto ? "问云端 OpenCode" : "交给 OpenCode", status: "连接…")))
         do {
@@ -784,6 +1344,15 @@ final class ChatModel: ObservableObject {
             store.openCodeTurns += 1
             work(w) { $0.finished = Date(); $0.status = "完成" }
             let reply = OpenCodeClient.parse(r.reply)
+            // 本地模型没搞定、云端给了一条明确的指令：记进纠错本，下次本地模型自己就会
+            if let learn, FixBook.shared.learnFromCloud {
+                let right: Command? = reply.commands.count == 1 ? reply.commands[0] : nil
+                if let right, right != learn.wrong {
+                    FixBook.shared.add(Fix(text: learn.text, context: learn.context, wrong: learn.wrong, right: right,
+                                           model: ModelStore.shared.info.short, source: .cloud), cloud: files)
+                    noticeTraining()
+                }
+            }
             if !reply.text.isEmpty { say(reply.text) }
             if let mu = reply.memory { memoryCard(mu) }
             if !reply.commands.isEmpty { cloudCommandsCard(reply.commands) }
@@ -834,11 +1403,33 @@ final class ChatModel: ObservableObject {
         return path
     }
 
-    private func cloudCommandsCard(_ cmds: [Command]) {
-        // 只有一条就走普通流程（推送、改文件都会再出自己的确认卡片）
+    private func cloudCommandsCard(_ all: [Command]) {
+        // 连接器里关掉的，云端说了也不做
+        let on = Connectors.enabledKinds
+        let cmds = all.filter { on.contains($0.kind) }
+        let dropped = all.filter { !on.contains($0.kind) }
+        if !dropped.isEmpty {
+            say("云端还想做这些，但对应的工具在连接器里关掉了，没做：" + dropped.prefix(5).map(\.summary).joined(separator: "；"))
+        }
+        guard !cmds.isEmpty else { return }
+        // 只看不改的（列文件、看记录）直接做；推送、检查、改文件这些先问用户
         if cmds.count == 1, let c = cmds.first {
-            add(.understood(c.summary, source: "问了云端"))
-            run { await self.execute(c, original: c.summary) }
+            switch c {
+            case .find, .status, .history, .say, .answer:
+                add(.understood(c.summary, source: "问了云端"))
+                run { await self.execute(c, original: c.summary) }
+            default:
+                var cid = UUID()
+                cid = add(.card(ActionCard(title: "云端建议：\(c.summary)", lines: [],
+                                           note: "还没动。要做就点确认。", tone: .primary, buttons: [
+                    CardButton(label: "确认", style: .primary) { [weak self] in
+                        guard let self else { return }
+                        self.resolveCard(cid, "已确认")
+                        self.run { await self.execute(c, original: c.summary) }
+                    },
+                    CardButton(label: "不用", style: .plain) { [weak self] in self?.resolveCard(cid, "没做") },
+                ])))
+            }
             return
         }
         var cid = UUID()
@@ -873,7 +1464,7 @@ final class ChatModel: ObservableObject {
                         mm.addExclude(mm.relativeToCloud(path))
                         store.upsert(mm)
                     }
-                case .push(let task):
+                case .push(let task, _):
                     if let m = TaskRef.find(task, in: tasks, current: currentTask), let p = await check(m, quiet: true), !p.changes.isEmpty {
                         await commit(m, p, message: commitMessage(p))
                     }
@@ -928,6 +1519,34 @@ final class ChatModel: ObservableObject {
 }
 
 /// 给界面判断模型是不是已经在内存里（只用来换提示文字）
+/// 命令输出从后台线程攒到这里，界面定时来取
+final class ShellOutputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var text = ""
+    private var changed = false
+
+    func append(_ s: String) {
+        lock.lock(); defer { lock.unlock() }
+        text += s
+        if text.count > 20_000 { text = String(text.suffix(10_000)) }
+        changed = true
+    }
+
+    func takeIfChanged() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard changed else { return nil }
+        changed = false
+        return text
+    }
+
+    /// 卡片上只放最后 12 行
+    static func tail(_ s: String) -> String {
+        let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 12 else { return s }
+        return "…（前面 \(lines.count - 12) 行收起来了）\n" + lines.suffix(12).joined(separator: "\n")
+    }
+}
+
 enum LocalModelIsLoaded {
     @MainActor static var value = false
 }

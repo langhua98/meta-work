@@ -6,24 +6,54 @@ import llama
 // 不常驻：要用时才加载，空闲 2 分钟、App 进后台、内存告警时释放。
 // 每次只把一句话翻成一条 JSON 指令：用 GBNF 语法锁死输出格式，模型写不出格式以外的东西。
 
-struct ModelInfo {
+struct ModelInfo: Identifiable, Hashable {
+    let id: String
     let name: String
+    let short: String
+    let note: String
     let file: String
     let url: URL
     let bytes: Int64
 
     static let qwen = ModelInfo(
-        name: "Qwen3.5-2B · Q4_K_M",
+        id: "2b", name: "Qwen3.5-2B · Q4_K_M", short: "Qwen3.5-2B", note: "快，省内存（运行约 1.6 GB）",
         file: "Qwen3.5-2B-Q4_K_M.gguf",
         url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf")!,
         bytes: 1_280_835_840)
+
+    static let qwen4b = ModelInfo(
+        id: "4b", name: "Qwen3.5-4B · Q4_K_M", short: "Qwen3.5-4B", note: "更聪明，慢一些，运行要 3 GB 左右（试试 15 Pro Max 跑不跑得动）",
+        file: "Qwen3.5-4B-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf")!,
+        bytes: 2_740_937_888)
+
+    /// 在 Kaggle 上用小橘推送的工具调用数据微调过的 4B（scripts/finetune/train_kaggle.ipynb 训好后传到 HF）
+    static let xiaoju4b = ModelInfo(
+        id: "4b-xiaoju", name: "Qwen3.5-4B 小橘版 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
+        note: "专门训练过调用小橘推送的工具（第二版），最懂你的话",
+        file: "Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf")!,
+        bytes: 2_783_446_880)
+
+    static let all = [qwen, qwen4b, xiaoju4b]
 }
 
 /// 下载、删除模型文件。
 @MainActor
 final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = ModelStore()
-    let info = ModelInfo.qwen
+
+    /// 现在用哪个模型（设置里切换）
+    @Published var selectedID: String {
+        didSet {
+            UserDefaults.standard.set(selectedID, forKey: "localModel")
+            refresh()
+            Task { await LocalModel.shared.unload() }
+        }
+    }
+    var info: ModelInfo { ModelInfo.all.first { $0.id == selectedID } ?? .qwen }
+    /// 正在下载的是哪个
+    @Published private(set) var downloadingID: String?
 
     @Published private(set) var downloaded = false
     @Published private(set) var progress: Double?
@@ -34,8 +64,17 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
     private var task: URLSessionDownloadTask?
 
     override init() {
+        selectedID = UserDefaults.standard.string(forKey: "localModel") ?? ModelInfo.qwen.id
         super.init()
-        downloaded = FileManager.default.fileExists(atPath: fileURL.path)
+        // 第一版小橘模型换成第二版了，旧文件（2.6 GB）删掉腾空间
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent("Qwen3.5-4B-xiaoju-Q4_K_M.gguf"))
+        refresh()
+    }
+
+    func refresh() { downloaded = isDownloaded(info) }
+
+    func isDownloaded(_ m: ModelInfo) -> Bool {
+        FileManager.default.fileExists(atPath: folder.appendingPathComponent(m.file).path)
     }
 
     var folder: URL {
@@ -47,8 +86,11 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     var downloading: Bool { progress != nil }
 
-    func download() {
+    func download() { download(info) }
+
+    func download(_ m: ModelInfo) {
         guard task == nil else { return }
+        downloadingID = m.id
         error = ""
         let c = URLSessionConfiguration.default
         c.allowsCellularAccess = false
@@ -58,7 +100,7 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         session = s
         progress = 0
         received = 0
-        let t = s.downloadTask(with: info.url)
+        let t = s.downloadTask(with: m.url)
         task = t
         t.resume()
     }
@@ -67,19 +109,24 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         task?.cancel()
         task = nil
         progress = nil
+        downloadingID = nil
     }
 
-    func delete() {
+    func delete() { delete(info) }
+
+    func delete(_ m: ModelInfo) {
         Task { await LocalModel.shared.unload() }
-        try? FileManager.default.removeItem(at: fileURL)
-        downloaded = false
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(m.file))
+        refresh()
+        objectWillChange.send()
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                 didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                                 totalBytesExpectedToWrite: Int64) {
         MainActor.assumeIsolated {
-            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : info.bytes
+            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite
+                : (ModelInfo.all.first { $0.id == downloadingID } ?? info).bytes
             received = totalBytesWritten
             progress = Double(totalBytesWritten) / Double(total)
         }
@@ -91,7 +138,9 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("models", isDirectory: true)
-        let dest = base.appendingPathComponent(ModelInfo.qwen.file)
+        // 按下载地址认是哪个模型的文件
+        let name = downloadTask.originalRequest?.url?.lastPathComponent ?? ModelInfo.qwen.file
+        let dest = base.appendingPathComponent(ModelInfo.all.first { $0.file == name }?.file ?? name)
         var failure = ""
         do {
             if let code = (downloadTask.response as? HTTPURLResponse)?.statusCode, code != 200 {
@@ -109,7 +158,8 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
         MainActor.assumeIsolated {
             self.error = failure
-            self.downloaded = failure.isEmpty
+            self.refresh()
+            self.objectWillChange.send()
         }
     }
 
@@ -120,6 +170,7 @@ final class ModelStore: NSObject, ObservableObject, URLSessionDownloadDelegate {
             }
             self.task = nil
             self.progress = nil
+            self.downloadingID = nil
             session.finishTasksAndInvalidate()
         }
     }
@@ -134,12 +185,18 @@ actor LocalModel {
     private var vocab: OpaquePointer?
     /// 已经算进 KV 缓存的前缀（固定说明），下次同样的前缀就不用重算
     private var cachedPrefix: [llama_token] = []
+    /// 前缀算完后的整个状态快照。Qwen3.5 有循环层，KV 缓存删不掉后半段，
+    /// 以前每句话都要把两千多字的说明重算一遍（4B 要十几二十秒，看着像卡住）；现在算一次存起来，下次直接恢复。
+    private var prefixState: [UInt8] = []
     private var idleTimer: Task<Void, Never>?
     private static var backendReady = false
 
     static let contextSize: UInt32 = 3072
 
     var isLoaded: Bool { model != nil }
+    private var loadedPath = ""
+    /// 内存浮标用：现在在内存里的模型文件名（没加载是 nil）
+    var loadedFile: String? { model == nil ? nil : (loadedPath as NSString).lastPathComponent }
 
     init() {
         Task { @MainActor in
@@ -155,7 +212,8 @@ actor LocalModel {
     }
 
     func load(path: String) throws {
-        if model != nil { return }
+        if model != nil && loadedPath == path { return }
+        if model != nil { unload() }
         if !Self.backendReady {
             llama_backend_init()
             Self.backendReady = true
@@ -180,6 +238,7 @@ actor LocalModel {
         ctx = c
         vocab = llama_model_get_vocab(m)
         cachedPrefix = []
+        loadedPath = path
     }
 
     func unload() {
@@ -191,6 +250,7 @@ actor LocalModel {
         model = nil
         vocab = nil
         cachedPrefix = []
+        prefixState = []
     }
 
     /// 用完后 2 分钟没人用就释放
@@ -225,6 +285,24 @@ actor LocalModel {
         return buf.prefix(Int(max(0, n))).map { UInt8(bitPattern: $0) }
     }
 
+    private func savePrefix() {
+        guard let ctx else { return }
+        let n = llama_state_seq_get_size(ctx, 0)
+        guard n > 0, n < 400 * 1_048_576 else { return }
+        var buf = [UInt8](repeating: 0, count: n)
+        let got = buf.withUnsafeMutableBufferPointer { llama_state_seq_get_data(ctx, $0.baseAddress, n, 0) }
+        prefixState = got == n ? buf : []
+    }
+
+    private func restorePrefix(_ mem: llama_memory_t?) -> Bool {
+        guard let ctx else { return false }
+        llama_memory_clear(mem, true)
+        let n = prefixState.count
+        let got = prefixState.withUnsafeBufferPointer { llama_state_seq_set_data(ctx, $0.baseAddress, n, 0) }
+        if got == 0 { prefixState = []; llama_memory_clear(mem, true); return false }
+        return true
+    }
+
     private func decode(_ tokens: [llama_token]) throws {
         guard let ctx, !tokens.isEmpty else { return }
         var toks = tokens
@@ -247,16 +325,21 @@ actor LocalModel {
         let mem = llama_get_memory(ctx)
         // 只保留前缀、删掉后面的；模型里有循环层时删不了（返回 false），就整个重算
         if pre == cachedPrefix, llama_memory_seq_rm(mem, 0, llama_pos(pre.count), -1) {
+        } else if pre == cachedPrefix, !prefixState.isEmpty, restorePrefix(mem) {
         } else {
             llama_memory_clear(mem, true)
             cachedPrefix = []
+            prefixState = []
             var i = 0
             while i < pre.count {
+                // 点了停止：长提示词读到一半也马上停（不然下一句要排在它后面等）
+                if Task.isCancelled { throw CancellationError() }
                 let chunk = Array(pre[i..<min(pre.count, i + 512)])
                 try decode(chunk)
                 i += chunk.count
             }
             cachedPrefix = pre
+            savePrefix()
         }
         try decode(suf)
 

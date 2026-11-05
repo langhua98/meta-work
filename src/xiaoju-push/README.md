@@ -23,6 +23,24 @@
 
 代码在 `App/Assistant/`。llama.xcframework（llama.cpp 最新正式版）由 workflow 编译时下载到 `Vendor/`，不进仓库。
 
+## 本机命令（shell）
+
+对话里说「找一下哪里用了 cloudToken」「git 改了哪些」，本地模型输出 `{"do":"run","cmd":"…"}`，命令在当前任务的代码文件夹里跑，输出实时显示在对话里：工作区任务就是它的工作区；云盘任务先把云盘文件夹同步一份到手机（`资源库/Caches/云盘副本/`，只下新的和改过的，5 MB 以上的文件不下），在副本里跑，改了不会传回云盘；没选任务在「工作区」总文件夹。
+
+- 用 a-Shell 作者的 [ios_system](https://github.com/holzschu/ios_system)（BSD-3）：iPhone 不让 App 启动别的程序，它把每个命令做成框架，在 App 自己进程里调用。
+- 带的命令：ls cp mv rm mkdir find grep sed awk sort uniq wc diff head tail cat tar gzip curl dash（sh 脚本）和 git（lg2，libgit2）等 70 多条，见 `App/Shell/commandDictionary.plist`。还有：
+  - `python3`：官方 CPython 3.13 的 iOS 版（BeeWare 打包）。`pip install 包名` 只能装纯 Python 的包，装在 资源库/python/site-packages。
+  - `sqlite3`：Python 自带的 sqlite3 命令行（`sqlite3 数据库 "SQL"`）。
+  - `node` / `js`：iPhone 自带的 JavaScriptCore，有 console、process、`require("fs")`、`require("path")`，没有 npm。
+  - `jq`、`ssh` / `scp` / `sftp` / `ssh-keygen`（密钥在 ~/.ssh）。
+  - 没有 bash、npm。
+- 快捷指令：快捷指令 App 里能找到「问小橘」（带一句话打开小橘发出去，可以配合「自动化」定时跑）；对小橘说「运行快捷指令 xxx」会先确认，再跳到快捷指令去跑。
+- 上网：「上网搜 xxx」走自己 HF 上的 SearXNG；「打开 网址」读网页正文。结果可以一键交给云端整理。
+- git 历史：任务对着整个仓库时，第一次跑 git log / diff / blame 会先从 GitHub clone 一份，只把 `.git` 放进命令文件夹（文件本身不动），半小时内不重拿；工作区「从 GitHub 拉」时也会顺便更新。所以 `git status` / `git diff` 看到的是手机上和 GitHub 的差别。
+- 只看不改的直接跑；删文件、写文件（>）、`sed -i`、git commit / push / reset 这类先出确认卡片（`App/Shell/ShellSafety.swift`）。一条命令最多 2 分钟，停止键能停。
+- git：提交作者用 GitHub 用户名；push / pull 用 GitHub 连接器的令牌（写在 资源库/Preferences/git/config，「文件」App 里看不到）。
+- 框架由 workflow 按固定版本和 sha256 下载到 `Vendor/`（设备上一共约 10 MB）。开源许可见 `App/Shell/NOTICES.txt`。
+
 ## 编译和安装
 
 推送 `src/xiaoju-push/` 的改动后，`.github/workflows/xiaoju-push.yml` 在 GitHub 的 Mac 机器上编译，

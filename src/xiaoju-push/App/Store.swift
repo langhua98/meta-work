@@ -140,6 +140,8 @@ final class Store: ObservableObject {
     @Published var refreshing = false
     /// 点通知后要打开的任务
     @Published var openTask: UUID?
+    /// 快捷指令「问小橘」发来的一句话（Assistant/Shortcuts.swift），首页收到就进对话框发出去
+    @Published var askText: String?
     private(set) var pushed: [String: Pushed]
     /// 能改云盘文件的「整理」令牌（改名、移动、放回收站、写记忆）
     @Published var organizeToken: String { didSet { Keychain.write("organizeToken", organizeToken) } }

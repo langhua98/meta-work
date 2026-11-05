@@ -1,81 +1,73 @@
 import SwiftUI
 
-// 设置里的：本地模型、整理令牌、云端大模型、记忆。
+// 设置 → 本地模型；记忆页。（令牌、云端开关都在连接器里）
 
-struct AssistantSettingsSections: View {
+struct LocalModelSettingsView: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var models = ModelStore.shared
+    @AppStorage("memoryHUD") private var showHUD = true
 
     var body: some View {
-        Group {
-            modelSection
-            organizeSection
-            cloudSection
-            memorySection
+        Form {
+            modelSection.listRowBackground(Theme.card)
         }
-        .listRowBackground(Theme.card)
+        .scrollContentBackground(.hidden)
+        .background(Theme.bg)
+        .navigationTitle("本地模型")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var modelSection: some View {
         Section {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(models.info.name)
-                    Text(ByteCountFormatter.string(fromByteCount: models.info.bytes, countStyle: .file))
-                        .font(.footnote).foregroundStyle(Theme.muted)
-                }
-                Spacer()
-                if models.downloaded {
-                    Text("已下载").font(.footnote.weight(.semibold)).foregroundStyle(Theme.green)
-                }
-            }
-            if let p = models.progress {
-                VStack(alignment: .leading, spacing: 4) {
-                    ProgressView(value: p).tint(Theme.orange)
-                    Text("\(ByteCountFormatter.string(fromByteCount: models.received, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: models.info.bytes, countStyle: .file))")
-                        .font(.footnote).foregroundStyle(Theme.muted)
-                }
-                Button("取消下载", role: .destructive) { Haptics.tap(); models.cancel() }
-            } else if models.downloaded {
-                Button("删除模型", role: .destructive) { Haptics.medium(); models.delete() }
-            } else {
-                Button("下载（只用 Wi-Fi）") { Haptics.tap(); models.download() }
-            }
+            ForEach(ModelInfo.all) { m in modelRow(m) }
+            Toggle("屏幕底部显示内存占用", isOn: $showHUD).tint(Theme.orange)
             if !models.error.isEmpty {
                 Text(models.error).font(.footnote).foregroundStyle(Theme.redText)
             }
         } header: { Text("本地模型") } footer: {
-            Text("在手机上听懂你的话，不联网。只在说话时加载，空闲 2 分钟或切到后台就释放内存。不下载也能用简单的话（推送、检查）。")
+            Text("点一个用它（打勾的是在用的）。在手机上听懂你的话，不联网。只在说话时加载，空闲 2 分钟或切到后台就释放内存。4B 更聪明但更占内存，看屏幕上的内存浮标就知道跑不跑得动。")
         }
     }
 
-    private var organizeSection: some View {
-        Section {
-            SecureField("xa_ 开头的整理令牌", text: $store.organizeToken)
-        } header: { Text("管理云盘文件") } footer: {
-            Text("改名、移动、放回收站、写记忆要用。在网盘「Agent 令牌」里新建一个带「整理」权限的。不填就只能找文件。删除永远只放进回收站。")
+    private func modelRow(_ m: ModelInfo) -> some View {
+        let on = models.selectedID == m.id
+        let have = models.isDownloaded(m)
+        let busy = models.downloadingID == m.id
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                Haptics.select()
+                models.selectedID = m.id
+            } label: {
+                HStack(spacing: 12) {
+                    CheckCircle(on: on)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(m.name).foregroundStyle(Theme.text)
+                        Text("\(ByteCountFormatter.string(fromByteCount: m.bytes, countStyle: .file)) · \(m.note)")
+                            .font(.footnote).foregroundStyle(Theme.muted)
+                    }
+                    Spacer()
+                    if have { Text("已下载").font(.footnote.weight(.semibold)).foregroundStyle(Theme.green) }
+                }
+            }
+            .buttonStyle(.plain)
+            if busy, let p = models.progress {
+                ProgressView(value: p).tint(Theme.orange)
+                HStack {
+                    Text("\(ByteCountFormatter.string(fromByteCount: models.received, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: m.bytes, countStyle: .file))")
+                        .font(.footnote).foregroundStyle(Theme.muted)
+                    Spacer()
+                    Button("取消", role: .destructive) { Haptics.tap(); models.cancel() }.buttonStyle(.borderless)
+                }
+            } else if have {
+                Button("删除这个模型", role: .destructive) { Haptics.medium(); models.delete(m) }
+                    .buttonStyle(.borderless).font(.footnote)
+            } else {
+                Button("下载（只用 Wi-Fi）") { Haptics.tap(); models.download(m) }
+                    .buttonStyle(.borderless).font(.footnote.weight(.semibold))
+                    .disabled(models.downloading)
+            }
         }
-    }
-
-    private var cloudSection: some View {
-        Section {
-            TextField("地址", text: $store.openCodeURL)
-                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-            SecureField("OpenCode 密码", text: $store.openCodePassword)
-            Toggle("本地搞不定自动问云端", isOn: $store.autoCloud).tint(Theme.orange)
-            Toggle("快速模式", isOn: $store.cloudFast).tint(Theme.orange)
-        } header: { Text("云端大模型（HF 上的 OpenCode）") } footer: {
-            Text("快速模式用 DeepSeek Flash，快很多；关掉用 V4 Pro，难题更稳但慢。密码是 Space 里的 OPENCODE_SERVER_PASSWORD。云端只出方案，改东西前都会先问你。")
-        }
-    }
-
-    private var memorySection: some View {
-        Section {
-            NavigationLink("看记忆") { MemoryView() }
-                .disabled(store.cloudToken.isEmpty)
-        } header: { Text("记忆") } footer: {
-            Text("说「记住…」或纠正它时才会记，一个主题一个文件，存在云盘 \(CloudFiles.memoryFolder)/。")
-        }
+        .padding(.vertical, 4)
     }
 }
 

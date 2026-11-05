@@ -59,7 +59,7 @@ struct ChatView: View {
         }
         .onAppear { model.start() }
         .onDisappear { model.leave() }
-        .onChange(of: speech.text) { if speech.recording { input = speech.text } }
+        .onChange(of: speech.text) { if speech.recording || speech.finishing { input = speech.text } }
     }
 
     /// 标题：编码助手 + 当前任务，点开换任务
@@ -101,9 +101,13 @@ struct ChatView: View {
         case .user(let s): UserBubble(text: s)
         case .pasted(let s): PastedBubble(text: s)
         case .paste(let p): PasteCard(draft: p, itemID: it.id, model: model)
-        case .understood(let s, let src): UnderstoodChip(text: s, source: src)
+        case .understood(let s, let src):
+            UnderstoodChip(text: s, source: src, wrong: model.fixable[it.id] == nil ? nil : { model.wrong(it.id) })
         case .thinking(let s): ThinkingRow(text: s)
         case .tool(let t): ToolCardView(card: t)
+        case .shell(let c):
+            ShellCardView(card: c, approve: { model.shellApprove(it.id) }, reject: { model.shellReject(it.id) },
+                          stop: { ShellRunner.shared.stop() })
         case .text(let s): AnswerText(text: s)
         case .changes(let p): ChangesCard(plan: p)
         case .entries(let title, let items): EntriesCard(title: title, items: items)
@@ -177,7 +181,7 @@ struct ChatView: View {
             }
             .accessibilityLabel("更多")
 
-            TextField(speech.recording ? "在听…" : "输入或长按说话", text: $input, axis: .vertical)
+            TextField(speech.recording ? "在听…" : "输入或点麦克风说话", text: $input, axis: .vertical)
                 .font(.system(size: 17))
                 .lineLimit(1...6)
                 .focused($focused)
@@ -186,16 +190,16 @@ struct ChatView: View {
                 .frame(minHeight: 44)
 
             if !hasText || speech.recording {
-                circle(icon: speech.recording ? "waveform" : "mic", fill: speech.recording ? Theme.orange : Theme.raised,
-                       fg: speech.recording ? Theme.onAccent : Theme.text)
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if !speech.recording { Haptics.medium(); input = ""; speech.start() } }
-                        .onEnded { _ in
-                            speech.stop()
-                            Haptics.tap()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { sendInput() }
-                        })
-                    .accessibilityLabel("按住说话")
+                Button {
+                    if speech.recording { Haptics.tap(); speech.stop() }
+                    else { Haptics.medium(); input = ""; speech.start() }
+                } label: {
+                    circle(icon: speech.recording ? "waveform" : "mic", fill: speech.recording ? Theme.orange : Theme.raised,
+                           fg: speech.recording ? Theme.onAccent : Theme.text)
+                        .symbolEffect(.variableColor.iterative, isActive: speech.recording)
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(speech.recording ? "停止录音" : "说话")
             }
 
             Button {
@@ -383,11 +387,26 @@ private struct PasteCard: View {
 private struct UnderstoodChip: View {
     let text: String
     let source: String
+    /// 本地模型理解的才有：点了纠正，记进纠错本
+    var wrong: (() -> Void)?
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "sparkle").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.orange)
             Text(text).font(.system(size: 13)).foregroundStyle(Theme.muted).lineLimit(2)
             Text("· \(source)").font(.system(size: 12)).foregroundStyle(Theme.faint).lineLimit(1)
+            if let wrong {
+                Spacer(minLength: 4)
+                Button(action: wrong) {
+                    Text("不对").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.orangeText)
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(Theme.orangeSoft, in: Capsule())
+                        .overlay(Capsule().stroke(Theme.orange.opacity(0.6), lineWidth: 1))
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("理解得不对，纠正一下")
+            }
         }
     }
 }
@@ -434,7 +453,8 @@ private struct ToolCardView: View {
             }
             if let d = card.detail, !d.isEmpty {
                 Text(d).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.muted)
-                    .lineLimit(6)
+                    .lineLimit(card.icon == "terminal" ? 14 : 6)
+                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
                     .background(Theme.bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -461,11 +481,24 @@ private struct ToolCardView: View {
 private struct AnswerText: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 16)).foregroundStyle(Theme.text)
+        Text(Self.rich(text)).font(.system(size: 16)).foregroundStyle(Theme.text)
             .lineSpacing(4)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
+    }
+
+    /// **加粗**、`代码`、[链接]() 这些显示成样式，不露出星号；换行原样保留
+    static func rich(_ s: String) -> AttributedString {
+        var t = s
+        // 「### 标题」去掉井号
+        t = t.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            var l = String(line)
+            while l.hasPrefix("#") { l.removeFirst() }
+            return l == String(line) ? l : l.trimmingCharacters(in: .whitespaces)
+        }.joined(separator: "\n")
+        let opt = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: t, options: opt)) ?? AttributedString(s)
     }
 }
 

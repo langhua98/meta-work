@@ -11,6 +11,7 @@ struct XiaojuPushApp: App {
                 .environmentObject(store)
                 .preferredColorScheme(store.colorScheme)
                 .tint(Theme.orange)
+                .onAppear { MemoryHUD.install() }
         }
         .backgroundTask(.appRefresh(BackgroundCheck.id)) { await BackgroundCheck.run() }
     }
@@ -159,9 +160,17 @@ struct HomeView: View {
                 OnboardingView()
             }
             .onChange(of: store.openTask) { openFromNotification() }
-            .onAppear { openFromNotification() }
+            .onAppear { openFromNotification(); askFromShortcut() }
+            .onChange(of: store.askText) { askFromShortcut() }
             .onChange(of: phase) { if phase == .background { BackgroundCheck.schedule() } }
         }
+    }
+
+    private func askFromShortcut() {
+        guard let t = store.askText else { return }
+        store.askText = nil
+        path = [.assistant]
+        ChatModel.shared.send(t)
     }
 
     private func openFromNotification() {

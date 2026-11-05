@@ -8,6 +8,7 @@ on:
     paths:
       - "src/xiaoju-push/App/Assistant/Command.swift"
       - "scripts/local-model-test/**"
+      - "scripts/finetune/make_data.py"
       - ".github/workflows/local-model-test.yml"
 
 permissions:
@@ -16,18 +17,31 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: Qwen3.5-2B
+            url: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+          - model: Qwen3.5-4B
+            url: https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf
+          - model: 4B-xiaoju
+            url: https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf
+          - model: 4B-xiaoju-v2
+            url: https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf
+    name: 测试 ${{ matrix.model }}
     steps:
       - uses: actions/checkout@v4
       - name: Model cache
         uses: actions/cache@v4
         with:
           path: /tmp/model
-          key: qwen3.5-2b-q4km
+          key: ${{ matrix.model }}-q4km
       - name: Download model
         run: |
           mkdir -p /tmp/model
           [ -f /tmp/model/m.gguf ] || curl -sSfL -o /tmp/model/m.gguf \
-            https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+            "${{ matrix.url }}"
           ls -la /tmp/model
       - name: Download llama.cpp
         env:
@@ -47,3 +61,6 @@ jobs:
           "$srv" -m /tmp/model/m.gguf -c 3072 --port 8080 -np 1 > /tmp/server.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/health && break; sleep 2; done
           python3 scripts/local-model-test/run.py || { tail -30 /tmp/server.log; exit 1; }
+      - name: 对比考试（只打印成绩，不算失败）
+        continue-on-error: true
+        run: python3 scripts/local-model-test/compare.py
