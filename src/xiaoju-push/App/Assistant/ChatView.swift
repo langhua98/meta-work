@@ -258,7 +258,7 @@ struct ChatView: View {
 
     private func sendInput() {
         let t = input
-        guard !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !model.busy else { return }
+        guard !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !(model.busy && model.hasActivity) else { return }
         input = ""
         model.send(t)
     }
@@ -494,12 +494,31 @@ private struct ToolCardView: View {
 
 private struct AnswerText: View {
     let text: String
+    @State private var copied = false
     var body: some View {
-        Text(Self.rich(text)).font(.system(size: 16)).foregroundStyle(Theme.text)
-            .lineSpacing(4)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(Self.rich(text)).font(.system(size: 16)).foregroundStyle(Theme.text)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // 和 Claude 一样：回复下面左对齐一个复制键，点一下整段复制
+            Button {
+                UIPasteboard.general.string = text
+                Haptics.tap()
+                copied = true
+                Task { try? await Task.sleep(nanoseconds: 1_500_000_000); copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 13))
+                    .foregroundStyle(copied ? Theme.green : Theme.faint)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .offset(x: -8)
+            .accessibilityLabel("复制这段回复")
+        }
+        .padding(.vertical, 2)
     }
 
     /// **加粗**、`代码`、[链接]() 这些显示成样式，不露出星号；换行原样保留

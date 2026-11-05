@@ -164,24 +164,28 @@ final class ChatModel: ObservableObject {
         watching = true
         Task { @MainActor [weak self] in
             while let self {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: 500_000_000)
                 guard self.busy else { self.idleTicks = 0; continue }
-                let active = self.items.suffix(8).contains { it in
-                    switch it.kind {
-                    case .thinking: return true
-                    case .tool(let t): return t.state == .busy
-                    case .work(let w): return w.running
-                    case .shell(let c): return c.state == .running
-                    default: return false
-                    }
-                }
-                self.idleTicks = active ? 0 : self.idleTicks + 1
-                if self.idleTicks >= 3 {
+                self.idleTicks = self.hasActivity ? 0 : self.idleTicks + 1
+                // 3 秒看不到任何在跑的东西：后台那件事不管它，发送键先变回来（再发一句会顶掉它）
+                if self.idleTicks >= 6 {
                     self.idleTicks = 0
                     self.jobID = UUID()
-                    self.job = nil
                     self.busy = false
                 }
+            }
+        }
+    }
+
+    /// 界面上还有没有在跑的东西（在想、转圈的卡片、云端在干活、命令在跑）
+    var hasActivity: Bool {
+        items.contains { it in
+            switch it.kind {
+            case .thinking: return true
+            case .tool(let t): return t.state == .busy
+            case .work(let w): return w.running
+            case .shell(let c): return c.state == .running
+            default: return false
             }
         }
     }
@@ -222,7 +226,10 @@ final class ChatModel: ObservableObject {
 
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !busy else { return }
+        guard !text.isEmpty else { return }
+        // 还在转但界面上已经看不到在跑的东西：当它卡住了，收掉再发这句
+        if busy && !hasActivity { job?.cancel(); job = nil; jobID = UUID(); busy = false }
+        guard !busy else { return }
         Haptics.tap()
         // 粘贴进来的代码（比如 DeepSeek 的回答）：整理成文件
         if CodePaste.looksLikeCode(text) {
@@ -435,7 +442,20 @@ final class ChatModel: ObservableObject {
             defer { ticker.cancel() }
             // 提示里写的是 2B，换成现在用的模型名（问「你是谁」时答对）
             let prefix = p.prefix.replacingOccurrences(of: "Qwen3.5-2B", with: ModelStore.shared.info.short)
-            out = try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
+            // 最多等 90 秒；点停止马上返回，不等模型那边算完这一步
+            out = try await withDeadline(seconds: 90) {
+                try await LocalModel.shared.generate(prefix: prefix, suffix: suffix, grammar: grammar, maxTokens: 320)
+            }
+        } catch is DeadlineExceeded {
+            remove(thinking)
+            if Task.isCancelled { return }
+            if cloudReady && store.autoCloud {
+                add(.understood("本地模型超过 90 秒没算完，先停了", source: "交给云端"))
+                await askCloud(text, kind: "ask", auto: true)
+            } else {
+                add(.error("本地模型超过 90 秒没算完，先停了。可以再发一次，或者在设置里换小一点的模型。"))
+            }
+            return
         } catch {
             remove(thinking)
             if !(error is CancellationError) && !Task.isCancelled { add(.error(error.localizedDescription)) }
@@ -1569,6 +1589,73 @@ final class ShellOutputBox: @unchecked Sendable {
         let lines = s.split(separator: "\n", omittingEmptySubsequences: false)
         guard lines.count > 12 else { return s }
         return "…（前面 \(lines.count - 12) 行收起来了）\n" + lines.suffix(12).joined(separator: "\n")
+    }
+}
+
+struct DeadlineExceeded: Error {}
+
+/// 只让一边先到的结果生效（算完 / 超时 / 被停止），顺便记着两边的任务好互相取消
+private final class Race: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    var work: Task<Void, Never>?
+    var timer: Task<Void, Never>?
+    /// 被停止时用：直接让外面的等待结束
+    var fail: ((Error) -> Void)?
+    /// 第一个调用的拿到 true，同时取消另外两边
+    func finish() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        work?.cancel(); timer?.cancel()
+        return true
+    }
+    /// 停止来得比 set 早：等 set 的时候再结束外面的等待
+    private var cancelPending = false
+    func set(work w: Task<Void, Never>, timer t: Task<Void, Never>, fail f: @escaping (Error) -> Void) {
+        lock.lock()
+        work = w; timer = t; fail = f
+        if done { w.cancel(); t.cancel() }
+        let pending = cancelPending
+        cancelPending = false
+        lock.unlock()
+        if pending { f(CancellationError()) }
+    }
+    func cancelled() {
+        lock.lock()
+        let first = !done
+        done = true
+        let f = fail
+        if first && f == nil { cancelPending = true }
+        work?.cancel(); timer?.cancel()
+        lock.unlock()
+        if first { f?(CancellationError()) }
+    }
+}
+
+/// 跑 op，最多等 seconds 秒。超时抛 DeadlineExceeded；外面被取消（点了停止）马上抛 CancellationError。
+/// 两种情况都不等 op 自己结束（它在后台收到取消后自己停），所以不会因为模型那边卡住而一直转圈。
+func withDeadline<T: Sendable>(seconds: Double, _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+    let race = Race()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
+            let w = Task {
+                do {
+                    let v = try await op()
+                    if race.finish() { cont.resume(returning: v) }
+                } catch {
+                    if race.finish() { cont.resume(throwing: error) }
+                }
+            }
+            let t = Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if Task.isCancelled { return }
+                if race.finish() { cont.resume(throwing: DeadlineExceeded()) }
+            }
+            race.set(work: w, timer: t) { cont.resume(throwing: $0) }
+        }
+    } onCancel: {
+        race.cancelled()
     }
 }
 
