@@ -43,7 +43,16 @@ struct Connector: Identifiable {
         ConnectorTool(id: "shell.run", name: "运行命令", kinds: ["run"]),
     ])
 
-    static let all = [cloud, github, shell, opencode]
+    static let web = Connector(id: "web", name: "上网", icon: "globe", note: "搜资料、读网页（搜索走你自己 HF 上的 SearXNG）", tools: [
+        ConnectorTool(id: "web.search", name: "搜索", kinds: ["search"]),
+        ConnectorTool(id: "web.fetch", name: "读网页", kinds: ["fetch"]),
+    ])
+
+    static let shortcuts = Connector(id: "shortcuts", name: "快捷指令", icon: "square.stack.3d.up", note: "运行你 iPhone 上的快捷指令；快捷指令里也能用「问小橘」", tools: [
+        ConnectorTool(id: "shortcuts.run", name: "运行快捷指令", kinds: ["shortcut"], asks: true),
+    ])
+
+    static let all = [cloud, github, shell, web, shortcuts, opencode]
 }
 
 enum Connectors {
@@ -96,6 +105,9 @@ extension Command {
         case .trash: return "trash"
         case .remember: return "remember"
         case .run: return "run"
+        case .search: return "search"
+        case .fetch: return "fetch"
+        case .shortcut: return "shortcut"
         case .cloud: return "cloud"
         case .say: return "say"
         case .answer: return "answer"

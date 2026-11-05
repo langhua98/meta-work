@@ -17,6 +17,12 @@ enum Command: Equatable {
     case remember(String)
     /// 在手机工作区里跑一条命令（grep、git status…），见 Shell/ShellRunner.swift
     case run(String)
+    /// 上网搜（WebTools.swift）
+    case search(String)
+    /// 读一个网页的正文
+    case fetch(String)
+    /// 运行用户自己的快捷指令（Shortcuts.swift）
+    case shortcut(String)
     case cloud(String)
     case say(String)
     /// 本地模型自己回答（关于自己、App 能做什么、简单问题）
@@ -39,6 +45,9 @@ enum Command: Equatable {
         case .trash(let p): return "把 \(p) 放进回收站"
         case .remember(let s): return "记住：\(s)"
         case .run(let c): return "跑命令 \(c)"
+        case .search(let q): return "上网搜「\(q)」"
+        case .fetch(let u): return "读网页 \(u)"
+        case .shortcut(let n): return "运行快捷指令「\(n)」"
         case .cloud: return "这件事要交给云端大模型"
         case .say: return "要再问你一句"
         case .answer: return "直接回答"
@@ -89,11 +98,6 @@ enum Interpreter {
 
     static func keyword(_ text: String, tasks: [TaskRef], current: Mapping?) -> Command? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 「运行命令 xxx」「$ xxx」：用户自己写好了命令，直接跑，不用模型猜
-        for p in ["运行命令", "跑命令", "执行命令", "运行", "$"] where t.hasPrefix(p) {
-            let c = t.dropFirst(p.count).trimmingCharacters(in: CharacterSet(charactersIn: " ：:\t"))
-            if let first = c.split(separator: " ").first, ShellRunner.commands.contains(String(first)) { return .run(c) }
-        }
         // 只认快捷按钮发出来的原话（一个字不差），其他都让模型自己理解
         switch t {
         case "检查一下有什么改动": return .check(task: nil)
@@ -123,6 +127,9 @@ enum Interpreter {
         case .move(let p, _): return has(["移", "挪", "放到", "放进", "搬", "归档", "move"]) && mentions(p)
         case .trash(let p): return has(["删", "回收站", "扔", "清理", "不要了", "去掉"]) && mentions(p)
         case .run: return true  // 会改东西的命令执行前另有确认卡片（ShellSafety）
+        case .search: return true
+        case .shortcut: return has(["快捷指令", "捷径", "shortcut", "自动化"])
+        case .fetch: return has(["http", "www", ".com", ".cn", ".org", ".io", ".dev", "网页", "网址", "链接", "网站", "这篇", "页面", "第"])
         case .remember: return has(["记住", "记得", "记一下", "以后", "下次", "别再", "不要再", "错了", "不对", "应该是"])
         case .cloud, .say, .answer: return true
         }
@@ -149,11 +156,14 @@ enum Interpreter {
         {"do":"move","path":"/路径","to":"/目标文件夹"} 移动
         {"do":"trash","path":"/路径"} 删除（放进回收站）
         {"do":"remember","text":"要记住的事"} 用户说「记住…」或纠正你
-        {"do":"run","cmd":"命令"} 在当前任务的手机工作区里跑一条命令：grep -rn 搜代码、ls、cat、head、wc、find、sed、git status/diff/log/add/commit。没有 bash/npm/python，复杂的用 sh -c
+        {"do":"run","cmd":"命令"} 在当前任务的手机工作区里跑一条命令：grep -rn 搜代码、ls、cat、head、wc、find、sed、git status/diff/log/add/commit、python3、pip install（纯 Python 包）、node（没有 npm）、sqlite3、jq、ssh/scp。没有 bash，复杂的用 sh -c
+        {"do":"search","q":"关键词"} 上网搜资料、文档、报错信息、最新消息（搜代码里的东西不用这个，用 run 跑 grep）
+        {"do":"fetch","url":"网址"} 打开一个网页，读里面的文字（用户给了网址，或要看刚搜到的某一条）
+        {"do":"shortcut","name":"快捷指令的名字"} 运行用户 iPhone 上的某个快捷指令（用户说「运行快捷指令 xxx」）
         {"do":"cloud","text":"用户原话"} 写代码、改 bug、解释代码、代码审查、写提交说明、批量整理，或你不确定路径或指的是什么
         {"do":"say","text":"问题"} 缺信息时反问，比如没说是哪个任务
         {"do":"answer","text":"回答"} 问你是谁、能做什么、有什么工具、怎么用这个 App、打招呼闲聊、简单常识：自己用中文直接回答，两三句
-        回答要针对用户这句话，别套用例子。你的工具按连接器分：小橘云盘（找文件、看文件夹、新建/改名/移动文件、放进回收站、读写记忆）；GitHub（检查改动、推送、推送记录、设置不推的文件夹）；本机命令（在手机工作区里跑 grep、git 这些命令）；OpenCode 云端（写代码、改 bug、解释代码、跑命令）。问某个连接器能做什么，只说那一个的，别把别的连接器的工具算进去。用法：直接说一句话，会改东西的都会先出确认卡片。
+        回答要针对用户这句话，别套用例子。你的工具按连接器分：小橘云盘（找文件、看文件夹、新建/改名/移动文件、放进回收站、读写记忆）；GitHub（检查改动、推送、推送记录、设置不推的文件夹）；本机命令（在手机工作区里跑 grep、git、python3 这些命令）；上网（搜索、读网页）；快捷指令（运行你的快捷指令）；OpenCode 云端（写代码、改 bug、解释代码、跑命令）。问某个连接器能做什么，只说那一个的，别把别的连接器的工具算进去。用法：直接说一句话，会改东西的都会先出确认卡片。
         只有用户明确要做这件事才用对应指令。跟代码有关的问题、要写东西、你答不准的，用 cloud，不要猜。
         任务：
         \(taskLines.isEmpty ? "（还没有任务）" : taskLines)
@@ -174,6 +184,12 @@ enum Interpreter {
         看看云盘里有哪些文件夹 → {"do":"list","folder":"/"}
         代码里哪里用了 cloudToken → {"do":"run","cmd":"grep -rn cloudToken ."}
         工作区里 git 改了哪些 → {"do":"run","cmd":"git status"}
+        看看 config.json 里面是什么 → {"do":"run","cmd":"cat config.json"}
+        代码里有几个 py 文件 → {"do":"run","cmd":"find . -name '*.py' | wc -l"}
+        $ ls -la → {"do":"run","cmd":"ls -la"}
+        搜一下 SwiftUI 怎么做下拉刷新 → {"do":"search","q":"SwiftUI 下拉刷新"}
+        搜一下代码里的 apiKey → {"do":"run","cmd":"grep -rn apiKey ."}
+        看看 https://example.com 写了什么 → {"do":"fetch","url":"https://example.com"}
         你是谁 → {"do":"answer","text":"我是小橘推送里的本地模型 Qwen3.5-2B，在你手机上跑，不联网。"}
         早上好 → {"do":"answer","text":"早上好！今天要推哪个项目？"}
         （上一句：把这个函数改成异步）交给云端处理 → {"do":"cloud","text":"把这个函数改成异步"}
@@ -200,7 +216,7 @@ enum Interpreter {
         let names = tasks.map { "\"\\\"" + gbnfEscape(jsonEscape($0.name)) + "\\\"\"" }
         let task = names.isEmpty ? "str" : names.joined(separator: " | ")
         let on = Connectors.enabledKinds
-        let alts = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "run", "cloud", "say", "answer"]
+        let alts = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "run", "search", "fetch", "shortcut", "cloud", "say", "answer"]
             .filter { on.contains($0) }.joined(separator: " | ")
         return #"""
         root ::= "{" ws "\"do\":" ws ( ALTS ) ws "}"
@@ -219,6 +235,9 @@ enum Interpreter {
         remember ::= "\"remember\"," ws "\"text\":" ws str
         run ::= "\"run\"," ws "\"cmd\":" ws cmd
         cmd ::= "\"" char{1,200} "\""
+        search ::= "\"search\"," ws "\"q\":" ws str
+        fetch ::= "\"fetch\"," ws "\"url\":" ws cmd
+        shortcut ::= "\"shortcut\"," ws "\"name\":" ws str
         cloud ::= "\"cloud\"," ws "\"text\":" ws str
         say ::= "\"say\"," ws "\"text\":" ws str
         answer ::= "\"answer\"," ws "\"text\":" ws long
@@ -264,6 +283,9 @@ enum Interpreter {
         case "trash": return s("path").map { .trash(path: $0) }
         case "remember": return s("text").map { .remember($0) }
         case "run": return s("cmd").map { .run($0) }
+        case "search": return s("q").map { .search($0) }
+        case "fetch": return s("url").map { .fetch($0) }
+        case "shortcut": return s("name").map { .shortcut($0) }
         case "cloud": return s("text").map { .cloud($0) }
         case "say": return s("text").map { .say($0) }
         case "answer": return s("text").map { .answer($0) }

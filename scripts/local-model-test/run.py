@@ -33,6 +33,13 @@ CASES = [
     ("读取小橘云盘列出所有文件夹", {"list"}),
     ("检查云盘代码 除了子目录下的7day文件夹不需要检查", {"check"}, None, "7day"),
     ("交给云端模型处理", {"cloud"}, "上一句：给 xiaoju-video 写个 README"),
+    ("搜一下代码里哪里有 TODO", {"run"}),
+    ("main.py 里面是什么", {"run"}),
+    ("这个项目有多少个 swift 文件", {"run"}),
+    ("运行命令 pwd", {"run"}),
+    ("上网查一下 python 怎么读 json 文件", {"search"}),
+    ("打开 https://docs.python.org/3/ 看看", {"fetch"}),
+    ("运行快捷指令 下班打卡", {"shortcut"}),
 ]
 
 
@@ -48,9 +55,9 @@ LABELS = {
     "find": "小橘云盘 · 找文件", "list": "小橘云盘 · 看文件夹", "mkdir": "小橘云盘 · 新建文件夹", "rename": "小橘云盘 · 改名",
     "move": "小橘云盘 · 移动", "trash": "小橘云盘 · 放进回收站", "remember": "小橘云盘 · 读写记忆",
     "check": "GitHub · 检查改动", "status": "GitHub · 检查改动", "history": "GitHub · 推送记录", "push": "GitHub · 推送",
-    "exclude": "GitHub · 设置不推的文件夹", "run": "本机命令 · 运行命令", "cloud": "OpenCode（云端） · 交给云端处理",
+    "exclude": "GitHub · 设置不推的文件夹", "run": "本机命令 · 运行命令", "search": "上网 · 搜索", "fetch": "上网 · 读网页", "shortcut": "快捷指令 · 运行快捷指令", "cloud": "OpenCode（云端） · 交给云端处理",
 }
-ALL_KINDS = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "run", "cloud", "say", "answer"]
+ALL_KINDS = ["push", "check", "status", "history", "exclude", "find", "list", "mkdir", "rename", "move", "trash", "remember", "run", "search", "fetch", "shortcut", "cloud", "say", "answer"]
 
 
 def build(tasks=None, current=None, disabled=(), memory=""):
