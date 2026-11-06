@@ -30,12 +30,20 @@ struct ModelInfo: Identifiable, Hashable {
     /// 在 Kaggle 上用小橘推送的工具调用数据微调过的 4B（scripts/finetune/train_kaggle.ipynb 训好后传到 HF）
     static let xiaoju4b = ModelInfo(
         id: "4b-xiaoju", name: "Qwen3.5-4B 小橘版 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
-        note: "专门训练过调用小橘推送的工具（第二版），最懂你的话",
+        note: "第三版：所有工具都训过，听得懂更多口语，会参考纠错本，最懂你的话",
+        file: "Qwen3.5-4B-xiaoju-v3-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v3-Q4_K_M.gguf")!,
+        bytes: 2_783_446_880)
+
+    /// 上一版留着：v3 不好用可以切回去（手机上已经下过的不用再下）
+    static let xiaoju4bV2 = ModelInfo(
+        id: "4b-xiaoju-v2", name: "Qwen3.5-4B 小橘版 v2 · Q4_K_M", short: "Qwen3.5-4B 小橘版",
+        note: "上一版，v3 不好用就切回这个",
         file: "Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf",
         url: URL(string: "https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf")!,
         bytes: 2_783_446_880)
 
-    static let all = [qwen, qwen4b, xiaoju4b]
+    static let all = [qwen, qwen4b, xiaoju4b, xiaoju4bV2]
 }
 
 /// 下载、删除模型文件。
