@@ -40,7 +40,7 @@ def req(method, path, query=None, data=None, ctype="application/octet-stream"):
 
 
 def put_file(path, raw, ctype="application/octet-stream"):
-    return req("PUT", "/files", query={"path": path}, data=raw, ctype=ctype)
+    return req("PUT", "/api/agent/v1/files", query={"path": path}, data=raw, ctype=ctype)
 
 
 def list_dir(path):
