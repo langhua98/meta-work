@@ -12,8 +12,8 @@ android {
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
         multiDexEnabled = true
     }
 

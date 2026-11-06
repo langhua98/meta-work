@@ -76,6 +76,8 @@ class Cloud(base: String, private val token: String) {
 object RemoteBox {
     fun inbox(dev: String) = "遥控/$dev/收件"
     fun receipt(dev: String, id: String) = "遥控/$dev/回执/$id"
+    /** 实时画面：被控端把一帧帧 JPEG 推到这里，控制端长轮询取最新一帧显示 */
+    fun video(dev: String) = "遥控/$dev/视频"
     /** 回执里直接带的文件上限（base64 后要小于服务端单条 8 MB） */
     const val INLINE_LIMIT = 5 shl 20
 }

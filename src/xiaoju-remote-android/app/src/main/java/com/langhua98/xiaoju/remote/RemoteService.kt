@@ -141,6 +141,9 @@ class RemoteService : Service() {
         val action = cmd.optString("do")
         Bus.push("执行：$action")
         notifyText("正在被远程使用：${label(action)}")
+
+        if (action == "video") { streamVideo(cloud, cmd, device, viaRelay, id, ::reply); return }
+
         val result = Commands.run(this, cmd)
 
         val files = JSONArray()
@@ -163,8 +166,38 @@ class RemoteService : Service() {
         notifyText("待命中，等指令")
     }
 
+    /** 实时画面：连续抓帧推到视频信箱。只走即时信箱（文件信箱太慢，撑不起视频）。 */
+    private fun streamVideo(cloud: Cloud, cmd: JSONObject, device: String, viaRelay: Boolean, id: String, reply: (JSONObject) -> Unit) {
+        if (!viaRelay) { reply(JSONObject().put("id", id).put("ok", false).put("text", "实时画面要即时信箱，当前走的是文件信箱")); notifyText("待命中，等指令"); return }
+        if (checkPermission(android.Manifest.permission.CAMERA, Process.myPid(), Process.myUid()) != PackageManager.PERMISSION_GRANTED) {
+            reply(JSONObject().put("id", id).put("ok", false).put("text", "没有相机权限")); notifyText("待命中，等指令"); return
+        }
+        val front = cmd.optString("lens") == "front"
+        val seconds = cmd.optInt("seconds", 20).coerceIn(3, 60)
+        val fps = cmd.optInt("fps", 3).coerceIn(1, 8)
+        val width = cmd.optInt("width", 480).coerceIn(240, 960)
+        val quality = cmd.optInt("quality", 40).coerceIn(20, 80)
+        val box = RemoteBox.video(device)
+        var seq = 0
+        Bus.push("开始直播（$seconds 秒）")
+        try {
+            Camera.stream(front, width, quality, fps, seconds * 1000L, running = { running }) { jpg, rot ->
+                if (jpg.size > RemoteBox.INLINE_LIMIT) return@stream
+                try {
+                    cloud.relaySend(box, JSONObject().put("seq", seq++).put("rot", rot)
+                        .put("jpg", Base64.encodeToString(jpg, Base64.NO_WRAP)))
+                } catch (e: Exception) { /* 丢帧 */ }
+            }
+        } catch (e: Exception) {
+            reply(JSONObject().put("id", id).put("ok", false).put("text", "直播出错：${e.message}")); notifyText("待命中，等指令"); return
+        }
+        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", "直播结束，共 $seq 帧"))
+        Bus.push("直播结束，共 $seq 帧")
+        notifyText("待命中，等指令")
+    }
+
     private fun label(a: String) = mapOf("photo" to "拍照", "audio" to "录音", "location" to "定位",
-        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令")[a] ?: a
+        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面")[a] ?: a
 
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }

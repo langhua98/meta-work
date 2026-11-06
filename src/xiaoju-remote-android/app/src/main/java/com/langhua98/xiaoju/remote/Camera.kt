@@ -3,8 +3,12 @@ package com.langhua98.xiaoju.remote
 import android.annotation.TargetApi
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
+import android.graphics.YuvImage
 import android.hardware.Camera as LegacyCamera
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicLong
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
@@ -29,6 +33,75 @@ object Camera {
             if (info.facing == want) return i
         }
         return 0
+    }
+
+    /**
+     * 实时画面：连续从预览里抓帧，每帧压成小 JPEG 交给 onFrame。阻塞调用，直到 running 变 false 或到时。
+     * 用老相机的预览回调（NV21）+ YuvImage 压 JPEG，比反复 takePicture 快得多，4.2 也能跑。
+     * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
+     */
+    fun stream(front: Boolean, targetW: Int, quality: Int, fps: Int, durationMs: Long,
+               running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int) -> Unit) {
+        if (LegacyCamera.getNumberOfCameras() == 0) throw IllegalStateException("这台手机没有摄像头")
+        Torch.releaseLegacy()
+        val ht = HandlerThread("vid").apply { start() }
+        val h = Handler(ht.looper)
+        val ready = CountDownLatch(1)
+        var startErr: Throwable? = null
+        var cam: LegacyCamera? = null
+        var tex: SurfaceTexture? = null
+        var fw = 0; var fh = 0; var rot = 0
+        val minGap = 1000L / fps.coerceIn(1, 10)
+        val lastAt = AtomicLong(0L)
+
+        h.post {
+            try {
+                val id = findCamera(front)
+                val c = LegacyCamera.open(id)
+                cam = c
+                rot = LegacyCamera.CameraInfo().also { LegacyCamera.getCameraInfo(id, it) }.orientation
+                val p = c.parameters
+                val sz = p.supportedPreviewSizes
+                    .filter { it.width >= targetW }.minByOrNull { it.width }
+                    ?: p.supportedPreviewSizes.maxByOrNull { it.width }
+                sz?.let { p.setPreviewSize(it.width, it.height) }
+                p.previewFormat = ImageFormat.NV21
+                val modes = p.supportedFocusModes ?: emptyList()
+                if ("continuous-video" in modes) p.focusMode = "continuous-video"
+                else if ("continuous-picture" in modes) p.focusMode = "continuous-picture"
+                c.parameters = p
+                fw = c.parameters.previewSize.width
+                fh = c.parameters.previewSize.height
+                val t = SurfaceTexture(20); tex = t
+                c.setPreviewTexture(t)
+                c.setPreviewCallback { data, _ ->
+                    val now = System.currentTimeMillis()
+                    if (data == null || now - lastAt.get() < minGap || !running()) return@setPreviewCallback
+                    lastAt.set(now)
+                    try {
+                        val out = ByteArrayOutputStream()
+                        YuvImage(data, ImageFormat.NV21, fw, fh, null)
+                            .compressToJpeg(Rect(0, 0, fw, fh), quality.coerceIn(20, 90), out)
+                        onFrame(out.toByteArray(), rot)
+                    } catch (e: Throwable) { /* 丢这一帧 */ }
+                }
+                c.startPreview()
+            } catch (e: Throwable) { startErr = e } finally { ready.countDown() }
+        }
+        ready.await(8, TimeUnit.SECONDS)
+        startErr?.let { h.post { cleanup(cam, tex); ht.quit() }; throw it }
+
+        val end = System.currentTimeMillis() + durationMs
+        while (running() && System.currentTimeMillis() < end) {
+            try { Thread.sleep(150) } catch (e: InterruptedException) { break }
+        }
+        h.post { runCatching { cam?.setPreviewCallback(null) }; cleanup(cam, tex); ht.quit() }
+    }
+
+    private fun cleanup(cam: LegacyCamera?, tex: SurfaceTexture?) {
+        runCatching { cam?.stopPreview() }
+        runCatching { cam?.release() }
+        runCatching { tex?.release() }
     }
 
     /** 拍一张 JPEG。阻塞调用，不要在主线程上调。 */
