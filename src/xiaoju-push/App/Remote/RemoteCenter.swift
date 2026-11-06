@@ -21,7 +21,6 @@ final class RemoteCenter: ObservableObject {
         guard !running else { return }
         let s = Store.shared
         guard !s.cloudToken.isEmpty else { push("先在设置里填小橘云盘令牌"); return }
-        guard !s.organizeToken.isEmpty else { push("要把照片和回执写回云盘，得在连接器里填「整理令牌」"); return }
         running = true
         UIApplication.shared.isIdleTimerDisabled = true
         push("开始待命（设备名：\(device)）")
@@ -44,7 +43,7 @@ final class RemoteCenter: ObservableObject {
 
     private func loop() async {
         let s = Store.shared
-        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.organizeToken)
+        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.cloudToken)
         let dev = device
         let inbox = "/小橘推送/遥控/\(dev)/收件"
         let outbox = "/小橘推送/遥控/\(dev)/回执"

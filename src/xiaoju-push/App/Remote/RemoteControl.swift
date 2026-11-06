@@ -26,12 +26,12 @@ final class RemoteControl: ObservableObject {
         let dev = target.trimmingCharacters(in: .whitespaces)
         guard !dev.isEmpty else { log("先填要控制的设备名"); return }
         guard !s.cloudToken.isEmpty else { log("先在设置里填小橘云盘令牌"); return }
-        guard !s.organizeToken.isEmpty else { log("发指令要「整理令牌」，去连接器里填"); return }
 
         sending = true
         defer { sending = false }
 
-        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.organizeToken)
+        // 发指令要写云盘。直接用主云盘令牌（需带写权限），不依赖「整理令牌」那个字段，省得填错。
+        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.cloudToken)
         let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss-"
         let id = f.string(from: Date()) + String(UUID().uuidString.prefix(6))
 

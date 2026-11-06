@@ -72,7 +72,7 @@ class Cloud(private val base: String, private val token: String) {
 
     /** 上传（覆盖）。按约定 PUT /files?path=/… ，原始字节。 */
     fun upload(path: String, data: ByteArray, contentType: String = "application/octet-stream") {
-        val url = (base + "/files").toHttpUrl().newBuilder()
+        val url = (base + "/api/agent/v1/files").toHttpUrl().newBuilder()
             .addQueryParameter("path", path).build()
         val req = Request.Builder().url(url)
             .header("Authorization", "Bearer $token")

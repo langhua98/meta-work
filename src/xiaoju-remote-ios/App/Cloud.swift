@@ -68,9 +68,9 @@ struct Cloud {
         try await cloudGET("/api/agent/v1/items/\(id)/content")
     }
 
-    /// 上传（覆盖）。约定 PUT /files?path=/… ，原始字节。
+    /// 上传（覆盖）。PUT /api/agent/v1/files?path=/… ，原始字节。
     func upload(_ path: String, _ data: Data, contentType: String = "application/octet-stream") async throws {
-        guard var c = URLComponents(string: base + "/files") else { throw CloudError("云盘地址不对") }
+        guard var c = URLComponents(string: base + "/api/agent/v1/files") else { throw CloudError("云盘地址不对") }
         c.queryItems = [URLQueryItem(name: "path", value: path)]
         guard let url = c.url else { throw CloudError("云盘地址不对") }
         var req = URLRequest(url: url)

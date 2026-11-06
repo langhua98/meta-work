@@ -69,13 +69,13 @@ def handle(base, it, outbox, fdir):
     cid = cmd.get("id") or it["name"][:-5]
     if cmd.get("pair") not in (None, PAIR):
         receipt = {"id": cid, "ok": False, "text": "配对口令不对"}
-        api(base, "PUT", f"/files?path={urlq(outbox + '/' + cid + '.json')}", json.dumps(receipt).encode())
+        api(base, "PUT", f"/api/agent/v1/files?path={urlq(outbox + '/' + cid + '.json')}", json.dumps(receipt).encode())
         return
     do = cmd.get("do")
     files = []
     if do == "photo":
         p = f"{fdir}/{cid}-photo.jpg"
-        api(base, "PUT", f"/files?path={urlq(p)}", JPEG)
+        api(base, "PUT", f"/api/agent/v1/files?path={urlq(p)}", JPEG)
         files = [p]
         text = f"拍了一张（{'前' if cmd.get('lens')=='front' else '后'}摄，{len(JPEG)//1024 or 1} KB）"
     elif do == "info":
@@ -89,7 +89,7 @@ def handle(base, it, outbox, fdir):
     else:
         text = f"做了：{do}"
     receipt = {"id": cid, "do": do, "ok": True, "text": text, "files": files, "at": "now"}
-    api(base, "PUT", f"/files?path={urlq(outbox + '/' + cid + '.json')}", json.dumps(receipt).encode())
+    api(base, "PUT", f"/api/agent/v1/files?path={urlq(outbox + '/' + cid + '.json')}", json.dumps(receipt).encode())
 
 
 def run_sender(base, args, save):

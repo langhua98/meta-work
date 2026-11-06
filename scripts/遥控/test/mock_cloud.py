@@ -67,9 +67,16 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body)
 
+    def _auth_ok(self):
+        # 真云盘要 Authorization: Bearer xa_… ；这里只要求非空，模拟「少令牌就 401」
+        h = self.headers.get("Authorization", "")
+        return h.startswith("Bearer ") and len(h) > len("Bearer ")
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if not self._auth_ok():
+            return self._send(401, {"code": "unauthorized", "error": "missing agent token"})
         if u.path == "/api/agent/v1/me":
             return self._send(200, {"agent": {"name": "mock云盘"}})
         if u.path.startswith("/api/agent/v1/items/") and u.path.endswith("/content"):
@@ -92,7 +99,9 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
-        if u.path == "/files":
+        if not self._auth_ok():
+            return self._send(401, {"code": "unauthorized", "error": "missing agent token"})
+        if u.path == "/api/agent/v1/files":      # 真云盘的上传接口（不是 /files）
             n = int(self.headers.get("Content-Length", 0))
             data = self.rfile.read(n)
             path = clean(q.get("path", [""])[0])
