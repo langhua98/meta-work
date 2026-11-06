@@ -1,8 +1,9 @@
 import Foundation
 import UIKit
 
-// 控制端：往另一台设备的云盘收件箱写一条指令，等它的回执（和照片）。
-// 和被控端、安卓版、scripts/遥控/遥控.py 共用同一套云盘信箱。
+// 控制端：发一条指令，等对方回执（可带照片）。
+// 快路走即时信箱 /relay（内存中转，不写 Telegram，1 秒左右）；服务端不支持时退回文件信箱。
+// 信箱名和被控端、安卓版、scripts/遥控.py 保持一致。
 @MainActor
 final class RemoteControl: ObservableObject {
     static let shared = RemoteControl()
@@ -30,26 +31,47 @@ final class RemoteControl: ObservableObject {
         sending = true
         defer { sending = false }
 
-        // 发指令要写云盘。直接用主云盘令牌（需带写权限），不依赖「整理令牌」那个字段，省得填错。
-        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.cloudToken)
         let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss-"
         let id = f.string(from: Date()) + String(UUID().uuidString.prefix(6))
-
         var cmd: [String: Any] = ["id": id, "do": action]
         if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
         if let lens { cmd["lens"] = lens }
         if let seconds { cmd["seconds"] = seconds }
         if let on { cmd["on"] = on }
 
-        let inbox = "/小橘推送/遥控/\(dev)/收件/\(id).json"
-        let outbox = "/小橘推送/遥控/\(dev)/回执"
+        // 读内联/云盘路径里的文件都可能要用到云盘客户端
+        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.cloudToken)
+
+        // 快路：即时信箱
+        let relay = RemoteRelay(base: s.cloudURL, token: s.cloudToken)
         do {
-            try await cf.upload(inbox, jsonData(cmd))
+            try await relay.post(RemoteBox.inbox(dev), cmd)
+            let deadline = Date().addingTimeInterval(90)
+            while Date() < deadline {
+                let msgs = (try? await relay.wait(RemoteBox.receipt(dev, id), seconds: 20)) ?? []
+                if let r = msgs.first(where: { ($0["id"] as? String) == id }) ?? msgs.first {
+                    await present(action: action, receipt: r, cf: cf)
+                    return
+                }
+            }
+            log("等不到回执。确认对方开着待命、口令和设备名一致。")
+            return
         } catch {
-            log("发送失败：\(error.localizedDescription)"); return
+            guard RemoteRelay.missing(error) else { log("发送失败：\(error.localizedDescription)"); return }
+            // 服务端还没有即时信箱 → 退回文件信箱
         }
 
-        // 等回执（最多 90 秒）
+        await sendViaFiles(cmd: cmd, id: id, dev: dev, action: action, cf: cf)
+    }
+
+    // MARK: 文件信箱兜底（老服务端）
+
+    private func sendViaFiles(cmd: [String: Any], id: String, dev: String, action: String, cf: CloudFiles) async {
+        let inbox = "/小橘推送/遥控/\(dev)/收件/\(id).json"
+        let outbox = "/小橘推送/遥控/\(dev)/回执"
+        do { try await cf.upload(inbox, jsonData(cmd)) }
+        catch { log("发送失败：\(error.localizedDescription)"); return }
+
         let deadline = Date().addingTimeInterval(90)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -63,12 +85,19 @@ final class RemoteControl: ObservableObject {
         log("等不到回执。确认对方开着待命、口令和设备名一致。")
     }
 
+    // MARK: 回执 → 显示
+
+    /// files 每项有两种：即时信箱里是 {"name","data"(base64)}，文件信箱里是云盘路径字符串。
     private func present(action: String, receipt: [String: Any], cf: CloudFiles) async {
         let text = (receipt["text"] as? String) ?? ""
         var image: UIImage?
-        if let files = receipt["files"] as? [String], let first = files.first,
-           let data = try? await cf.readData(first) {
-            image = UIImage(data: data)
+        if let files = receipt["files"] as? [Any], let first = files.first {
+            if let inline = first as? [String: Any], let b64 = inline["data"] as? String,
+               let data = Data(base64Encoded: b64) {
+                image = UIImage(data: data)
+            } else if let path = first as? String, let data = try? await cf.readData(path) {
+                image = UIImage(data: data)
+            }
         }
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
         replies.insert(RemoteReply(at: f.string(from: Date()), action: action, text: text, image: image), at: 0)

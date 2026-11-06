@@ -54,5 +54,6 @@ struct RemoteRelay {
 /// 信箱名，要和安卓被控端、xiaoju-remote 的 RemoteBox 一致。
 enum RemoteBox {
     static func inbox(_ dev: String) -> String { "遥控/\(dev)/收件" }
+    static func receipt(_ dev: String, _ id: String) -> String { "遥控/\(dev)/回执/\(id)" }
     static func video(_ dev: String) -> String { "遥控/\(dev)/视频" }
 }
