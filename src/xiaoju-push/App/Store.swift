@@ -156,6 +156,8 @@ final class Store: ObservableObject {
     @Published var remoteDevice: String { didSet { UserDefaults.standard.set(remoteDevice, forKey: "remoteDevice") } }
     /// 遥控（被控端）：配对口令，两台设备要一样
     @Published var remotePair: String { didSet { Keychain.write("remotePair", remotePair) } }
+    /// 遥控（控制端）：上次控制的目标设备名
+    @Published var remoteTarget: String { didSet { UserDefaults.standard.set(remoteTarget, forKey: "remoteTarget") } }
     /// 接着用的 OpenCode 会话
     var openCodeSession: String {
         get { UserDefaults.standard.string(forKey: "openCodeSession") ?? "" }
@@ -190,6 +192,7 @@ final class Store: ObservableObject {
         cloudFast = d.object(forKey: "cloudFast") as? Bool ?? true
         remoteDevice = d.string(forKey: "remoteDevice") ?? ""
         remotePair = Keychain.read("remotePair")
+        remoteTarget = d.string(forKey: "remoteTarget") ?? ""
         // 老用户已经填过令牌，不再显示引导
         onboarded = d.bool(forKey: "onboarded") || !Keychain.read("githubToken").isEmpty
     }

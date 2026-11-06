@@ -58,7 +58,7 @@ def relay_send(box, obj):
             data=json.dumps(obj, ensure_ascii=False).encode("utf-8"), ctype="application/json")
         return True
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (404, 405, 501):  # 服务端还没上即时信箱
             return False
         raise
 

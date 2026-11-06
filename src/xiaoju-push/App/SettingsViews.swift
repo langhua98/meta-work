@@ -56,8 +56,8 @@ struct SettingsView: View {
                 .listRowBackground(Theme.card)
                 Section("遥控") {
                     NavigationLink { RemoteView() } label: {
-                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "遥控（被控端 · 发指令）",
-                                    sub: "开待命后，另一台设备调用这台的相机 / 麦克风 / 定位等")
+                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "遥控",
+                                    sub: "被控端：开待命让别人调用这台；控制端：去调用别的设备")
                     }
                 }
                 .listRowBackground(Theme.card)

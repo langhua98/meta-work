@@ -178,7 +178,10 @@ final class CloudFiles {
     // MARK: 即时信箱（服务端 relay.go：消息只在内存里，长轮询，不走存储端，比写文件快得多）
 
     /// 服务端还没上即时信箱时会报 404（「没有这个…」），调用方据此退回到文件信箱
-    static func relayMissing(_ e: Error) -> Bool { (e as? PushError)?.message.contains("没有这个") == true }
+    static func relayMissing(_ e: Error) -> Bool {
+        guard let m = (e as? PushError)?.message else { return false }
+        return m.contains("没有这个") || m.contains("（405）") || m.contains("（501）")
+    }
 
     func relaySend(_ box: String, _ obj: [String: Any]) async throws {
         let body = try JSONSerialization.data(withJSONObject: obj)
