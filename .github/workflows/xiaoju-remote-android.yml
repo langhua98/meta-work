@@ -2,12 +2,9 @@ name: Build 小橘遥控 apk
 
 # src/xiaoju-remote-android/：在 GitHub 的 Ubuntu 机器上用 Android SDK 编译，
 # 用 debug 签名的 APK（能直接装，不用签名工具）发布到 Release「xiaoju-remote-android」（每次覆盖）。
+# 安卓已搁置（见 AGENTS.md），只留手动触发，推送不自动编译。
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "src/xiaoju-remote-android/**"
-      - ".github/workflows/xiaoju-remote-android.yml"
 
 permissions:
   contents: write
