@@ -22,7 +22,8 @@
 - /src/ 是最终源码
 - /scripts/ 放同步脚本
 
-安卓搁置：
-- 安卓版（src/xiaoju-remote-android/）暂停：不写新代码、不编译、不发新 APK。
-- 它的 workflow 只保留手动触发，推送代码不会自动编译。
-- 遥控只做 iOS（小橘推送 + iOS 15 被控端）和 scripts/遥控/。
+安卓被控端（2026-11 恢复）：
+- src/xiaoju-remote-android/ 是安卓被控端，最低支持 Android 4.2.2（API 17）。只用 4.2 就有的接口；更新的接口放在单独的 @TargetApi 类里并判断版本。
+- 协议跟 langhua98/xiaoju-remote（iPhone 被控端）的 AGENTS.md 保持一致：即时信箱 /api/agent/v1/relay 优先，文件信箱兜底。
+- 联网用 Conscrypt 2.5.2（最后一个支持 API 9+ 的版本）+ App 自带根证书 res/raw/roots.pem，因为 4.2 自带的 TLS 和根证书太旧。
+- 它的 workflow 只保留手动触发。
