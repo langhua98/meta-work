@@ -44,23 +44,30 @@ final class RemoteCenter: ObservableObject {
 
     private func loop() async {
         let s = Store.shared
-        let cf = CloudFiles(base: s.cloudURL, readToken: s.cloudToken, writeToken: s.organizeToken)
+        let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
+                            readToken: s.cloudToken, writeToken: s.organizeToken)
         let dev = device
         let inbox = "/小橘推送/遥控/\(dev)/收件"
         let outbox = "/小橘推送/遥控/\(dev)/回执"
         let filesDir = "/小橘推送/遥控/\(dev)/文件"
+        var lastError = ""
 
         while !Task.isCancelled {
             do {
-                let items = (try await cf.list(inbox, limit: 200))
+                let items = (try await cf.list(inbox, limit: 1000))
                     .filter { !$0.isFolder && $0.name.hasSuffix(".json") }
                     .sorted { $0.name < $1.name }
                 for it in items where !isSeen(it.id) {
                     await handle(cf, it, inbox: inbox, outbox: outbox, filesDir: filesDir)
                     markSeen(it.id)
                 }
+                lastError = ""
             } catch {
-                // 收件箱还不存在时 list 会报「没有这个文件夹」，正常，静默
+                // 收件箱还不存在时 list 会报「没有这个文件夹」，正常，静默；
+                // 别的错（令牌不对、连不上云盘）要显示出来，不然看着在待命其实一直收不到。同一个错只记一次。
+                let msg = error.localizedDescription
+                if !msg.contains("没有这个"), msg != lastError { push("收件箱读不了：\(msg)") }
+                lastError = msg
             }
             try? await Task.sleep(nanoseconds: 4_000_000_000)
         }
@@ -94,7 +101,8 @@ final class RemoteCenter: ObservableObject {
         let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm:ss"
         let receipt: [String: Any] = ["id": id, "do": action, "ok": true,
                                       "text": result.text, "files": filePaths, "at": f.string(from: Date())]
-        try? await cf.upload("\(outbox)/\(id).json", jsonData(receipt))
+        do { try await cf.upload("\(outbox)/\(id).json", jsonData(receipt)) }
+        catch { push("传回执失败：\(error.localizedDescription)") }
         push("完成：\(action) — \(result.text.split(separator: "\n").first.map(String.init) ?? "")")
     }
 
