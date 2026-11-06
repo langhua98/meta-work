@@ -29,6 +29,8 @@ jobs:
             url: https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-Q4_K_M.gguf
           - model: 4B-xiaoju-v2
             url: https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v2-Q4_K_M.gguf
+          - model: 4B-xiaoju-v3
+            url: https://huggingface.co/Langhua98/Qwen3.5-4B-xiaoju-GGUF/resolve/main/Qwen3.5-4B-xiaoju-v3-Q4_K_M.gguf
     name: 测试 ${{ matrix.model }}
     steps:
       - uses: actions/checkout@v4
