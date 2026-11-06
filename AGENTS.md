@@ -25,4 +25,4 @@
 安卓搁置：
 - 安卓版（src/xiaoju-remote-android/）暂停：不写新代码、不编译、不发新 APK。
 - 它的 workflow 只保留手动触发，推送代码不会自动编译。
-- 遥控只做 iOS（小橘推送 + iOS 15 被控端）和 scripts/遥控/。
+- 遥控只做 iOS（小橘推送）和 scripts/遥控/。iOS 15 被控端已经拆到单独的仓库 langhua98/xiaoju-remote（协议见那边的 AGENTS.md，改协议两边要一起改）。
