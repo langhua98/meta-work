@@ -60,7 +60,8 @@ class Cloud(private val base: String, private val token: String) {
                 out.add(CloudItem(o.optString("id"), o.optString("name"), o.optString("type"),
                     o.optLong("size"), o.optString("sha256").ifBlank { null }))
             }
-            cursor = j.optString("next_cursor").ifBlank { null }
+            // 最后一页云盘回 next_cursor: null；optString 会把 null 读成字符串 "null"，导致死循环，所以要先判 isNull
+            cursor = if (j.isNull("next_cursor")) null else j.optString("next_cursor").ifBlank { null }
         } while (cursor != null)
         return out
     }
@@ -70,9 +71,9 @@ class Cloud(private val base: String, private val token: String) {
 
     fun download(id: String): ByteArray = get("/api/agent/v1/items/$id/content")
 
-    /** 上传（覆盖）。按约定 PUT /files?path=/… ，原始字节。 */
+    /** 上传。PUT /api/agent/v1/files?path=/… ，原始字节（同名不覆盖，云盘会改名“名字 (2)”）。 */
     fun upload(path: String, data: ByteArray, contentType: String = "application/octet-stream") {
-        val url = (base + "/files").toHttpUrl().newBuilder()
+        val url = (base + "/api/agent/v1/files").toHttpUrl().newBuilder()
             .addQueryParameter("path", path).build()
         val req = Request.Builder().url(url)
             .header("Authorization", "Bearer $token")

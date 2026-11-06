@@ -7,7 +7,7 @@
 工作流：
 1. Meta AI 写代码 → 上传到 Google Drive /meta work/
 2. opencode 从 Drive 拉取文件 → 上传到小桔云盘 https://langhua1998-xiaoju-cloud.hf.space
-   - 接口：PUT /files?path=/...
+   - 接口：PUT /api/agent/v1/files?path=/...（完整路径要带 /api/agent/v1 前缀，只写 /files 会 404）
    - 鉴权：Authorization: Bearer <token>
 3. opencode 从小桔云盘开 PR 到 GitHub langhua98/meta-work
 4. Meta AI 从 GitHub 复核
