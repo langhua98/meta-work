@@ -175,6 +175,23 @@ final class CloudFiles {
         try await rename(t, to: name)
     }
 
+    // MARK: 即时信箱（服务端 relay.go：消息只在内存里，长轮询，不走存储端，比写文件快得多）
+
+    /// 服务端还没上即时信箱时会报 404（「没有这个…」），调用方据此退回到文件信箱
+    static func relayMissing(_ e: Error) -> Bool { (e as? PushError)?.message.contains("没有这个") == true }
+
+    func relaySend(_ box: String, _ obj: [String: Any]) async throws {
+        let body = try JSONSerialization.data(withJSONObject: obj)
+        _ = try await request("POST", "/relay", query: ["box": box], body: body, write: true)
+    }
+
+    /// 取走信箱里的消息；没有就最多等 seconds 秒（消息一到马上返回）
+    func relayWait(_ box: String, seconds: Int = 25) async throws -> [[String: Any]] {
+        let d = try await request("GET", "/relay", query: ["box": box, "wait": "\(seconds)"])
+        let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        return ((j?["messages"] as? [[String: Any]]) ?? []).compactMap { $0["body"] as? [String: Any] }
+    }
+
     // MARK: 记忆
 
     func memoryIndex() async -> String {

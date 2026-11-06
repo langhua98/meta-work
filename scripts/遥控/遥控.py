@@ -20,7 +20,7 @@ B 设备装了「小橘遥控」App 并开着「待命」。
   遥控.py 测试机B ring --seconds 5
   遥控.py 测试机B shell --cmd "ls -la /sdcard"
 """
-import argparse, json, os, sys, time, urllib.parse, urllib.request, uuid
+import argparse, base64, json, os, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
 BASE = os.environ.get("XIAOJU_BASE", "https://langhua1998-xiaoju-cloud.hf.space").rstrip("/")
 TOKEN = os.environ.get("XIAOJU_TOKEN", "")
@@ -49,6 +49,23 @@ def list_dir(path):
         return j.get("children") or []
     except Exception:
         return []
+
+
+def relay_send(box, obj):
+    """即时信箱（服务端内存里，长轮询，比写文件快得多）。服务端还没有时返回 False。"""
+    try:
+        req("POST", "/api/agent/v1/relay", query={"box": box},
+            data=json.dumps(obj, ensure_ascii=False).encode("utf-8"), ctype="application/json")
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise
+
+
+def relay_wait(box, seconds):
+    j = json.loads(req("GET", "/api/agent/v1/relay", query={"box": box, "wait": str(seconds)}))
+    return [m.get("body") for m in j.get("messages") or []]
 
 
 def download(item_id):
@@ -87,30 +104,47 @@ def main():
             sys.exit("shell 要用 --cmd 给命令")
         cmd["cmd"] = a.cmd
 
-    inbox = f"/小橘推送/遥控/{a.device}/收件/{cid}.json"
-    outbox = f"/小橘推送/遥控/{a.device}/回执"
-    put_file(inbox, json.dumps(cmd, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
-    print(f"已发送 [{a.action}] → {a.device}（id {cid}），等回执…")
+    sent = time.time()
+    via_relay = relay_send(f"遥控/{a.device}/收件", cmd)
+    if not via_relay:
+        inbox = f"/小橘推送/遥控/{a.device}/收件/{cid}.json"
+        put_file(inbox, json.dumps(cmd, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+    print(f"已发送 [{a.action}] → {a.device}（id {cid}{'' if via_relay else '，走文件信箱'}），等回执…")
 
+    outbox = f"/小橘推送/遥控/{a.device}/回执"
     deadline = time.time() + a.timeout
     while time.time() < deadline:
-        for it in list_dir(outbox):
-            if it.get("name") == f"{cid}.json":
+        r = None
+        if via_relay:
+            left = max(1, min(25, int(deadline - time.time())))
+            got = relay_wait(f"遥控/{a.device}/回执/{cid}", left)
+            r = got[0] if got else None
+        else:
+            time.sleep(1)
+            it = next((x for x in list_dir(outbox) if x.get("name") == f"{cid}.json"), None)
+            if it:
                 r = json.loads(download(it["id"]))
-                print("—— 回执 ——")
-                print(r.get("text", ""))
-                for fp in r.get("files", []):
-                    name = os.path.basename(fp)
-                    # 回执里的是云盘路径，再按路径找到文件下载
-                    folder = os.path.dirname(fp)
-                    match = next((x for x in list_dir(folder) if x.get("name") == name), None)
-                    if match:
-                        out = os.path.join(a.save, f"{cid}-{name}")
-                        with open(out, "wb") as f:
-                            f.write(download(match["id"]))
-                        print("已下载：" + out)
-                return
-        time.sleep(2)
+        if not r:
+            continue
+        print(f"—— 回执（{time.time() - sent:.1f} 秒）——")
+        print(r.get("text", ""))
+        for fp in r.get("files", []):
+            if isinstance(fp, dict):  # 即时信箱：文件直接放在回执里
+                out = os.path.join(a.save, f"{cid}-{fp.get('name', 'file')}")
+                with open(out, "wb") as f:
+                    f.write(base64.b64decode(fp.get("data", "")))
+                print("已保存：" + out)
+                continue
+            name = os.path.basename(fp)
+            # 回执里的是云盘路径，再按路径找到文件下载
+            folder = os.path.dirname(fp)
+            match = next((x for x in list_dir(folder) if x.get("name") == name), None)
+            if match:
+                out = os.path.join(a.save, f"{cid}-{name}")
+                with open(out, "wb") as f:
+                    f.write(download(match["id"]))
+                print("已下载：" + out)
+        return
     print("超时没收到回执。确认 B 手机开着 App 的「待命」、口令一致、设备名一致。")
 
 

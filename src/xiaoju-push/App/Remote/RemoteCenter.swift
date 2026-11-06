@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-// 被控端「待命」：轮询云盘收件箱，执行指令，把结果写回回执箱。
+// 被控端「待命」：在即时信箱上长轮询（指令一到马上执行），服务端没有即时信箱时退回到轮询云盘里的收件箱文件。
 // 复用 App 自己的 CloudFiles（读用 cloudToken，写回执/照片用 organizeToken）。
 @MainActor
 final class RemoteCenter: ObservableObject {
@@ -48,42 +48,77 @@ final class RemoteCenter: ObservableObject {
                             readToken: s.cloudToken, writeToken: s.organizeToken)
         let dev = device
         let inbox = "/小橘推送/遥控/\(dev)/收件"
-        let outbox = "/小橘推送/遥控/\(dev)/回执"
         let filesDir = "/小橘推送/遥控/\(dev)/文件"
         var lastError = ""
+        var useRelay = true
+        var lastFileCheck = Date.distantPast
 
         while !Task.isCancelled {
+            // 快路：即时信箱，长轮询，指令一到马上返回
+            if useRelay {
+                do {
+                    let msgs = try await cf.relayWait(RemoteBox.inbox(dev))
+                    lastError = ""
+                    for cmd in msgs { await execute(cf, cmd, dev: dev, viaRelay: true, filesDir: filesDir) }
+                } catch {
+                    if CloudFiles.relayMissing(error) {
+                        useRelay = false
+                        push("云盘服务端还没有即时信箱，先用文件信箱（会慢一些）")
+                    } else {
+                        note(error, &lastError)
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    }
+                }
+                // 老的发送端（旧版 App、遥控.py）还会写文件信箱，隔一会儿看一眼
+                if Date().timeIntervalSince(lastFileCheck) < 30 { continue }
+            }
+            lastFileCheck = Date()
             do {
                 let items = (try await cf.list(inbox, limit: 1000))
                     .filter { !$0.isFolder && $0.name.hasSuffix(".json") }
                     .sorted { $0.name < $1.name }
                 for it in items where !isSeen(it.id) {
-                    await handle(cf, it, inbox: inbox, outbox: outbox, filesDir: filesDir)
                     markSeen(it.id)
+                    guard let data = try? await cf.readData("\(inbox)/\(it.name)"),
+                          let cmd = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                        push("收到一条看不懂的指令，跳过"); continue
+                    }
+                    var c = cmd
+                    if c["id"] == nil { c["id"] = it.name.replacingOccurrences(of: ".json", with: "") }
+                    await execute(cf, c, dev: dev, viaRelay: false, filesDir: filesDir)
                 }
-                lastError = ""
+                if !useRelay { lastError = "" }
             } catch {
-                // 收件箱还不存在时 list 会报「没有这个文件夹」，正常，静默；
-                // 别的错（令牌不对、连不上云盘）要显示出来，不然看着在待命其实一直收不到。同一个错只记一次。
-                let msg = error.localizedDescription
-                if !msg.contains("没有这个"), msg != lastError { push("收件箱读不了：\(msg)") }
-                lastError = msg
+                // 收件箱还不存在时 list 会报「没有这个文件夹」，正常，静默
+                if !CloudFiles.relayMissing(error) { note(error, &lastError) }
             }
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !useRelay { try? await Task.sleep(nanoseconds: 2_000_000_000) }
         }
     }
 
-    private func handle(_ cf: CloudFiles, _ item: CloudEntry, inbox: String, outbox: String, filesDir: String) async {
+    /// 别的错（令牌不对、连不上云盘）要显示出来，不然看着在待命其实一直收不到。同一个错只记一次。
+    private func note(_ error: Error, _ last: inout String) {
+        let msg = error.localizedDescription
+        if msg != last { push("收件箱读不了：\(msg)") }
+        last = msg
+    }
+
+    /// 执行一条指令，回执原路返回：从即时信箱来的回到即时信箱（照片直接放在回执里），从文件来的写回执文件。
+    private func execute(_ cf: CloudFiles, _ cmd: [String: Any], dev: String, viaRelay: Bool, filesDir: String) async {
         let s = Store.shared
-        guard let data = try? await cf.readData("\(inbox)/\(item.name)"),
-              let cmd = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            push("收到一条看不懂的指令，跳过"); return
+        let id = (cmd["id"] as? String) ?? UUID().uuidString
+        let outbox = "/小橘推送/遥控/\(dev)/回执"
+
+        func reply(_ r: [String: Any]) async {
+            do {
+                if viaRelay { try await cf.relaySend(RemoteBox.receipt(dev, id), r) }
+                else { try await cf.upload("\(outbox)/\(id).json", jsonData(r)) }
+            } catch { push("传回执失败：\(error.localizedDescription)") }
         }
-        let id = (cmd["id"] as? String) ?? item.name.replacingOccurrences(of: ".json", with: "")
 
         if !s.remotePair.isEmpty, (cmd["pair"] as? String) != s.remotePair {
             push("有一条指令口令不对，拒绝")
-            try? await cf.upload("\(outbox)/\(id).json", jsonData(["id": id, "ok": false, "text": "配对口令不对"]))
+            await reply(["id": id, "ok": false, "text": "配对口令不对"])
             return
         }
 
@@ -91,18 +126,20 @@ final class RemoteCenter: ObservableObject {
         push("执行：\(action)")
         let result = await RemoteCommands.run(cmd)
 
-        var filePaths: [String] = []
+        var files: [Any] = []
         for (name, bytes) in result.files {
+            if viaRelay && bytes.count <= RemoteBox.inlineLimit {
+                files.append(["name": name, "data": bytes.base64EncodedString()])
+                continue
+            }
             let path = "\(filesDir)/\(id)-\(name)"
-            if (try? await cf.upload(path, bytes)) != nil { filePaths.append(path) }
+            if (try? await cf.upload(path, bytes)) != nil { files.append(path) }
             else { push("传文件失败：\(name)") }
         }
 
         let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm:ss"
-        let receipt: [String: Any] = ["id": id, "do": action, "ok": true,
-                                      "text": result.text, "files": filePaths, "at": f.string(from: Date())]
-        do { try await cf.upload("\(outbox)/\(id).json", jsonData(receipt)) }
-        catch { push("传回执失败：\(error.localizedDescription)") }
+        await reply(["id": id, "do": action, "ok": true,
+                     "text": result.text, "files": files, "at": f.string(from: Date())])
         push("完成：\(action) — \(result.text.split(separator: "\n").first.map(String.init) ?? "")")
     }
 
@@ -121,4 +158,12 @@ final class RemoteCenter: ObservableObject {
         if s.count > 500 { s.removeFirst(s.count - 500) }
         UserDefaults.standard.set(s, forKey: seenKey)
     }
+}
+
+/// 即时信箱的名字（发送端、被控端、遥控.py 要一致）
+enum RemoteBox {
+    static func inbox(_ dev: String) -> String { "遥控/\(dev)/收件" }
+    static func receipt(_ dev: String, _ id: String) -> String { "遥控/\(dev)/回执/\(id)" }
+    /// 回执里直接带的文件最大多少（base64 后要小于服务端单条 8 MB）
+    static let inlineLimit = 5 << 20
 }
