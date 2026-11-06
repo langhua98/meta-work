@@ -30,11 +30,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 别装已经废弃的 tools 包（v3 默认会装，新 runner 上会报 Failed to find package 'tools'）
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
       - name: Build debug APK
         working-directory: src/xiaoju-remote-android
         run: |
-          gradle wrapper --gradle-version 8.11.1
+          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Rename APK
