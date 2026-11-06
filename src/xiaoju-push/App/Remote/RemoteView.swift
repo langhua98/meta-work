@@ -1,7 +1,29 @@
 import SwiftUI
 
-// 设置 → 遥控（被控端）。这台 iPhone 开「待命」后，被另一台设备通过云盘发指令调用硬件。
+// 设置 → 遥控。顶部切换「被控端」（这台被别人调用）和「控制端」（这台去调用别人）。
 struct RemoteView: View {
+    @State private var mode = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $mode) {
+                Text("被控端").tag(0)
+                Text("控制端").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 4)
+            .background(Theme.bg)
+
+            if mode == 0 { RemoteSlaveView() } else { RemoteControlView() }
+        }
+        .background(Theme.bg)
+        .navigationTitle("遥控")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// 被控端：这台开待命，被别人调用。
+struct RemoteSlaveView: View {
     @EnvironmentObject var store: Store
     @ObservedObject private var center = RemoteCenter.shared
 
@@ -47,7 +69,5 @@ struct RemoteView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
-        .navigationTitle("遥控")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
