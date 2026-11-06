@@ -1,0 +1,60 @@
+name: Build 小橘遥控 apk
+
+# src/xiaoju-remote-android/：在 GitHub 的 Ubuntu 机器上用 Android SDK 编译，
+# 用 debug 签名的 APK（能直接装，不用签名工具）发布到 Release「xiaoju-remote-android」（每次覆盖）。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/xiaoju-remote-android/**"
+      - ".github/workflows/xiaoju-remote-android.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xiaoju-remote-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: src/xiaoju-remote-android
+        run: |
+          gradle wrapper --gradle-version 8.11.1
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        working-directory: src/xiaoju-remote-android
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/xiaoju-remote-latest.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaoju-remote-apk
+          path: src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
+
+      - name: Publish to the xiaoju-remote-android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete xiaoju-remote-android --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create xiaoju-remote-android \
+            -R "$GITHUB_REPOSITORY" \
+            --title "小橘遥控 APK" \
+            --notes "被控端 APK。下载 xiaoju-remote-latest.apk 直接装（安卓设置里先允许「安装未知来源」）。" \
+            src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
