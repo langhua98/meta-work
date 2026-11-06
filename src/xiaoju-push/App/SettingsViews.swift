@@ -54,6 +54,13 @@ struct SettingsView: View {
                     }
                 }
                 .listRowBackground(Theme.card)
+                Section("遥控") {
+                    NavigationLink { RemoteView() } label: {
+                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "遥控（被控端）",
+                                    sub: "开待命后，另一台设备调用这台的相机 / 麦克风 / 定位等")
+                    }
+                }
+                .listRowBackground(Theme.card)
                 Section("App") {
                     NavigationLink { appearancePage } label: {
                         SettingsRow(icon: "circle.lefthalf.filled", title: "外观", sub: ["跟随系统", "浅色", "深色"][min(2, max(0, store.appearance))])

@@ -152,6 +152,10 @@ final class Store: ObservableObject {
     @Published var autoCloud: Bool { didSet { UserDefaults.standard.set(autoCloud, forKey: "autoCloud") } }
     /// 云端用快模型（deepseek-flash），关掉用更强但慢的 v4-pro
     @Published var cloudFast: Bool { didSet { UserDefaults.standard.set(cloudFast, forKey: "cloudFast") } }
+    /// 遥控（被控端）：这台设备的名字
+    @Published var remoteDevice: String { didSet { UserDefaults.standard.set(remoteDevice, forKey: "remoteDevice") } }
+    /// 遥控（被控端）：配对口令，两台设备要一样
+    @Published var remotePair: String { didSet { Keychain.write("remotePair", remotePair) } }
     /// 接着用的 OpenCode 会话
     var openCodeSession: String {
         get { UserDefaults.standard.string(forKey: "openCodeSession") ?? "" }
@@ -184,6 +188,8 @@ final class Store: ObservableObject {
         openCodePassword = Keychain.read("openCodePassword")
         autoCloud = d.object(forKey: "autoCloud") as? Bool ?? true
         cloudFast = d.object(forKey: "cloudFast") as? Bool ?? true
+        remoteDevice = d.string(forKey: "remoteDevice") ?? ""
+        remotePair = Keychain.read("remotePair")
         // 老用户已经填过令牌，不再显示引导
         onboarded = d.bool(forKey: "onboarded") || !Keychain.read("githubToken").isEmpty
     }
