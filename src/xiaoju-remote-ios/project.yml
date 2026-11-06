@@ -1,0 +1,37 @@
+# 小橘遥控（iPhone 被控端）：被另一台设备通过小橘云盘发指令，调用本机硬件（拍照/录音/定位/手电/震动/响铃）。
+# GitHub Actions 的 Mac 机器上 `xcodegen generate` 生成 Xcode 工程再编译（.github/workflows/xiaoju-remote-ios.yml），
+# 没签名的 .ipa 发到 Release「xiaoju-remote-ios」，用 SideStore / 自己的证书签名后安装。
+name: XiaojuRemote
+options:
+  bundleIdPrefix: com.langhua98.xiaoju
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+targets:
+  XiaojuRemote:
+    type: application
+    platform: iOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.langhua98.xiaoju.remote
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 小橘遥控
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: 被另一台设备远程请求时拍照
+        NSMicrophoneUsageDescription: 被另一台设备远程请求时录音
+        NSLocationWhenInUseUsageDescription: 被另一台设备远程请求时上报一次位置
+        UIBackgroundModes: [fetch]
