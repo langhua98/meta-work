@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <math.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -56,11 +57,13 @@ static id<MTLLibrary> load_library(id<MTLDevice> dev, char *err, size_t errlen) 
     return lib;
 }
 
-static const char *mv_name(uint32_t type) {
+// one = 一次只有 1 个 token（生成阶段）：用 mv1_ 专用内核
+static const char *mv_name(uint32_t type, bool one) {
     switch (type) {
-        case XJ_F32: return "mv_f32"; case XJ_F16: return "mv_f16"; case XJ_BF16: return "mv_bf16";
-        case XJ_Q8_0: return "mv_q8_0"; case XJ_Q4_K: return "mv_q4_K"; case XJ_Q5_K: return "mv_q5_K";
-        case XJ_Q6_K: return "mv_q6_K"; default: return NULL;
+        case XJ_F32: return one ? "mv1_f32" : "mv_f32"; case XJ_F16: return one ? "mv1_f16" : "mv_f16";
+        case XJ_BF16: return one ? "mv1_bf16" : "mv_bf16"; case XJ_Q8_0: return one ? "mv1_q8_0" : "mv_q8_0";
+        case XJ_Q4_K: return one ? "mv1_q4_K" : "mv_q4_K"; case XJ_Q5_K: return one ? "mv1_q5_K" : "mv_q5_K";
+        case XJ_Q6_K: return one ? "mv1_q6_K" : "mv_q6_K"; default: return NULL;
     }
 }
 
@@ -160,12 +163,15 @@ static void set_w(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w, 
 static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
                    id<MTLBuffer> x, size_t xoff, uint32_t xs, id<MTLBuffer> y, size_t yoff, uint32_t ys, int T, bool add) {
     XJMetal *o = M(s);
-    [enc setComputePipelineState:P(o, mv_name(w->type))];
     set_w(enc, s, w, 0);
     const uint32_t groups = (uint32_t)((w->ne1 + XJ_MV_ROWS - 1) / XJ_MV_ROWS);
     for (int t0 = 0; t0 < T; t0 += XJ_MV_MAXT) {
         xj_mv_args a = { (uint32_t)w->ne0, (uint32_t)w->ne1, (uint32_t)(T - t0 < XJ_MV_MAXT ? T - t0 : XJ_MV_MAXT),
                          (uint32_t)xj_row_bytes(w->type, w->ne0), xs, ys, add ? 1u : 0u, 0 };
+        // XJ_MV_GENERIC=1：生成阶段也用通用内核（xjpipe-check 对比速度用）
+        static int generic = -1;
+        if (generic < 0) generic = getenv("XJ_MV_GENERIC") != NULL;
+        [enc setComputePipelineState:P(o, mv_name(w->type, a.T == 1 && !generic))];
         a.grid_x = gx_of(groups);
         [enc setBuffer:x offset:(xoff + (size_t)t0 * xs) * 4 atIndex:1];
         [enc setBuffer:y offset:(yoff + (size_t)t0 * ys) * 4 atIndex:2];
@@ -414,7 +420,8 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
     id<MTLLibrary> lib = load_library(dev, err, errlen);
     if (!lib) return NULL;
     o.pso = [NSMutableDictionary dictionary];
-    const char *names[] = { "mv_f32", "mv_f16", "mv_bf16", "mv_q8_0", "mv_q4_K", "mv_q5_K", "mv_q6_K", "xj_norm", "xj_rope",
+    const char *names[] = { "mv_f32", "mv_f16", "mv_bf16", "mv_q8_0", "mv_q4_K", "mv_q5_K", "mv_q6_K",
+                            "mv1_f32", "mv1_f16", "mv1_bf16", "mv1_q8_0", "mv1_q4_K", "mv1_q5_K", "mv1_q6_K", "xj_norm", "xj_rope",
                             "xj_kv_store", "xj_attn_scores", "xj_softmax", "xj_attn_out", "xj_conv_silu", "xj_delta_net", "xj_swiglu" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         id<MTLFunction> f = [lib newFunctionWithName:@(names[i])];
@@ -423,7 +430,7 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
         if (!p) { snprintf(err, errlen, "内核 %s 建不起来：%s", names[i], e.localizedDescription.UTF8String ?: "找不到"); return NULL; }
         // A10 上每个线程组最多 512 线程；寄存器用得多的内核上限会更低（7 Plus 上 mv_q6_K 只有 224）。
         // 按每个内核实际派发的线程数检查（和下面 enc_* 里 dispatch 的第三个参数一致）；delta_net 单独查
-        NSUInteger need = strstr(names[i], "mv_") ? XJ_MV_ROWS * XJ_MV_LANES
+        NSUInteger need = !strncmp(names[i], "mv", 2) ? XJ_MV_ROWS * XJ_MV_LANES
                         : (!strcmp(names[i], "xj_norm") || !strcmp(names[i], "xj_softmax")) ? 256
                         : !strcmp(names[i], "xj_delta_net") ? 0 : 64;
         if (p.maxTotalThreadsPerThreadgroup < need) {

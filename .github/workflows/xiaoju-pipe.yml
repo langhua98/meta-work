@@ -91,6 +91,10 @@ jobs:
           system_profiler SPDisplaysDataType | head -20 || true
           ./build/xjpipe-check "$f" --layers 0:8
           ./build/xjpipe-check "$f" --layers 16:24
+          echo "== 对比：生成阶段用通用内核（旧版）"
+          XJ_MV_GENERIC=1 ./build/xjpipe-check "$f" --layers 0:24
+          echo "== 生成阶段专用内核"
+          ./build/xjpipe-check "$f" --layers 0:24
       - name: Tokenizer vs official tokenizer.json
         run: |
           python3 -m venv /tmp/venv
