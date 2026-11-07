@@ -24,6 +24,12 @@ struct RemoteControlView: View {
                     Label("看对方的实时画面", systemImage: "video").foregroundStyle(Theme.orangeText)
                 }
                 .disabled(target.isEmpty)
+                NavigationLink {
+                    RemoteMonitorView(target: target)
+                } label: {
+                    Label("移动侦测（安卓 0.8+）", systemImage: "figure.walk.motion").foregroundStyle(Theme.orangeText)
+                }
+                .disabled(target.isEmpty)
             }
             .listRowBackground(Theme.card)
 

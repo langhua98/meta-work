@@ -49,6 +49,22 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `vibrate` | `ms` | 震动 |
 | `ring` | `seconds` | 响铃（找手机） |
 | `shell` | `cmd` | 在 App 沙盒里跑一条 shell（非 root，只有 App 自己的权限） |
+| `video` | `transport`=ws、`room`、`codec`=h264/jpeg、`lens`、`width`、`fps`、`quality`、`audio` | 实时画面（走云盘的直播通道） |
+| `video_set` | 同上加 `exposure`、`zoom`、`torch` | 直播 / 侦测中调相机 |
+| `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
+| `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram |
+| `events` | `limit`、`before` | 录好的事件（新的在前，带小图） |
+| `event_get` | `name` | 取一段录像：备份过的给云盘路径，5 MB 以内直接放回执，大的先传到云盘 |
+| `event_delete` | `name` | 删手机上的一段（云盘备份不动） |
+
+### 移动侦测（0.8）
+
+- 侦测在手机上跑：亮度缩成 32×24 格和背景比，整体变亮变暗不算，连续两次才算有动静。
+- 有动静就录 H.264 + 声音，包括动静前 `pre` 秒（内存里一直留着），最后一次动静后再录 `post` 秒；存成 .mov
+  （App 的外部存储目录 `Android/data/com.langhua98.xiaoju.remote/files/events/`，超过 3 GB 删最旧的）。
+- 慢慢备份到云盘 `/小橘推送/遥控/<设备名>/录像/<日期>/`：一次一段、歇 1 分钟、限速 128 KB/s，有人看直播时不传。
+- Telegram 提醒经云盘服务端的机器人发（`POST /api/agent/v1/notify`）：在 Telegram 里给那个机器人发一句 `/start` 就能收到。
+- 侦测时手机要一直插电；相机开着时拍照是从画面截一张。
 
 ## 云盘上的文件夹
 

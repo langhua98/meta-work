@@ -22,6 +22,16 @@ class Prefs(ctx: Context) {
         get() = sp.getString("pair", "")!!
         set(v) { sp.edit().putString("pair", v.trim()).apply() }
 
+    /** 移动侦测的设置（JSON，见 MonitorConfig） */
+    var monitor: MonitorConfig
+        get() = MonitorConfig.fromJson(sp.getString("monitor", ""))
+        set(v) { sp.edit().putString("monitor", v.toJson().toString()).apply() }
+
+    /** Telegram 提醒发给哪个聊天（服务端第一次找到后告诉我们） */
+    var tgChat: Long
+        get() = sp.getLong("tgChat", 0L)
+        set(v) { sp.edit().putLong("tgChat", v).apply() }
+
     /** 处理过的文件信箱指令 id（避免重复执行），最多记 500 条 */
     fun isSeen(id: String) = seen().contains(id)
     fun markSeen(id: String) {

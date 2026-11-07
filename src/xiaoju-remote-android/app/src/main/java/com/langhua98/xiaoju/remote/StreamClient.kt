@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
  *   4 = H.264 画面：     [4][角度/90][采集时间 8 字节][标志，第 0 位 = 关键帧][Annex-B 数据，关键帧前面带 SPS/PPS]
  * 时间戳是被控端自己的单调时钟（System.nanoTime），只用来让看的一端把声音和画面排在同一条时间线上。
  */
-class StreamClient(private val client: OkHttpClient, private val url: String, private val token: String) {
+class StreamClient(private val client: OkHttpClient, private val url: String, private val token: String) : LiveSink {
 
     @Volatile var subs = -1          // 现在几个人在看；-1 = 服务端还没说
         private set
@@ -33,6 +33,11 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
         private set
     @Volatile var dropped = 0        // 网络跟不上丢掉的帧
         private set
+
+    override val watchers get() = maxOf(0, subs)
+    override val isClosed get() = closed
+    override val sentFrames get() = sent
+    override val droppedFrames get() = dropped
 
     @Volatile private var needKey = true   // H.264：丢过帧，等关键帧
     @Volatile private var everWatched = false
@@ -74,7 +79,7 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
     }
 
     /** 发一帧。发送队列里积压太多（网络跟不上）就丢掉这一帧，保证对面看到的总是新画面。 */
-    fun send(frame: ByteArray): Boolean {
+    override fun send(frame: ByteArray): Boolean {
         val w = ws ?: return false
         if (closed) return false
         if (w.queueSize() > MAX_QUEUE) { dropped++; return false }
@@ -87,7 +92,7 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
      * 发一帧 H.264。普通帧要靠前面的帧才能解，不能随便丢：一旦丢了（积压超过 limit 字节、没人看），
      * 后面的普通帧都不发，等下一个关键帧。返回 false = 没发（该要一个关键帧了）。
      */
-    fun sendH264(msg: ByteArray, key: Boolean, limit: Long): Boolean {
+    override fun sendH264(msg: ByteArray, key: Boolean, limit: Long): Boolean {
         val w = ws ?: return false
         if (closed) return false
         if (subs <= 0) { needKey = true; return false }
@@ -101,7 +106,7 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
     }
 
     /** 发一包声音。声音不能随便丢（会咔哒响），积压到 1 MB（网络很差了）才丢。 */
-    fun sendAudio(msg: ByteArray): Boolean {
+    override fun sendAudio(msg: ByteArray): Boolean {
         val w = ws ?: return false
         if (closed) return false
         if (w.queueSize() > MAX_AUDIO_QUEUE) { dropped++; return false }
@@ -114,7 +119,7 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
         return System.currentTimeMillis() - zeroSince >= if (everWatched) leftWaitMs else startWaitMs
     }
 
-    fun close() {
+    override fun close() {
         closed = true
         runCatching { ws?.close(1000, "bye") }
     }

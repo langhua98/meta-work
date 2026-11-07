@@ -21,6 +21,7 @@ final class RemoteVideo: ObservableObject {
     @Published private(set) var bufferMs = 0   // 有声音时的缓冲
     @Published private(set) var serverH264 = false
     @Published private(set) var askedH264 = false
+    @Published private(set) var route = ""     // 经服务器 / Wi-Fi 直连
 
     private var target = ""
 
@@ -35,6 +36,9 @@ final class RemoteVideo: ObservableObject {
     private var display: Task<Void, Never>?
     private var decoder = LiveH264Decoder()
     private var bytes = (t: Date(), n: 0)
+    private var room = ""
+    private static let direct = "Wi-Fi 直连"
+    private static let viaServer = "经服务器"
 
     func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false,
                lens: String = "back", compat: Bool = false) {
@@ -46,7 +50,7 @@ final class RemoteVideo: ObservableObject {
 
         running = true; frame = nil; frames = 0; fps = 0; note = "连接直播通道…"
         withAudio = sound; pending = []; timeline = LiveTimeline(delay: 200); tip = ""
-        codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false
+        codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false; route = ""
         decoder = LiveH264Decoder(); bytes = (Date(), 0)
         self.target = dev
         if sound {
@@ -71,6 +75,7 @@ final class RemoteVideo: ObservableObject {
             var cmd = firstCmd
             // 每次随机一个房间名，放在指令里，别人猜不到
             let room = "遥控/\(dev)/视频/" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased()
+            self.room = room
             guard let ws = openSocket(base: s.cloudURL, token: s.cloudToken, room: room) else {
                 note = "云盘地址不对"; running = false; return
             }
@@ -89,6 +94,7 @@ final class RemoteVideo: ObservableObject {
                 running = false; return
             }
             if case .string(let t) = hello, t.contains("\"h264\":true") { serverH264 = true }
+            route = Self.viaServer
             askedH264 = serverH264 && !compat
             cmd["codec"] = askedH264 ? "h264" : "jpeg"
             cmd["transport"] = "ws"; cmd["room"] = room
@@ -96,7 +102,8 @@ final class RemoteVideo: ObservableObject {
                 note = "发起失败：\(error.localizedDescription)"; ws.cancel(); running = false; return
             }
             note = "等对方开始推流…"
-            // 对方出错（没相机权限、连不上直播通道）会回一条 ok:false 的回执
+            // 对方出错（没相机权限、连不上直播通道）会回一条 ok:false 的回执；
+            // 成功的回执里有 lan（对方在局域网里的地址）：同一个 Wi-Fi 就直接连过去，不绕服务器
             Task { [weak self] in
                 for _ in 0..<2 {
                     let msgs = (try? await relay.wait(RemoteBox.receipt(dev, id), seconds: 20)) ?? []
@@ -105,6 +112,8 @@ final class RemoteVideo: ObservableObject {
                         if (r["ok"] as? Bool) == false {
                             self.note = (r["text"] as? String) ?? "对方没开始推流"
                             self.stop()
+                        } else if let lan = r["lan"] as? [String], !lan.isEmpty {
+                            await self.tryDirect(lan)
                         }
                         return
                     }
@@ -133,10 +142,19 @@ final class RemoteVideo: ObservableObject {
     /// 收：第 1 字节是类型。1 = 画面（旧）[1][角度/90][JPEG]；3 = 画面带时间戳 [3][角度/90][时间 8 字节][JPEG]；
     /// 4 = H.264 [4][角度/90][时间 8 字节][标志][Annex-B]；2 = 声音 [2][格式][时间 8 字节][μ-law]（格式 1 = 16 kHz，2 = 8 kHz）。
     /// 每收到一帧画面马上回 ok（不等解码），服务端才接着发；声音不用回。
-    private func receiveLoop(_ ws: URLSessionWebSocketTask) async {
+    private func receiveLoop(_ first: URLSessionWebSocketTask) async {
+        var ws = first
         var seenPub = false
         while running {
-            guard let msg = try? await ws.receive() else { return }
+            let msg: URLSessionWebSocketTask.Message
+            do { msg = try await ws.receive() } catch {
+                guard running else { return }
+                // 换了连接（切到 Wi-Fi 直连了）：接着收新的
+                if let s = socket, s !== ws { ws = s; continue }
+                // 直连断了（离开了 Wi-Fi）：换回服务器
+                if route == Self.direct, let back = await backToServer() { ws = back; continue }
+                return
+            }
             let arrived = LiveClock.nowMs()
             switch msg {
             case .data(let d):
@@ -188,6 +206,46 @@ final class RemoteVideo: ObservableObject {
                 continue
             }
         }
+    }
+
+    /// 同一个 Wi-Fi：直接连对方手机（ws://局域网地址），连上了就把经服务器的那条关掉。
+    private func tryDirect(_ addrs: [String]) async {
+        for a in addrs {
+            guard var c = URLComponents(string: "ws://\(a)/stream") else { continue }
+            c.queryItems = [URLQueryItem(name: "room", value: room), URLQueryItem(name: "ack", value: "1"),
+                            URLQueryItem(name: "window", value: "8")]
+            guard let url = c.url else { continue }
+            let ws = URLSession.shared.webSocketTask(with: url)
+            ws.maximumMessageSize = 2 << 20
+            ws.resume()
+            guard running, case .string(let t)? = await firstMessage(ws, timeout: 2.5), t.contains("\"pub\":true") else {
+                ws.cancel(); continue
+            }
+            let old = socket
+            socket = ws
+            route = Self.direct
+            decoder = LiveH264Decoder()   // 直连从关键帧重新开始
+            old?.cancel(with: .goingAway, reason: nil)
+            return
+        }
+    }
+
+    /// 直连断了：用同一个房间重新连服务器（对方还连着服务器）。
+    private func backToServer() async -> URLSessionWebSocketTask? {
+        let s = Store.shared
+        guard let ws = openSocket(base: s.cloudURL, token: s.cloudToken, room: room),
+              await firstMessage(ws, timeout: 8) != nil, running else { return nil }
+        socket = ws
+        route = Self.viaServer
+        decoder = LiveH264Decoder()
+        return ws
+    }
+
+    /// 等第一条消息，超时返回 nil（超时会断开这条连接）。
+    private func firstMessage(_ ws: URLSessionWebSocketTask, timeout: Double) async -> URLSessionWebSocketTask.Message? {
+        let timer = Task { try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)); ws.cancel() }
+        defer { timer.cancel() }
+        return try? await ws.receive()
     }
 
     /// 网速：每秒算一次收到多少 kbps。
@@ -419,6 +477,7 @@ struct RemoteVideoView: View {
 
     private var stats: String {
         var parts = [String]()
+        if !video.route.isEmpty { parts.append(video.route) }
         if !video.codec.isEmpty { parts.append(video.codec) }
         parts.append("\(video.fps) 帧/秒")
         if video.kbps > 0 { parts.append("\(video.kbps) kbps") }

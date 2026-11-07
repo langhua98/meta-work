@@ -66,8 +66,9 @@ object Net {
     }
 
     /** 发一个请求，返回响应体。非 2xx 抛 HttpError。 */
+    /** throttleBps > 0：上传时限速（字节/秒），慢慢传，不占满老手机的上行。 */
     fun request(method: String, url: String, token: String, body: ByteArray? = null,
-                contentType: String? = null, readTimeoutMs: Int = 60_000): ByteArray {
+                contentType: String? = null, readTimeoutMs: Int = 60_000, throttleBps: Int = 0): ByteArray {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             if (conn is HttpsURLConnection) factory?.let { conn.sslSocketFactory = it }
@@ -81,14 +82,30 @@ object Net {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", contentType ?: "application/octet-stream")
                 conn.setFixedLengthStreamingMode(body.size)
-                conn.outputStream.use { it.write(body) }
+                conn.outputStream.use { out ->
+                    if (throttleBps <= 0) out.write(body)
+                    else {
+                        val chunk = 16 * 1024
+                        val start = System.currentTimeMillis()
+                        var off = 0
+                        while (off < body.size) {
+                            val n = minOf(chunk, body.size - off)
+                            out.write(body, off, n)
+                            off += n
+                            val due = start + off * 1000L / throttleBps
+                            val wait = due - System.currentTimeMillis()
+                            if (wait > 0) Thread.sleep(wait)
+                        }
+                    }
+                }
             }
             val code = conn.responseCode
             val stream: InputStream? = if (code in 200..299) conn.inputStream else conn.errorStream
             val data = stream?.use { readAll(it) } ?: ByteArray(0)
             if (code !in 200..299) {
                 val msg = runCatching { org.json.JSONObject(String(data, Charsets.UTF_8)) }.getOrNull()
-                    ?.let { it.optString("message").ifBlank { it.optString("error") } }.orEmpty()
+                    ?.let { j -> j.optString("message").ifBlank { j.optString("error") } +
+                        j.optString("hint").let { if (it.isBlank()) "" else "（$it）" } }.orEmpty()
                 throw HttpError(code, "云盘 $code" + if (msg.isBlank()) "" else "：$msg")
             }
             return data
