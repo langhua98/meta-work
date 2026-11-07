@@ -83,6 +83,9 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 - 认出来的写进提醒（「有动静：人×2」）和事件列表的 `labels`，截图和小图上框出来、写上名字。
 - `people: true` 时只在认出人时发提醒（别的动静照样录）；安装包没带 C++ 或者模型读不了，就照常提醒。
 - 没编 ncnn（找不到 `/opt/ncnn/armv7`）的安装包认不了东西，只有移动侦测，别的照常。
+  GitHub 的 workflow 会先编好 ncnn（缓存起来），编出来的安装包一定带 C++，不带就报错。
+- 认得对不对：`sh tests/detector/run.sh` 在电脑上用同一份 `fastestdet.cpp` 和模型认几张照片（宇航员、两个人、猫、咖啡杯），
+  BGR 和手机相机的 NV21 两条路都要认对，个数也要对（同一个人的全身框和半身框只算一个）。workflow 编安装包前也跑这个。
 
 ### 移动侦测（0.8）
 

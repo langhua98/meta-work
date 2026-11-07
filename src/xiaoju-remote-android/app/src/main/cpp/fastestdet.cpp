@@ -1,5 +1,5 @@
 // 照着 FastestDet 官方的 ncnn 例子（example/ncnn/FastestDet.cpp）写的：输入 BGR、0…1，
-// 输出 22×22 格，每格 [前景, x 偏移, y 偏移, 宽, 高, 80 类]，分数 = 类别^0.4 × 前景^0.6，再按类做 NMS。
+// 输出 22×22 格，每格 [前景, x 偏移, y 偏移, 宽, 高, 80 类]，分数 = 类别^0.4 × 前景^0.6，再按类去重（见 same()）。
 #include "fastestdet.h"
 
 #include <math.h>
@@ -15,13 +15,18 @@ const int kClasses = 80;
 float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 float tanhf2(float x) { return 2.0f / (1.0f + expf(-2 * x)) - 1; }
 
-float iou(const Det& a, const Det& b) {
+// 同一个东西的两个框：重叠多（IoU > 0.45），或者小的那个大部分（80%）在大的里面
+// （模型常给一个人同时出全身框和半身框，只按 IoU 去不掉，「人×2」就数错了）
+bool same(const Det& a, const Det& b) {
     float iw = std::min(a.x2, b.x2) - std::max(a.x1, b.x1);
     float ih = std::min(a.y2, b.y2) - std::max(a.y1, b.y1);
-    if (iw <= 0 || ih <= 0) return 0;
+    if (iw <= 0 || ih <= 0) return false;
     float inter = iw * ih;
-    float u = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter;
-    return u > 0 ? inter / u : 0;
+    float sa = (a.x2 - a.x1) * (a.y2 - a.y1), sb = (b.x2 - b.x1) * (b.y2 - b.y1);
+    float u = sa + sb - inter;
+    if (u > 0 && inter / u > 0.45f) return true;
+    float small = std::min(sa, sb);
+    return small > 0 && inter / small > 0.8f;
 }
 }  // namespace
 
@@ -92,7 +97,7 @@ std::vector<Det> FastestDet::run(ncnn::Mat& in, float thresh) {
     std::vector<Det> kept;
     for (const Det& b : boxes) {
         bool dup = false;
-        for (const Det& k : kept) if (k.cls == b.cls && iou(k, b) > 0.45f) { dup = true; break; }
+        for (const Det& k : kept) if (k.cls == b.cls && same(k, b)) { dup = true; break; }
         if (!dup) kept.push_back(b);
     }
     return kept;
