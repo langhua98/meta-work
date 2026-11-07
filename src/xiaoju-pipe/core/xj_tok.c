@@ -1,7 +1,10 @@
 // 小橘双机推理：命令行工具用的分词器（Qwen3.5 的 byte-level BPE）。
+// 和官方一样先做 NFC（e + U+0301 → é），特殊词（<|im_end|>、<think> 这类 control / user_defined 词）原样认出来；
 // 预分词按 tokenizer.json 里的正则手写；非 ASCII 字符只粗分「标点 / 空白 / 文字」，
-// 少数罕见字符切法可能和官方不同（不影响能不能跑）。iPhone 主机 App 用 llama.cpp 的分词器，结果完全一致。
+// 少数罕见字符切法可能和官方不同（不影响能不能跑）。
+// CI 里用 tests/tok_check.py 和官方 tokenizer.json 逐条对照（见 .github/workflows/xiaoju-pipe.yml）。
 #include "xj_tok.h"
+#include "xj_nfc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +17,9 @@ struct xj_tok {
     ent *merge; uint32_t mcap;       // "左 右" → 排名
     const char **id_str; uint32_t *id_len; int n_vocab;
     char *pool;
+    int32_t *special; int n_special;  // 特殊词 id，按长度从长到短
+    uint8_t *is_special;              // [n_vocab]
+    uint8_t special_first[256];       // 特殊词的首字节（快速跳过）
     int byte_cp[256];                // 字节 → GPT-2 的可见字符
     int cp_byte[512];                // 反过来（码点 < 512）
 };
@@ -83,12 +89,35 @@ xj_tok *xj_tok_new(const gguf_file *g, char *err, size_t errlen) {
         t->byte_cp[b] = vis ? b : 256 + n++;
     }
     for (int b = 0; b < 256; b++) t->cp_byte[t->byte_cp[b]] = b;
+
+    // 特殊词：token_type 是 3（control）或 4（user_defined）的；没有 token_type 就认 <|…|>
+    t->is_special = calloc(tk->arr_n, 1);
+    t->special = malloc(sizeof(int32_t) * (tk->arr_n ? tk->arr_n : 1));
+    const bool have_type = gguf_find_kv(g, "tokenizer.ggml.token_type") != NULL;
+    for (uint64_t i = 0; i < tk->arr_n; i++) {
+        uint32_t ty = 0, n = t->id_len[i];
+        const char *s = t->id_str[i];
+        bool sp;
+        if (have_type) sp = gguf_get_arr_u32(g, "tokenizer.ggml.token_type", i, &ty) && (ty == 3 || ty == 4);
+        else sp = n > 4 && s[0] == '<' && s[1] == '|' && s[n - 2] == '|' && s[n - 1] == '>';
+        if (!sp || n == 0) continue;
+        t->is_special[i] = 1;
+        t->special[t->n_special++] = (int32_t)i;
+        t->special_first[(uint8_t)s[0]] = 1;
+    }
+    // 长的先匹配（插入排序，特殊词只有几十个）
+    for (int i = 1; i < t->n_special; i++) {
+        int32_t v = t->special[i]; int j = i;
+        while (j > 0 && t->id_len[t->special[j - 1]] < t->id_len[v]) { t->special[j] = t->special[j - 1]; j--; }
+        t->special[j] = v;
+    }
     return t;
 }
 
 void xj_tok_free(xj_tok *t) {
     if (!t) return;
-    free(t->vocab); free(t->merge); free(t->id_str); free(t->id_len); free(t);
+    free(t->vocab); free(t->merge); free(t->id_str); free(t->id_len);
+    free(t->special); free(t->is_special); free(t);
 }
 
 int32_t xj_tok_find(const xj_tok *t, const char *s) { return get(t->vocab, t->vcap, s, (uint32_t)strlen(s)); }
@@ -216,24 +245,64 @@ static int encode_plain(const xj_tok *t, const char *s, int len, int32_t *out, i
     return nout;
 }
 
-int xj_tok_encode(const xj_tok *t, const char *text, int32_t *out, int max) {
-    // 先认出 <|...|> 这样的特殊词，其余按普通文字切
-    int n = 0, len = (int)strlen(text), start = 0;
+// ---- NFC（只做两两组合，够分词用）----
+static int nfc_pair(int a, int b) {
+    if (a >= 0x1100 && a <= 0x1112 && b >= 0x1161 && b <= 0x1175)  // 韩文 L + V
+        return 0xAC00 + ((a - 0x1100) * 21 + (b - 0x1161)) * 28;
+    if (a >= 0xAC00 && a <= 0xD7A3 && (a - 0xAC00) % 28 == 0 && b >= 0x11A8 && b <= 0x11C2)  // LV + T
+        return a + (b - 0x11A7);
+    int lo = 0, hi = (int)(sizeof xj_nfc_pairs / sizeof xj_nfc_pairs[0]) - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        const uint32_t *p = xj_nfc_pairs[mid];
+        if (p[0] == (uint32_t)a && p[1] == (uint32_t)b) return (int)p[2];
+        if (p[0] < (uint32_t)a || (p[0] == (uint32_t)a && p[1] < (uint32_t)b)) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+// 把 s 做 NFC 组合写进 out（out 至少 len + 1 字节；组合只会让 UTF-8 变短或不变）
+static int nfc(const char *s, int len, char *out) {
+    int o = 0, last = -1, last_cp = 0;  // last：上一个字在 out 里的起点
+    for (int i = 0; i < len;) {
+        int cp, l = utf8_dec(s + i, len - i, &cp);
+        int c = last >= 0 ? nfc_pair(last_cp, cp) : -1;
+        char tmp[4];
+        if (c >= 0 && utf8_enc(c, tmp) <= o - last + l) {
+            o = last + utf8_enc(c, out + last);
+            last_cp = c;
+        } else {
+            last = o;
+            last_cp = cp;
+            memcpy(out + o, s + i, l);  // 原样拷字节（不合法的 UTF-8 也保留）
+            o += l;
+        }
+        i += l;
+    }
+    out[o] = 0;
+    return o;
+}
+
+int xj_tok_encode(const xj_tok *t, const char *raw, int32_t *out, int max) {
+    int rl = (int)strlen(raw);
+    char *text = malloc(rl + 1);
+    int len = nfc(raw, rl, text);
+    // 先认出特殊词（长的优先），其余按普通文字切
+    int n = 0, start = 0;
     for (int i = 0; i < len; i++) {
-        if (text[i] == '<' && i + 1 < len && text[i + 1] == '|') {
-            const char *e = strstr(text + i + 2, "|>");
-            if (e) {
-                int sl = (int)(e + 2 - (text + i));
-                int32_t id = get(t->vocab, t->vcap, text + i, (uint32_t)sl);
-                if (id >= 0) {
-                    n += encode_plain(t, text + start, i - start, out + n, max - n);
-                    if (n < max) out[n++] = id;
-                    i += sl - 1; start = i + 1;
-                }
-            }
+        if (!t->special_first[(uint8_t)text[i]]) continue;
+        for (int k = 0; k < t->n_special; k++) {
+            int32_t id = t->special[k];
+            uint32_t sl = t->id_len[id];
+            if (sl > (uint32_t)(len - i) || memcmp(text + i, t->id_str[id], sl)) continue;
+            n += encode_plain(t, text + start, i - start, out + n, max - n);
+            if (n < max) out[n++] = id;
+            i += (int)sl - 1; start = i + 1;
+            break;
         }
     }
     n += encode_plain(t, text + start, len - start, out + n, max - n);
+    free(text);
     return n;
 }
 
@@ -241,7 +310,7 @@ int xj_tok_piece(const xj_tok *t, int32_t id, char *out, int max) {
     if (id < 0 || id >= t->n_vocab) return 0;
     const char *s = t->id_str[id];
     int len = (int)t->id_len[id], n = 0;
-    if (len > 2 && s[0] == '<' && s[1] == '|') {  // 特殊词原样输出
+    if (t->is_special[id]) {  // 特殊词原样输出
         if (len > max) len = max;
         memcpy(out, s, len); return len;
     }

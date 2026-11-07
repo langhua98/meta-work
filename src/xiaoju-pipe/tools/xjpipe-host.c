@@ -1,6 +1,7 @@
 // 主机命令行版：本机算 [0,s1) 和 [s2,L) + 输出头，从机算 [s1,s2)。
-//   xjpipe-host 模型.gguf "问题" --worker 192.168.1.23 --split 12:24 [--pin 0] [--n 64] [--batch 8] [--cpu]
+//   xjpipe-host 模型.gguf "问题" --worker 192.168.1.23 --split 12:24 [--pin 0] [--n 64] [--batch 8] [--retry 5] [--cpu]
 // 不给 --worker 就整个模型在本机跑（对照用）；不给 --split 就用从机准备好的那几层。
+// 从机断了会自动重连、重放之前的 token 再接着算，最多 --retry 次（0 = 不重连）。
 #include "../core/xj_net.h"
 #include "../core/xj_tok.h"
 
@@ -14,6 +15,7 @@ static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
 static int argmax(const float *x, int n) { int b = 0; for (int i = 1; i < n; i++) if (x[i] > x[b]) b = i; return b; }
 
 static bool use_cpu = false;
+static void status(void *ctx, const char *msg) { fprintf(stderr, "\n[主机] %s\n", msg); }
 static xj_stage *local(const xj_model *m, int l0, int l1, int n_ctx, int batch, bool head, char *err, size_t el) {
 #ifdef __APPLE__
     if (!use_cpu) return xj_metal_stage_new(m, l0, l1, n_ctx, batch, head, err, el);
@@ -23,11 +25,11 @@ static xj_stage *local(const xj_model *m, int l0, int l1, int n_ctx, int batch, 
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "用法: xjpipe-host 模型.gguf \"问题\" [--worker IP] [--port %d] [--split 12:24] [--pin 0] [--n 64] [--batch 8] [--cpu]\n", XJ_DEFAULT_PORT);
+        fprintf(stderr, "用法: xjpipe-host 模型.gguf \"问题\" [--worker IP] [--port %d] [--split 12:24] [--pin 0] [--n 64] [--batch 8] [--retry 5] [--cpu]\n", XJ_DEFAULT_PORT);
         return 1;
     }
     const char *worker = NULL;
-    int port = XJ_DEFAULT_PORT, s1 = -1, s2 = -1, n_gen = 64, batch = 8, n_ctx = 4096;
+    int port = XJ_DEFAULT_PORT, s1 = -1, s2 = -1, n_gen = 64, batch = 8, n_ctx = 4096, retry = 5;
     uint32_t pin = 0;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--worker") && i + 1 < argc) worker = argv[++i];
@@ -37,6 +39,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--n") && i + 1 < argc) n_gen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc) batch = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) n_ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--retry") && i + 1 < argc) retry = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cpu")) use_cpu = true;
     }
     signal(SIGPIPE, SIG_IGN);
@@ -72,6 +75,8 @@ int main(int argc, char **argv) {
 
     xj_pipeline p;
     xj_pipeline_init(&p, m, a, r, b);
+    p.reconnect_tries = retry;
+    p.on_status = status;
     char prompt[8192];
     snprintf(prompt, sizeof prompt, "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", argv[2]);
     int32_t toks[4096];
@@ -99,6 +104,7 @@ int main(int argc, char **argv) {
     if (produced)
         fprintf(stderr, "生成 %d 个 token，%.2f 字/秒；每个 token：本机 %.1f ms，从机计算 %.1f ms，等从机（含网络）%.1f ms\n",
                 produced, produced / (t2 - t1), p.t_local / produced, p.t_remote / produced, p.t_net / produced);
+    if (p.n_reconnects) fprintf(stderr, "中途重连了 %d 次\n", p.n_reconnects);
     if (r) r->destroy(r);
     a->destroy(a);
     if (b) b->destroy(b);

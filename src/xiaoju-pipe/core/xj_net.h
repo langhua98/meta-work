@@ -83,6 +83,9 @@ int  xj_remote_send(xj_stage *s, const float *x, int T, int want, char *err, siz
 int  xj_remote_recv(xj_stage *s, float *x, int *T_out, uint32_t *compute_us, char *err, size_t errlen);
 // 往返延迟（毫秒），失败返回负数
 double xj_remote_ping(xj_stage *s);
+// 断线后重新连上同一台从机、按原来的层范围再握手一次。成功后从机那边是空的（n_past = 0），
+// 调用方要把之前的 token 重新喂一遍（xj_pipeline_eval 会自动做）。
+int  xj_remote_reconnect(xj_stage *s, char *err, size_t errlen);
 bool xj_stage_is_remote(const xj_stage *s);
 
 // 主机上的一整条流水线：本地 [0,s1) → 从机 [s1,s2) → 本地 [s2,L) + 输出头
@@ -94,10 +97,22 @@ typedef struct {
     int max_batch;
     // 统计（毫秒）
     double t_local, t_remote, t_net;
+
+    // 断线重连：Wi‑Fi 抖一下、从机 App 被切到后台再切回来，主机自动重连，
+    // 把这次对话已经喂过的 token 重新过一遍从机（重建它的 KV 缓存和递推状态），然后接着算。
+    int32_t *hist; int n_hist, hist_cap;  // 已经喂进去的 token
+    float *scratch_logits;                // 重放时用的临时 logits
+    int reconnect_tries;                  // 每次出错最多重连几次（0 = 不重连，直接报错）
+    int n_reconnects;                     // 总共重连成功了几次（给界面显示）
+    bool remote_failed;                   // 内部用：这次失败是不是从机 / 网络的问题
+    void (*on_status)(void *ctx, const char *msg);  // 「从机断了，正在重连……」这类提示
+    void *status_ctx;
 } xj_pipeline;
 
+// 默认 reconnect_tries = 5；不想自动重连就在 init 之后改成 0
 int  xj_pipeline_init(xj_pipeline *p, const xj_model *m, xj_stage *a, xj_stage *r, xj_stage *b);
-// 喂一串 token（预填充或一个新词），最后一个 token 的 logits 写到 logits
+// 喂一串 token（预填充或一个新词），最后一个 token 的 logits 写到 logits。
+// 从机断了会自动重连并重放之前的 token（见上面），重连不上才返回 -1。
 int  xj_pipeline_eval(xj_pipeline *p, const int32_t *tokens, int n, float *logits, char *err, size_t errlen);
 int  xj_pipeline_reset(xj_pipeline *p, char *err, size_t errlen);
 void xj_pipeline_free(xj_pipeline *p);

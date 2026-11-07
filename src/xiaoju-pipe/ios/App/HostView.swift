@@ -59,6 +59,7 @@ final class HostController: ObservableObject {
     @Published var busy = false
     @Published var chat: [ChatLine] = []
     @Published var stats = ""
+    @Published var status = ""          // 从机断线重连时的提示
     @Published var haveModel = false
 
     let downloader = Downloader()
@@ -109,6 +110,7 @@ final class HostController: ObservableObject {
                 self.connecting = false
                 if let h {
                     self.handle = h
+                    self.attachStatus(h)
                     self.connected = true
                     self.info = i
                     self.chat = []
@@ -117,6 +119,18 @@ final class HostController: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 从机断了核心会自己重连、重放之前的对话，这里只把进度显示出来
+    private func attachStatus(_ h: UnsafeMutableRawPointer) {
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        let fn: xjg_log_fn = { ctx, msg in
+            guard let ctx, let msg else { return }
+            let c = Unmanaged<HostController>.fromOpaque(ctx).takeUnretainedValue()
+            let s = String(cString: msg)
+            DispatchQueue.main.async { c.status = s }
+        }
+        xjg_host_set_status(h, fn, me)
     }
 
     func disconnect() {
@@ -143,6 +157,8 @@ final class HostController: ObservableObject {
         guard let h = handle, !busy, !text.isEmpty else { return }
         busy = true
         stopFlag = false
+        status = ""
+        error = ""
         chat.append(ChatLine(user: true, text: text))
         chat.append(ChatLine(user: false, text: ""))
         let temp = Float(temperature)
@@ -163,6 +179,7 @@ final class HostController: ObservableObject {
             let e = cString(err)
             DispatchQueue.main.async {
                 self.busy = false
+                self.status = ""
                 if rc != 0 {
                     self.error = e
                     return
@@ -173,6 +190,7 @@ final class HostController: ObservableObject {
                     s += String(format: "\n每个字：本机 %.0f ms，从机 %.0f ms，等从机（含 Wi‑Fi）%.0f ms", st.local_ms, st.remote_ms, st.wait_ms)
                 }
                 s += "\n上下文 \(st.n_past)/\(st.n_ctx)"
+                if st.reconnects > 0 { s += " · 从机断线后自动恢复过 \(st.reconnects) 次" }
                 self.stats = s
             }
         }
@@ -271,6 +289,7 @@ struct HostView: View {
             if !c.stats.isEmpty {
                 Text(c.stats).font(.caption2).foregroundColor(.secondary).padding(.horizontal, 8).frame(maxWidth: .infinity, alignment: .leading)
             }
+            if !c.status.isEmpty { Text(c.status).font(.footnote).foregroundColor(.orange).padding(.horizontal, 8) }
             if !c.error.isEmpty { Text(c.error).font(.footnote).foregroundColor(.red).padding(.horizontal, 8) }
             HStack {
                 TextField("说点什么", text: $input).textFieldStyle(.roundedBorder).disabled(c.busy)

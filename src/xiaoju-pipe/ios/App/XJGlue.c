@@ -198,6 +198,12 @@ void *xjg_host_new(const char *path, const char *worker_host, int port, uint32_t
     return h;
 }
 
+void xjg_host_set_status(void *p, xjg_log_fn fn, void *ctx) {
+    host_box *h = p;
+    h->p.on_status = fn;
+    h->p.status_ctx = ctx;
+}
+
 double xjg_host_ping(void *p) {
     host_box *h = p;
     return h->r ? xj_remote_ping(h->r) : -1;
@@ -306,6 +312,7 @@ int xjg_host_chat(void *p, const char *user, float temperature, int max_tokens,
     }
     st->n_past = h->p.a->n_past;
     st->n_ctx = h->n_ctx;
+    st->reconnects = h->p.n_reconnects;
     return 0;
 }
 

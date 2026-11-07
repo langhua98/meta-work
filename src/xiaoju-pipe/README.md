@@ -22,6 +22,7 @@ iPhone 15 Pro Max 当**主机**，iPhone 7 Plus 当**从机**，在同一个 Wi�
 - **从机只下载自己那几层**：先用 HTTP Range 拿文件头（约 11 MB），算出这几层在文件里的字节范围，只下载这部分，写成和原文件一样大的稀疏文件（没下的地方是空洞，不占空间）。9B 的 8 层只要下约 1 GB，不用下 5.7 GB。
 - **从机只映射自己那几层**：整个 5.7 GB 映射进 3 GB 的 7 Plus 可能超出 App 的地址空间，所以只 mmap 用到的那一段（`gguf_open_header` + `gguf_map_range`）。
 - **权重不拷贝**：mmap 出来的内存直接用 `newBufferWithBytesNoCopy` 交给 GPU（和 llama.cpp 一样）。
+- **断线自动恢复**：Wi‑Fi 抖一下、从机 App 被切到后台再切回来，聊天不用重开。主机记着这次对话喂过的所有 token，发现从机断了（连接断开、1 分钟没回、从机报错）就隔 1/2/3 秒重连同一台从机，按原来的层范围再握手，把之前的 token 重新过一遍（重建从机的 KV 缓存和递推状态，主机自己的两段也一起清掉重算），然后接着算刚才那个字，最多重试 5 次。从机这边：切回前台自动重新待命；有新连接进来时直接丢掉挂死的旧连接（Wi‑Fi 掉线时旧连接常常收不到断开通知）。重放要花一次预填充的时间，对话越长越久。
 
 ### 为什么不用 llama.cpp
 
@@ -89,7 +90,17 @@ make && make test
 ./build/xjpipe-host 模型.gguf "用一句话介绍一下北京。" --worker 127.0.0.1 --pin 1234
 # Mac 上：Metal 内核和 CPU 参考实现对照
 ./build/xjpipe-check 模型.gguf --layers 0:8
+# 不用下载模型：随机权重的小 Qwen3.5（8 层，1 MB）跑主机 + 从机、断线重连（要 python3 + numpy）
+make e2e
+# 分词和官方 tokenizer.json 对照（要 pip install tokenizers）
+python3 tests/tok_check.py 模型.gguf tokenizer.json
 ```
+
+`make e2e`（`tests/e2e.sh`）测四件事，CI 的 Linux 上每次都跑：
+1. 单机 vs 主机 + 从机两个进程走 TCP，贪心解码一字不差；
+2. 生成到一半从机进程被杀（`xjpipe-worker --die-after 12`），马上再起一个：主机自动重连、重放，输出仍然和单机一字不差；
+3. 从机一直起不来：主机按 `--retry` 重试完就报错退出，不会卡死；
+4. 一个连上来就不说话的「旧主机」占着从机：新主机照样能连上，从机丢掉旧连接。
 
 已经验证过的（Linux，CPU 参考实现，Qwen3.5-4B Q4_K_M）：
 - 单机生成通顺正确：「北京，中国的首都，是一座拥有三千多年建城史和八百多年建都史的历史文化名城……」；
@@ -124,13 +135,14 @@ core/   gguf.c（GGUF 解析、部分映射）  xj_model.c（Qwen3.5 结构）  
         xj_net.c（协议、从机服务、主机流水线）  xj_tok.c（分词）  xj_quant.h（量化格式解码）
 metal/  xj_kernels.metal（A10 兼容内核）  xj_metal.m（GPU 缓冲、编码每一层）  xj_shader_types.h
 ios/    project.yml  App/（SwiftUI 界面、分块下载、Bonjour、XJGlue.c 胶水）
-tools/  xjpipe-run / xjpipe-host / xjpipe-worker / xjpipe-check / gguf-slice / gguf-dump
-tests/  unit.c
+tools/  xjpipe-run / xjpipe-host / xjpipe-worker / xjpipe-check / xjpipe-tok / gguf-slice / gguf-dump
+tests/  unit.c  e2e.sh（端到端）  make_tiny_model.py（随机权重小模型）  tok_check.py + tok_corpus.jsonl（分词对照）
 ```
 
 ## 已知限制
 
-- 分词器是自己写的 byte-level BPE，按官方 tokenizer.json 的正则规则实现，但还没和官方分词器逐条对照过；少数罕见符号可能切得不同（不影响能不能跑）。
+- 分词器是自己写的 byte-level BPE，按官方 tokenizer.json 的正则规则实现。CI 用 `tests/tok_corpus.jsonl`（中英日韩、代码、数字、全角、emoji、生僻字等）和官方分词器逐条对照；语料外的罕见符号仍可能切得不同（不影响能不能跑）。
 - 只支持稠密的 Qwen3.5（0.8B / 2B / 4B / 9B / 27B）。MoE 版和多模态输入不支持。
-- 只能一问一答顺序聊，一次服务一台主机。改协议要两边 App 一起更新（握手会核对版本）。
+- 只能一问一答顺序聊，一次服务一台主机（新主机连上来会顶掉旧的）。改协议要两边 App 一起更新（握手会核对版本）。
+- 主机 App 自己被切到后台时 iOS 也不让它用 GPU，这一句会报错，回来后点「新对话」重新开始。
 - 主机的 9B 要占约 4.6 GB。如果 iOS 不给这么多内存，就让从机多分几层，或者先用 4B 试通链路。

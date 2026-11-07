@@ -1,7 +1,8 @@
 name: Build 小橘双机 app
 
 # 小橘双机（src/xiaoju-pipe/）：两台 iPhone 合跑 Qwen3.5。
-#   test：Mac 上编译命令行工具、跑单元测试，再用 Qwen3.5-0.8B 对照 Metal 内核和 CPU 参考实现的结果。
+#   e2e：Linux 上用随机权重的小模型跑主机 + 从机（拆两段、从机中途被杀后自动重连、旧连接挂死），不用下载模型。
+#   test：Mac 上编译命令行工具、跑单元测试，再用 Qwen3.5-0.8B 对照 Metal 内核和 CPU 参考实现的结果、对照官方分词器。
 #   ios：XcodeGen 生成工程，编译没签名的 .ipa（最低 iOS 15，7 Plus 能装），发布到 Release「xiaoju-pipe」。
 on:
   workflow_dispatch:
@@ -22,6 +23,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/xiaoju-pipe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and unit tests
+        run: make -j4 && make test
+      - name: Host + worker end to end (tiny random model, reconnect)
+        run: |
+          python3 -c "import numpy" 2>/dev/null || pip3 install numpy
+          OMP_NUM_THREADS=1 make e2e
+
   test:
     runs-on: ${{ inputs.runner || 'macos-26' }}
     defaults:
@@ -55,6 +70,15 @@ jobs:
           system_profiler SPDisplaysDataType | head -20 || true
           ./build/xjpipe-check "$f" --layers 0:8
           ./build/xjpipe-check "$f" --layers 16:24
+      - name: Tokenizer vs official tokenizer.json
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q tokenizers
+          for repo in Qwen/Qwen3.5-0.8B unsloth/Qwen3.5-0.8B; do
+            curl -fsL --retry 3 -o /tmp/tokenizer.json "https://huggingface.co/$repo/resolve/main/tokenizer.json" && break
+          done
+          ls -l /tmp/tokenizer.json
+          /tmp/venv/bin/python tests/tok_check.py ~/models/Qwen3.5-0.8B-Q4_K_M.gguf /tmp/tokenizer.json
       - name: Two processes over TCP (Metal worker on layers 8-15)
         run: |
           f=~/models/Qwen3.5-0.8B-Q4_K_M.gguf

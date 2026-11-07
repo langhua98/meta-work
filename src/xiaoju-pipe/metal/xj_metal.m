@@ -105,6 +105,9 @@ static bool map_weights(xj_stage *s, metal_impl *im, XJMetal *o, char *err, size
         while (j < n) {
             uint64_t e = (list[j]->file_off + list[j]->nbytes + page - 1) / page * page;
             if (e - start > maxlen && j > i) break;
+            // 中间隔着一大段别人的权重（比如主机后半段和输出头之间夹着从机那几层）就另起一个缓冲，
+            // 不把用不到的那 1 GB 也交给 GPU
+            if (j > i && list[j]->file_off > end + (8u << 20)) break;
             if (e - start > maxlen) { snprintf(err, errlen, "一个张量就超过 GPU 缓冲上限（%llu MB）", maxlen >> 20); free(list); return false; }
             if (e > end) end = e;
             j++;
