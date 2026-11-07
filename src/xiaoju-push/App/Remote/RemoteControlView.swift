@@ -46,11 +46,29 @@ struct RemoteControlView: View {
                 btn("模型测速（安卓 0.10+，约 1 分钟）", "speedometer") { await control.send("bench", to: target, wait: 180) }
             }
             .listRowBackground(Theme.card)
-            .disabled(control.sending || target.isEmpty)
+            .disabled(target.isEmpty)
 
-            if control.sending {
-                Section { Label("发出去了，等对方回…", systemImage: "hourglass").foregroundStyle(Theme.muted) }
-                    .listRowBackground(Theme.card)
+            if !control.pending.isEmpty {
+                Section("等回执") {
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(control.pending) { p in
+                                HStack {
+                                    ProgressView()
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(control.label(p.action)).foregroundStyle(Theme.text)
+                                        Text("\(p.received ? "对方收到了，正在做" : "已发出，等对方收到") · \(Int(ctx.date.timeIntervalSince(p.started))) 秒")
+                                            .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                                    }
+                                    Spacer()
+                                    Button("取消") { Haptics.tap(); Task { await control.cancel(p) } }
+                                        .buttonStyle(.borderless).foregroundStyle(Theme.redText)
+                                }
+                            }
+                        }
+                    }
+                }
+                .listRowBackground(Theme.card)
             }
 
             if !control.replies.isEmpty {

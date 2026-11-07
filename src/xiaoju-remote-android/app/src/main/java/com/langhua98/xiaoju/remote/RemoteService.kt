@@ -38,6 +38,12 @@ class RemoteService : Service() {
     // 相机（实时画面 + 移动侦测）在 CameraHub 自己的线程里跑，指令循环照常收指令
     @Volatile private var hub: CameraHub? = null
 
+    // 指令并发：收件循环只管把指令分出去，马上接着收下一条。
+    //  - 快的（查信息、开关手电、查侦测状态…）走单独一条线，不用等慢的；
+    //  - 慢的（拍照、录音、定位、测速、开直播…）几个一起跑；
+    //  - 两条指令要用同一个相机 / 麦克风时，后来的马上回「正忙」，不默默排队。
+    private val lanes = CommandLanes()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -69,6 +75,7 @@ class RemoteService : Service() {
 
     override fun onDestroy() {
         running = false; Bus.running = false
+        lanes.shutdown()
         runCatching { wake?.release() }
         super.onDestroy()
     }
@@ -93,7 +100,7 @@ class RemoteService : Service() {
                 try {
                     val msgs = cloud.relayWait(RemoteBox.inbox(device))
                     lastError = ""
-                    for (cmd in msgs) execute(cloud, cmd, device, viaRelay = true, filesDir = filesDir)
+                    for (cmd in msgs) dispatch(cloud, cmd, device, viaRelay = true, filesDir = filesDir)
                 } catch (e: Exception) {
                     if (!running) break
                     if (Cloud.relayMissing(e)) {
@@ -119,9 +126,22 @@ class RemoteService : Service() {
                     Bus.push("收到一条看不懂的指令，跳过"); continue
                 }
                 if (!cmd.has("id")) cmd.put("id", it.name.removeSuffix(".json"))
-                execute(cloud, cmd, device, viaRelay = false, filesDir = filesDir)
+                dispatch(cloud, cmd, device, viaRelay = false, filesDir = filesDir)
             }
             if (!useRelay) sleep(2000)
+        }
+    }
+
+    /** 把一条指令交给快线或慢线去做（不在收件循环里做，免得一条慢的挡住后面的）。 */
+    private fun dispatch(cloud: Cloud, cmd: JSONObject, device: String, viaRelay: Boolean, filesDir: String) {
+        if (cmd.optString("id").isBlank()) cmd.put("id", java.util.UUID.randomUUID().toString())
+        val id = cmd.optString("id")
+        val action = cmd.optString("do")
+        // 相机开着时手电要等相机设好（几百毫秒），走慢线
+        val fast = action in QUICK && !(action == "torch" && hub?.cameraOn == true)
+        lanes.submit(id, fast) {
+            try { execute(cloud, cmd, device, viaRelay, filesDir) }
+            catch (e: Throwable) { Bus.push("指令 $action 出错：${e.message ?: e.javaClass.simpleName}") }
         }
     }
 
@@ -131,12 +151,13 @@ class RemoteService : Service() {
         val id = cmd.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
         val outbox = "/小橘推送/遥控/$device/回执"
 
-        fun reply(r: JSONObject) {
+        fun replyTo(to: String, r: JSONObject) {
             try {
-                if (viaRelay) cloud.relaySend(RemoteBox.receipt(device, id), r)
-                else cloud.upload("$outbox/$id.json", r.toString().toByteArray(Charsets.UTF_8), "application/json; charset=utf-8")
+                if (viaRelay) cloud.relaySend(RemoteBox.receipt(device, to), r)
+                else cloud.upload("$outbox/$to.json", r.toString().toByteArray(Charsets.UTF_8), "application/json; charset=utf-8")
             } catch (e: Exception) { Bus.push("传回执失败：${e.message}") }
         }
+        fun reply(r: JSONObject) = replyTo(id, r)
 
         if (p.pair.isNotBlank() && cmd.optString("pair") != p.pair) {
             Bus.push("有一条指令口令不对，拒绝")
@@ -146,19 +167,62 @@ class RemoteService : Service() {
 
         val action = cmd.optString("do")
         Bus.push("执行：$action")
-        notifyText("正在被远程使用：${label(action)}")
+        val h = hub
 
+        if (action == "cancel") {
+            // 取消一条还在做的慢指令（测速、录音…）：打断它，替它回一句「已取消」
+            val target = cmd.optString("target")
+            val ok = lanes.cancel(target)
+            if (ok) replyTo(target, JSONObject().put("id", target).put("ok", false).put("text", "已取消"))
+            Bus.push(if (ok) "取消了 $target" else "要取消的 $target 已经做完了")
+            reply(JSONObject().put("id", id).put("do", action).put("ok", ok)
+                .put("text", if (ok) "已取消" else "那条已经做完了，没东西可取消"))
+            return
+        }
+
+        // 同一个相机 / 麦克风只能一条指令用：在用就马上回「正忙」
+        val res = when (action) {
+            "photo", "torch" -> if (h?.cameraOn == true) null else "camera"
+            "video" -> if (cmd.optString("transport") == "ws") null else "camera"
+            "audio" -> "mic"
+            "bench" -> "bench"
+            else -> null
+        }
+        if (res != null) {
+            val other = lanes.take(res, label(action))
+            if (other != null) {
+                val what = when (res) { "camera" -> "相机"; "mic" -> "麦克风"; else -> "测速" }
+                reply(JSONObject().put("id", id).put("do", action).put("ok", false).put("busy", true)
+                    .put("text", "$what 正在忙（正在$other），等它做完再试"))
+                return
+            }
+        }
+        try {
+            // 慢的指令先回一句「收到了」（看的一端带了 ack 才回，老版本只认第一条回执）
+            if (cmd.optBoolean("ack") && action !in QUICK) {
+                reply(JSONObject().put("id", id).put("do", action).put("ok", true).put("pending", true)
+                    .put("text", "收到了，正在${label(action)}…"))
+            }
+            notifyText("正在被远程使用：${label(action)}")
+            run(cloud, cmd, action, id, device, viaRelay, filesDir, ::reply)
+        } finally {
+            if (res != null) lanes.release(res)
+        }
+    }
+
+    private fun run(cloud: Cloud, cmd: JSONObject, action: String, id: String, device: String, viaRelay: Boolean,
+                    filesDir: String, reply: (JSONObject) -> Unit) {
         val h = hub
         if (action == "video") {
-            if (cmd.optString("transport") == "ws") startLive(cmd, id, ::reply)
+            if (cmd.optString("transport") == "ws") startLive(cmd, id, reply)
             else if (h?.cameraOn == true) {
                 reply(JSONObject().put("id", id).put("ok", false).put("text", "相机正在用（移动侦测 / 实时画面），旧方式看不了，更新小橘推送"))
                 restoreText()
-            } else streamVideo(cloud, cmd, device, viaRelay, id, ::reply)
+            } else streamVideo(cloud, cmd, device, viaRelay, id, reply)
             return
         }
         if (action == "video_set" || (action == "torch" && h?.cameraOn == true)) {
-            adjustLive(cmd, action, id, ::reply)
+            adjustLive(cmd, action, id, reply)
             return
         }
         if (action == "bench") {
@@ -170,7 +234,7 @@ class RemoteService : Service() {
             return
         }
         if (action in setOf("monitor", "monitor_status", "events", "event_get", "event_delete")) {
-            monitorCommand(cloud, cmd, action, id, viaRelay, ::reply)
+            monitorCommand(cloud, cmd, action, id, viaRelay, reply)
             return
         }
         if (action == "audio" && h?.micOn == true) {
@@ -256,7 +320,9 @@ class RemoteService : Service() {
         val c = if (action == "torch") JSONObject().put("torch", cmd.optBoolean("on", true)) else cmd
         s.codecNote = ""
         val changed = h.adjust(c)
-        try { Thread.sleep(1200) } catch (e: InterruptedException) { }   // 等相机设好（换镜头大约 1 秒）
+        // 等相机设好：换镜头 / 清晰度 / 编码要重开相机（大约 1 秒），手电、亮度、变焦一下就好
+        val reopen = c.has("lens") || c.has("width") || c.has("codec")
+        try { Thread.sleep(if (reopen) 1200 else 300) } catch (e: InterruptedException) { }
         val notes = listOf(s.unsupported, s.codecNote).filter { it.isNotEmpty() }
         val text = (if (changed.isEmpty()) "没有要改的" else "已调整：" + changed.joinToString("、")) +
             (if (notes.isEmpty()) "" else "（${notes.joinToString("；")}）")
@@ -365,7 +431,7 @@ class RemoteService : Service() {
 
     private fun label(a: String) = mapOf("photo" to "拍照", "audio" to "录音", "location" to "定位",
         "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面",
-        "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像", "bench" to "模型测速")[a] ?: a
+        "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像", "bench" to "模型测速", "cancel" to "取消")[a] ?: a
 
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }
@@ -400,6 +466,8 @@ class RemoteService : Service() {
 
     companion object {
         const val NOTIF_ID = 42
+        /** 一下就做完的指令：走快线，不等慢的 */
+        val QUICK = setOf("info", "torch", "vibrate", "monitor", "monitor_status", "events", "event_delete", "cancel")
         /** 一次直播最长多久（服务端也会在 4 小时断开） */
         const val LIVE_MAX_MS = 4L * 60 * 60 * 1000
         const val ACTION_STOP = "stop"

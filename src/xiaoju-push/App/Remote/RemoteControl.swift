@@ -1,14 +1,28 @@
 import Foundation
 import UIKit
 
-// 控制端：给另一台设备发一条指令（先走即时信箱，服务端没有时写云盘收件箱），等它的回执（和照片）。
+// 控制端：给另一台设备发指令（先走即时信箱，服务端没有时写云盘收件箱），等它的回执（和照片）。
 // 和被控端、安卓版、scripts/遥控/遥控.py 共用同一套云盘信箱。
+// 可以一条没回就接着发下一条：每条各等各的。安卓 0.11 收到慢指令会先回一句「收到了」（pending），
+// 这边就知道对方收到了、在做，接着等正式的回执；做太久可以取消。
 @MainActor
 final class RemoteControl: ObservableObject {
     static let shared = RemoteControl()
 
-    @Published private(set) var sending = false
+    @Published private(set) var pending: [PendingCommand] = []
     @Published private(set) var replies: [RemoteReply] = []
+
+    /// 还在等回执的指令
+    struct PendingCommand: Identifiable {
+        let id: String
+        let action: String
+        let target: String
+        let started: Date
+        var received = false   // 对方回了「收到了」
+    }
+
+    var sending: Bool { !pending.isEmpty }
+    func isPending(_ action: String) -> Bool { pending.contains { $0.action == action } }
 
     private init() {}
 
@@ -27,16 +41,13 @@ final class RemoteControl: ObservableObject {
         guard !dev.isEmpty else { log("先填要控制的设备名"); return }
         guard !s.cloudToken.isEmpty else { log("先在设置里填小橘云盘令牌"); return }
 
-        sending = true
-        defer { sending = false }
-
         // 发指令要写云盘。直接用主云盘令牌（需带写权限），不依赖「整理令牌」那个字段，省得填错。
         let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss-"
         let id = f.string(from: Date()) + String(UUID().uuidString.prefix(6))
 
-        var cmd: [String: Any] = ["id": id, "do": action]
+        var cmd: [String: Any] = ["id": id, "do": action, "ack": true]
         if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
         if let lens { cmd["lens"] = lens }
         if let seconds { cmd["seconds"] = seconds }
@@ -62,29 +73,55 @@ final class RemoteControl: ObservableObject {
             }
         }
         let sentAt = Date()
+        pending.append(PendingCommand(id: id, action: action, target: dev, started: sentAt))
+        defer { pending.removeAll { $0.id == id } }
 
-        // 等回执（一般最多 90 秒；模型测速要一分多钟）
-        let deadline = Date().addingTimeInterval(wait)
+        // 等回执（一般最多 90 秒；模型测速要一分多钟）。对方说「收到了」以后再多等一会儿
+        var deadline = Date().addingTimeInterval(wait)
         while Date() < deadline {
-            var r: [String: Any]?
+            guard pending.contains(where: { $0.id == id }) else { return }   // 被取消了
+            var got: [[String: Any]] = []
             if viaRelay {
                 let left = max(1, min(25, Int(deadline.timeIntervalSinceNow)))
-                r = (try? await cf.relayWait(RemoteBox.receipt(dev, id), seconds: left))?.first
-                if r == nil { try? await Task.sleep(nanoseconds: 300_000_000) }
+                got = (try? await cf.relayWait(RemoteBox.receipt(dev, id), seconds: left)) ?? []
+                if got.isEmpty { try? await Task.sleep(nanoseconds: 300_000_000) }
             } else {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 let items = (try? await cf.list(outbox, limit: 1000)) ?? []
                 if let hit = items.first(where: { $0.name == "\(id).json" }),
-                   let data = try? await cf.readData("\(outbox)/\(hit.name)") {
-                    r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                   let data = try? await cf.readData("\(outbox)/\(hit.name)"),
+                   let r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    got = [r]
                 }
             }
-            guard let r else { continue }
-            await present(action: action, receipt: r, cf: cf,
-                          took: Date().timeIntervalSince(sentAt), viaRelay: viaRelay)
-            return
+            if let r = got.first(where: { ($0["pending"] as? Bool) != true }) {
+                await present(action: action, receipt: r, cf: cf,
+                              took: Date().timeIntervalSince(sentAt), viaRelay: viaRelay)
+                return
+            }
+            if !got.isEmpty, let i = pending.firstIndex(where: { $0.id == id }), !pending[i].received {
+                pending[i].received = true
+                deadline = max(deadline, Date().addingTimeInterval(max(wait, 120)))
+            }
         }
-        log("等不到回执。确认对方开着待命、口令和设备名一致。")
+        log("\(label(action))：等不到回执。确认对方开着待命、口令和设备名一致。")
+    }
+
+    /// 不等这条了；对方是安卓 0.11+ 的话，那边也停下来（测速、录音之类）。
+    func cancel(_ p: PendingCommand) async {
+        pending.removeAll { $0.id == p.id }
+        log("\(label(p.action))：已取消")
+        let s = Store.shared
+        let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
+                            readToken: s.cloudToken, writeToken: s.cloudToken)
+        var cmd: [String: Any] = ["id": "cancel-" + String(UUID().uuidString.prefix(8)), "do": "cancel", "target": p.id]
+        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        try? await cf.relaySend(RemoteBox.inbox(p.target), cmd)
+    }
+
+    func label(_ action: String) -> String {
+        ["photo": "拍照", "audio": "录音", "location": "定位", "torch": "手电筒", "ring": "响铃",
+         "info": "设备信息", "bench": "模型测速", "vibrate": "震动"][action] ?? action
     }
 
     private func present(action: String, receipt: [String: Any], cf: CloudFiles,
