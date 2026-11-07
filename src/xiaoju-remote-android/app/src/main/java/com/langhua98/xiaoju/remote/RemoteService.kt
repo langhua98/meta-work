@@ -205,8 +205,9 @@ class RemoteService : Service() {
         liveStop.set(false)
 
         val p = Prefs(this)
+        // codec=h264：新查看器（服务端也支持时才会要）；不带就是 JPEG，老查看器只认这个
         val settings = LiveSettings(cmd.optString("lens") == "front", cmd.optInt("width", 480),
-            cmd.optInt("quality", 50), cmd.optInt("fps", 10))
+            cmd.optInt("quality", 50), cmd.optInt("fps", 10), cmd.optString("codec", LiveSettings.JPEG))
         settings.apply(cmd)   // 开播时就带的亮度、变焦、手电
         val fps = settings.fps
         // av=true：新查看器，画面带时间戳；audio=true：还要声音（要麦克风权限）
@@ -225,7 +226,7 @@ class RemoteService : Service() {
             else -> "开始直播"
         }
         reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", okText))
-        Bus.push("$okText，WebSocket，$fps 帧/秒")
+        Bus.push("$okText，WebSocket，$fps 帧/秒，${if (settings.codec == LiveSettings.H264) "H.264" else "JPEG"}")
         notifyText(if (withAudio) "正在被远程使用：实时画面（含声音）" else "正在被远程使用：实时画面")
 
         liveSettings = settings
@@ -234,17 +235,17 @@ class RemoteService : Service() {
                 if (client.subs > 0) client.sendAudio(StreamClient.audio(data, codec, ts))
             } else null
             if (mic != null && !mic.start()) Bus.push("声音没开成：${mic.error}")
+            val video = LiveVideo(settings, av, client)
             try {
                 val end = System.currentTimeMillis() + LIVE_MAX_MS
                 Camera.live(settings, running = {
                     running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000) &&
                         System.currentTimeMillis() < end
-                }) { jpg, rot, ts ->
-                    if (client.subs > 0) client.send(if (av) StreamClient.frameTs(jpg, rot, ts) else StreamClient.frame(jpg, rot))
-                }
+                }) { nv21, w, h, rot, ts -> video.frame(nv21, w, h, rot, ts) }
             } catch (e: Exception) {
                 Bus.push("直播出错：${e.message}")
             } finally {
+                video.close()
                 mic?.stop()
                 client.close()
                 Bus.push("直播结束：发出 ${client.sent} 帧，网络跟不上丢了 ${client.dropped} 帧")
@@ -262,10 +263,12 @@ class RemoteService : Service() {
             return
         }
         val c = if (action == "torch") JSONObject().put("torch", cmd.optBoolean("on", true)) else cmd
+        s.codecNote = ""
         val changed = s.apply(c)
         try { Thread.sleep(1200) } catch (e: InterruptedException) { }   // 等相机设好（换镜头大约 1 秒）
+        val notes = listOf(s.unsupported, s.codecNote).filter { it.isNotEmpty() }
         val text = (if (changed.isEmpty()) "没有要改的" else "已调整：" + changed.joinToString("、")) +
-            (if (s.unsupported.isEmpty()) "" else "（${s.unsupported}）")
+            (if (notes.isEmpty()) "" else "（${notes.joinToString("；")}）")
         reply(JSONObject().put("id", id).put("do", action).put("ok", true).put("text", text))
         Bus.push(text)
         notifyText("正在被远程使用：实时画面")
