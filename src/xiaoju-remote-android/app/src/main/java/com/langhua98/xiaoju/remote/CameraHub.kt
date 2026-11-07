@@ -437,7 +437,7 @@ class CameraHub(
     private val evCounts = HashMap<Int, Int>()      // 这次事件里认出过的：类别 → 最多同时几个
     @Volatile private var evNotified = false
 
-    private fun objectsOn() = NativeBench.available
+    private fun objectsOn() = ObjectDetector.usable
 
     /** 认一帧，只留「会动的、而且就在画面变了的地方」的（不然床、椅子、停着的车每次都算进来）。 */
     private fun recognize(nv21: ByteArray, w: Int, h: Int): List<ObjectDetector.Detection> {

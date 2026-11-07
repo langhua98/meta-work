@@ -18,6 +18,9 @@ object ObjectDetector {
 
     @Volatile private var state = 0   // 0 = 还没试过，1 = 能用，-1 = 用不了
 
+    /** 有 C++ 库、模型也没读失败过（还没读也算能用：第一次有动静时才读） */
+    val usable: Boolean get() = state >= 0 && NativeBench.available
+
     @JvmStatic private external fun nativeLoad(param: String, bin: ByteArray): Boolean
     @JvmStatic private external fun nativeDetect(nv21: ByteArray, w: Int, h: Int, thresh: Float): FloatArray?
 
