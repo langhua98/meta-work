@@ -43,6 +43,7 @@ struct RemoteControlView: View {
                 btn("手电筒 关", "flashlight.off.fill") { await control.send("torch", to: target, on: false) }
                 btn("响铃找手机", "bell") { await control.send("ring", to: target, seconds: seconds) }
                 btn("设备信息", "info.circle") { await control.send("info", to: target) }
+                btn("模型测速（安卓 0.10+，约 1 分钟）", "speedometer") { await control.send("bench", to: target, wait: 180) }
             }
             .listRowBackground(Theme.card)
             .disabled(control.sending || target.isEmpty)

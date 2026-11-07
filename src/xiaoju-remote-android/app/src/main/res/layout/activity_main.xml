@@ -81,6 +81,12 @@
                 android:text="开始待命" />
         </LinearLayout>
 
+        <Button
+            android:id="@+id/bench"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="测模型速度（大约 1 分钟，结果在下面）" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"

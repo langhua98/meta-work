@@ -57,6 +57,14 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `event_get` | `name` | 取一段录像：备份过的给云盘路径，5 MB 以内直接放回执，大的先传到云盘 |
 | `event_delete` | `name` | 删手机上的一段（云盘备份不动） |
 
+| `bench` | — | 模型测速（0.10）：几个能认人的小模型各跑一遍（1/2/4 核），有人看实时画面时再测直播帧率掉多少；大约 1 分钟 |
+
+### 模型测速（0.10，C++）
+
+- 推理用 ncnn（腾讯开源，BSD），C++ 代码在 `app/src/main/cpp/`。先跑 `scripts/build-ncnn-android.sh` 编好 ncnn
+  （要 NDK r23c，最后一个支持 4.2 的），Gradle 自动找到 `/opt/ncnn/armv7`（或 `-Pncnn.dir=`）；找不到就不带 C++，测不了模型，别的照常。
+- 只编 32 位 ARM（armeabi-v7a）。模型权重全用 0，只量速度；认得准不准在电脑上用真权重测。
+
 ### 移动侦测（0.8）
 
 - 侦测在手机上跑：亮度缩成 32×24 格和背景比，整体变亮变暗不算，连续两次才算有动静。
