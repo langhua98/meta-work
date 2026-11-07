@@ -128,11 +128,6 @@ jobs:
         with:
           name: ${{ env.IPA }}
           path: ${{ env.IPA }}
-      - name: Upload to 小橘云盘 /软件包/
-        if: github.ref == 'refs/heads/main'
-        env:
-          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
-        run: python3 scripts/upload_package.py "$IPA" XiaojuPipe-
       - name: Publish to the xiaoju-pipe release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,3 +137,14 @@ jobs:
           gh release create xiaoju-pipe "$IPA" XiaojuPipe-latest.ipa --prerelease \
             --title "小橘双机 ${VERSION}（构建 ${GITHUB_RUN_NUMBER}）" \
             --notes "没签名的测试版（${GITHUB_REF_NAME} ${GITHUB_SHA::7}），两台手机都装这一个，用 SideStore 或自己的证书签名。见 src/xiaoju-pipe/README.md。"
+      - name: Upload to 小橘云盘 /软件包/
+        # 放在发布 Release 之后：云盘传不上也不影响 Release 里的 ipa
+        if: github.ref == 'refs/heads/main'
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: |
+          if [ -z "$XIAOJU_TOKEN" ]; then
+            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），ipa 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑这一步。"
+            exit 1
+          fi
+          python3 scripts/upload_package.py "$IPA" XiaojuPipe-

@@ -9,14 +9,24 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.3"
+    MARKETING_VERSION: "0.4"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 targets:
   XiaojuPush:
     type: application
     platform: iOS
-    sources: [App, Shared]
+    sources:
+      - path: App
+        excludes: ["Bridging.h"]
+      - Shared
+      # 双机推理（两台手机合跑 Qwen3.5-9B）：推理核心、A10 也能跑的 Metal 内核、主机 / 从机界面，
+      # 和单独的「小橘双机」App（src/xiaoju-pipe/）是同一份代码
+      - path: ../xiaoju-pipe/core
+        excludes: ["*.md"]
+      - path: ../xiaoju-pipe/metal
+      - path: ../xiaoju-pipe/ios/App
+        excludes: ["XiaojuPipeApp.swift", "Bridge.h"]
     dependencies:
       - target: XiaojuPushWidget
         embed: true
@@ -51,6 +61,12 @@ targets:
         CODE_SIGN_ENTITLEMENTS: App/XiaojuPush.entitlements
         # ios_system 用 dlsym 在主程序里找 xiaoju_python3_main，符号不能被去掉
         STRIP_STYLE: non-global
+        # 双机推理的 C / Objective-C 部分
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging.h
+        CLANG_ENABLE_OBJC_ARC: YES
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/../xiaoju-pipe/core", "$(SRCROOT)/../xiaoju-pipe/metal", "$(SRCROOT)/../xiaoju-pipe/ios/App"]
+        MTL_HEADER_SEARCH_PATHS: ["$(SRCROOT)/../xiaoju-pipe/metal"]
     info:
       path: App/Info.plist
       properties:
@@ -66,6 +82,8 @@ targets:
         NSCameraUsageDescription: 遥控待命时，被另一台设备请求拍照
         NSLocationWhenInUseUsageDescription: 遥控待命时，被另一台设备请求上报一次位置
         # 工作区在「文件」App 里能看到
+        NSLocalNetworkUsageDescription: 双机推理：两台手机在同一个 Wi‑Fi 里互相找到对方、传隐藏向量
+        NSBonjourServices: [_xjpipe._tcp]
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes: [fetch]

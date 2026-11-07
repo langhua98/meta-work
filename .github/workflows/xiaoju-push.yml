@@ -11,7 +11,11 @@ on:
   push:
     paths:
       - "src/xiaoju-push/**"
+      - "src/xiaoju-pipe/core/**"
+      - "src/xiaoju-pipe/metal/**"
+      - "src/xiaoju-pipe/ios/App/**"
       - ".github/workflows/xiaoju-push.yml"
+      - "scripts/upload_package.py"
 
 permissions:
   contents: write
@@ -157,3 +161,14 @@ jobs:
           gh release create xiaoju-push "$IPA" XiaojuPush-latest.ipa --prerelease \
             --title "小橘推送 ${VERSION}（构建 ${GITHUB_RUN_NUMBER}）" \
             --notes "没签名的测试版（${GITHUB_REF_NAME} ${GITHUB_SHA::7}），需要用 SideStore 或自己的证书签名后安装。见 src/xiaoju-push/README.md。"
+      - name: Upload to 小橘云盘 /软件包/
+        # main 上的构建传到小橘云盘「软件包」（文件名带版本号和构建号，旧的 XiaojuPush- 包删掉）
+        if: github.ref == 'refs/heads/main'
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: |
+          if [ -z "$XIAOJU_TOKEN" ]; then
+            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），ipa 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑这一步。"
+            exit 1
+          fi
+          python3 scripts/upload_package.py "$IPA" XiaojuPush-
