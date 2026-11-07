@@ -76,7 +76,7 @@ Qwen3.5 每 4 层里 3 层是 **Gated DeltaNet**（线性注意力），第 4 �
 
 ## 怎么用
 
-1. 两台手机都装 [Release「xiaoju-pipe」](https://github.com/langhua98/meta-work/releases/tag/xiaoju-pipe) 里的 `XiaojuPipe-latest.ipa`（没签名，用 SideStore 或自己的证书签）。连同一个 Wi‑Fi（个人热点也行）。
+1. 两台手机都装 [Release「xiaoju-pipe」](https://github.com/langhua98/meta-work/releases/tag/xiaoju-pipe) 里的 `XiaojuPipe-latest.ipa`（小橘云盘「软件包」里也有一份 `XiaojuPipe-版本-build构建号.ipa`）（没签名，用 SideStore 或自己的证书签）。连同一个 Wi‑Fi（个人热点也行）。
 2. **7 Plus**：选「从机」→ 选模型（和主机同一个）→ 定从第几层开始、负责几层 → 「只下载这几层」→「开始待命」。屏幕上会显示配对码和 IP。保持亮屏、App 留在前台（iOS 不让后台 App 用 GPU）。
 3. **15 Pro Max**：选「主机」→「下载整个模型」（也可以用电脑把 .gguf 拷进「文件」App → 小橘双机）→ 在列表里点从机（或手动填 IP）→ 填配对码 →「连接」→ 聊天。
 4. 想对比速度：打开「不用从机，单机跑」。

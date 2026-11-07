@@ -3,7 +3,8 @@ name: Build 小橘双机 app
 # 小橘双机（src/xiaoju-pipe/）：两台 iPhone 合跑 Qwen3.5。
 #   e2e：Linux 上用随机权重的小模型跑主机 + 从机（拆两段、从机中途被杀后自动重连、旧连接挂死），不用下载模型。
 #   test：Mac 上编译命令行工具、跑单元测试，再用 Qwen3.5-0.8B 对照 Metal 内核和 CPU 参考实现的结果、对照官方分词器。
-#   ios：XcodeGen 生成工程，编译没签名的 .ipa（最低 iOS 15，7 Plus 能装），发布到 Release「xiaoju-pipe」。
+#   ios：XcodeGen 生成工程，编译没签名的 .ipa（最低 iOS 15，7 Plus 能装），发布到 Release「xiaoju-pipe」；
+#        main 上的构建再传到小橘云盘「软件包」（文件名带版本号和构建号，旧包删掉），要 secret XIAOJU_TOKEN。
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +15,7 @@ on:
     paths:
       - "src/xiaoju-pipe/**"
       - ".github/workflows/xiaoju-pipe.yml"
+      - "scripts/upload_package.py"
 
 permissions:
   contents: write
@@ -126,6 +128,11 @@ jobs:
         with:
           name: ${{ env.IPA }}
           path: ${{ env.IPA }}
+      - name: Upload to 小橘云盘 /软件包/
+        if: github.ref == 'refs/heads/main'
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: python3 scripts/upload_package.py "$IPA" XiaojuPipe-
       - name: Publish to the xiaoju-pipe release
         env:
           GH_TOKEN: ${{ github.token }}
