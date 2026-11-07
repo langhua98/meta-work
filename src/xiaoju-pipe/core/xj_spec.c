@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
 
@@ -13,6 +14,17 @@ static int argmax(const float *x, int n) {
     for (int i = 1; i < n; i++) if (x[i] > x[b]) b = i;
     return b;
 }
+
+// x ← RMSNorm(x) * w（w 是 F32 norm 权重）
+static void norm_inplace(float *x, const xj_w *w, int n, float eps) {
+    double ss = 0;
+    for (int i = 0; i < n; i++) ss += (double)x[i] * x[i];
+    const float sc = 1.0f / sqrtf((float)(ss / n) + eps);
+    const float *wf = w->data;
+    for (int i = 0; i < n; i++) x[i] *= sc * wf[i];
+}
+
+static bool env_flag(const char *k, bool def) { const char *v = getenv(k); return v ? atoi(v) != 0 : def; }
 
 static bool is_end(const xj_model *m, int id) { return (uint32_t)id == m->hp.eot || (uint32_t)id == m->hp.eos; }
 
@@ -41,6 +53,8 @@ static int push_ph(xj_spec *sp, const float *h, int n, const int32_t *next) {
     const int E = sp->m->hp.n_embd;
     if (grow_ph(sp, sp->n_ph + n)) return -1;
     memcpy(sp->ph + (size_t)sp->n_ph * E, h, sizeof(float) * n * E);
+    if (sp->main_post)
+        for (int i = 0; i < n; i++) norm_inplace(sp->ph + (size_t)(sp->n_ph + i) * E, &sp->m->output_norm, E, sp->m->hp.eps);
     for (int i = 0; i < n; i++) sp->pt[sp->n_ph + i] = next ? next[i] : -1;
     sp->n_ph += n;
     return 0;
@@ -60,6 +74,8 @@ int xj_spec_init(xj_spec *sp, xj_pipeline *p, xj_stage *mtp, int k) {
     const int mb = mtp && mtp->max_batch > p->max_batch ? mtp->max_batch : p->max_batch;
     sp->mx = malloc(sizeof(float) * 2 * E * mb);
     sp->forced = -1;
+    sp->main_post = env_flag("XJ_MTP_MAIN_POST", false);
+    sp->chain_post = env_flag("XJ_MTP_CHAIN_POST", false);
     if (grow_hid(sp, p->max_batch)) return -1;
     return sp->last_logits && sp->logits && sp->mlog && sp->mx ? 0 : -1;
 }
@@ -147,6 +163,7 @@ int xj_spec_next(xj_spec *sp, xj_sample_fn sample, void *sctx, int32_t *out, int
         if (j == k) break;
         // sp->mx 第 0 行是上一次 MTP 的输出：拼成 [embedding(猜的字) ‖ 输出]
         memmove(sp->mx + E, sp->mx, sizeof(float) * E);
+        if (sp->chain_post) norm_inplace(sp->mx + E, &m->mtp_head_norm, E, m->hp.eps);
         xj_embed(m, toks[j], sp->mx);
         if (sp->mtp->forward(sp->mtp, sp->mx, 1, err, errlen)) return -1;
         if (sp->mtp->logits(sp->mtp, sp->mx, 1, sp->mlog, err, errlen)) return -1;
@@ -168,6 +185,7 @@ int xj_spec_next(xj_spec *sp, xj_sample_fn sample, void *sctx, int32_t *out, int
     for (int i = 0; i < k; i++) {
         s = sample(sctx, sp->logits + (size_t)i * V, V);
         if (s != toks[i + 1]) break;
+        sp->acc_at[i]++;
         a++;
         s = -1;
     }

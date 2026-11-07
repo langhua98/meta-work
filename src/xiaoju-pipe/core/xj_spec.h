@@ -31,11 +31,15 @@ typedef struct {
     int hid_cap;
     float *mx;              // MTP 输入 [max_batch][2*n_embd]
     float *mlog;            // MTP 的 logits
+    // 主干隐藏向量 / MTP 自己的输出喂回 MTP 前要不要先过 norm（output_norm / shared_head_norm）。
+    // 默认按 CI 实测猜中率最高的选（环境变量 XJ_MTP_MAIN_POST、XJ_MTP_CHAIN_POST = 0/1 可以改）
+    bool main_post, chain_post;
     // 测试用：知道正确答案时拿它当「猜的字」（每隔 oracle_miss 个故意猜错一个），把全猜对 / 猜对一半的路径都走到
     const int32_t *oracle; int n_oracle, oracle_miss;
     long n_gen;             // 已经出了几个字（对 oracle 用）
     // 统计
     long n_steps, n_drafted, n_accepted;
+    long acc_at[XJ_SPEC_MAXK];   // 第 j 个猜的字被接受了几次
     double t_draft_ms;      // MTP 猜字花的时间
 } xj_spec;
 

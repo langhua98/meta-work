@@ -144,6 +144,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "投机解码：%ld 步，猜了 %ld 个字，猜中 %ld 个（%.0f%%），平均每步出 %.2f 个字，MTP 猜字共 %.0f ms\n",
                 sp.n_steps, sp.n_drafted, sp.n_accepted, 100.0 * sp.n_accepted / (sp.n_drafted ? sp.n_drafted : 1),
                 (double)produced / sp.n_steps, sp.t_draft_ms);
+    if (sp.n_steps) {
+        fprintf(stderr, "各位置猜中：");
+        for (int j = 0; j < sp.k; j++) fprintf(stderr, "第%d个 %ld/%ld  ", j + 1, sp.acc_at[j], j ? sp.acc_at[j - 1] : sp.n_steps);
+        fprintf(stderr, "\n");
+    }
     if (p.n_reconnects) fprintf(stderr, "中途重连了 %d 次\n", p.n_reconnects);
     if (r) r->destroy(r);
     a->destroy(a);
