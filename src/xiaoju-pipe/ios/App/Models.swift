@@ -8,17 +8,28 @@ struct ModelSpec: Identifiable, Hashable {
     /// Hugging Face 上的路径（仓库/resolve/main/文件），官方站和镜像站都用它
     let path: String
     let note: String
+    /// 带 MTP 头的同一个模型（prithivMLmods 转的），只下文件头和 MTP 那一层（9B 约 150 MB），给投机解码用
+    var mtpPath: String? = nil
 
     func url(_ host: String) -> URL { URL(string: "https://\(host)/\(path)")! }
+
+    /// MTP 文件当成一个单独的「模型」来下（复用分块下载和断点续传）
+    var mtp: ModelSpec? {
+        guard let p = mtpPath else { return nil }
+        return ModelSpec(id: id + "-mtp", name: name + " MTP", file: (file as NSString).deletingPathExtension + "-MTP.gguf",
+                         path: p, note: "")
+    }
 
     static let q9b = ModelSpec(
         id: "9b", name: "Qwen3.5-9B · Q4_K_M", file: "Qwen3.5-9B-Q4_K_M.gguf",
         path: "unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
-        note: "5.7 GB，每层 113–136 MB。两台合跑的主要目标")
+        note: "5.7 GB，每层 113–136 MB。两台合跑的主要目标",
+        mtpPath: "prithivMLmods/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B.Q4_K_M.gguf")
     static let q9b5 = ModelSpec(
         id: "9b-q5", name: "Qwen3.5-9B · Q5_K_M", file: "Qwen3.5-9B-Q5_K_M.gguf",
         path: "unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf",
-        note: "6.6 GB，比 Q4_K_M 更接近原版。15 单机放不太下，7 Plus 分 8–10 层")
+        note: "6.6 GB，比 Q4_K_M 更接近原版。15 单机放不太下，7 Plus 分 8–10 层",
+        mtpPath: "prithivMLmods/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B.Q4_K_M.gguf")
     static let q4b = ModelSpec(
         id: "4b", name: "Qwen3.5-4B · Q4_K_M", file: "Qwen3.5-4B-Q4_K_M.gguf",
         path: "unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",

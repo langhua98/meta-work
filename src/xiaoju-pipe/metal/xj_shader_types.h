@@ -58,6 +58,7 @@ typedef struct {
 typedef struct {
     xu32 T, C, K;           // token 数、通道数、卷积核长度（K <= 8）
     xu32 grid_x;
+    xu32 ck_n;              // 投机解码：前 ck_n 个 token 算完后的状态存一份（存档 [ck_n][C][K-1]）
 } xj_conv_args;
 
 typedef struct {
@@ -66,6 +67,7 @@ typedef struct {
     xu32 k_off, v_off;      // k、v 在每个 token 里的起点
     xu32 out_tok_stride;
     float qscale;
+    xu32 ck_n;              // 投机解码：前 ck_n 个 token 算完后的状态存一份（存档 [ck_n][Hv][S][S]）
 } xj_dn_args;
 
 typedef struct {

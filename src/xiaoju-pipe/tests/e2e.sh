@@ -4,6 +4,7 @@
 #   2. 生成到一半从机进程被杀，再起一个从机：主机自动重连、重放，输出仍然和单机一字不差；
 #   3. 从机一直起不来：主机重试几次后报错退出，不会卡死；
 #   4. 旧连接没断干净（Wi‑Fi 掉线时对方收不到 FIN）：新主机连上来，从机丢掉旧连接改服务新的。
+#   5. MTP 投机解码：单机 / 拆两段 / 中途断线，全猜对、猜对一部分、全猜错，输出都和普通解码一字不差。
 #   make e2e        （需要 python3 + numpy）
 # 环境变量 XJ_WORKER_FLAGS 可以给从机加参数（比如 macOS 上 --cpu）。
 set -eu
@@ -66,4 +67,37 @@ kill $W $Z; wait $W $Z 2>/dev/null || true
 grep -q "旧连接" "$T/w4.log" || { cat "$T/w4.log"; echo "从机没有丢掉旧连接"; exit 1; }
 cmp "$T/solo.txt" "$T/take.txt" || { echo "输出不一样"; exit 1; }
 echo "一致"
+echo "== 5. MTP 投机解码"
+python3 tests/make_tiny_model.py "$T/tiny-mtp.gguf" --mtp > /dev/null
+python3 tests/mtp_sparse.py "$T/tiny-mtp.gguf" "$T/mtp-only.gguf"
+./build/xjpipe-host "$T/tiny.gguf" "$Q" --n 48 --ids "$T/ids.txt" > /dev/null 2>&1
+spec() {  # 名字 输出文件 其余参数…
+    name=$1; out=$2; shift 2
+    "$@" > "$out" 2> "$out.err" || { cat "$out.err"; echo "$name：出错"; exit 1; }
+    cmp -s "$T/solo.txt" "$out" || { cat "$out.err"; echo "$name：和普通解码不一样"; exit 1; }
+    echo "$name：一致，$(grep 投机解码 "$out.err" | tail -1)"
+}
+# 随机权重的 MTP 基本猜不中；用 --oracle 拿正确答案当「猜的字」（每隔几个故意错一个），猜对的路径也走到
+for k in 1 3 4; do
+    spec "单机 猜$k 个 随机MTP" "$T/s$k.txt" ./build/xjpipe-host "$T/tiny.gguf" "$Q" --n 48 --draft $k --mtp "$T/mtp-only.gguf"
+    for miss in 0 3 5; do
+        spec "单机 猜$k 个 答案每$miss 错1" "$T/o$k$miss.txt" ./build/xjpipe-host "$T/tiny.gguf" "$Q" --n 48 --draft $k --mtp "$T/mtp-only.gguf" --oracle "$T/ids.txt" $miss
+    done
+done
+spec "MTP 在模型文件里" "$T/emb.txt" ./build/xjpipe-host "$T/tiny-mtp.gguf" "$Q" --n 48 --draft 3 --oracle "$T/ids.txt" 5
+./build/xjpipe-worker "$T/slice.gguf" --layers 2:6 --pin 4321 --port $PORT $WF 2> "$T/w5.log" &
+W=$!
+sleep 1
+for miss in 0 3; do
+    spec "拆两段 猜3 个 答案每$miss 错1" "$T/p$miss.txt" ./build/xjpipe-host "$T/tiny.gguf" "$Q" --worker 127.0.0.1 --port $PORT --pin 4321 --n 48 --draft 3 --mtp "$T/mtp-only.gguf" --oracle "$T/ids.txt" $miss
+done
+kill $W; wait $W 2>/dev/null || true
+( ./build/xjpipe-worker "$T/slice.gguf" --layers 2:6 --pin 4321 --port $PORT --die-after 10 $WF || true
+  ./build/xjpipe-worker "$T/slice.gguf" --layers 2:6 --pin 4321 --port $PORT $WF ) 2> "$T/w6.log" &
+W=$!
+sleep 1
+spec "拆两段 中途断线" "$T/pr.txt" ./build/xjpipe-host "$T/tiny.gguf" "$Q" --worker 127.0.0.1 --port $PORT --pin 4321 --n 48 --draft 3 --mtp "$T/mtp-only.gguf" --oracle "$T/ids.txt" 5
+pkill -f "xjpipe-worker $T" 2>/dev/null || true
+wait $W 2>/dev/null || true
+grep -q "重连了 1 次" "$T/pr.txt.err" || { cat "$T/pr.txt.err"; echo "主机没有重连"; exit 1; }
 echo "端到端测试全部通过"

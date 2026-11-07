@@ -180,13 +180,18 @@ static void serve_conn(xj_worker *w, int fd, const char *peer) {
             if (!st) { send_error(fd, seq, "还没握手"); break; }
             if (len < 12) { send_error(fd, seq, "FORWARD 太短"); break; }
             uint32_t pos = g32(&in), T = g32(&in), want = g32(&in);
+            const bool keep = want & XJ_WANT_KEEP;
+            want &= 0xff;
             if (T < 1 || T > (uint32_t)st->max_batch || len != 12 + (uint64_t)T * E * 4) { send_error(fd, seq, "FORWARD 长度不对"); break; }
+            // 投机解码猜错了：主机从更早的位置接着算，先退回去
+            if (pos < (uint32_t)st->n_past && st->rollback(st, (int)pos, err, sizeof err)) { send_error(fd, seq, err); continue; }
             if (pos != (uint32_t)st->n_past) {
                 snprintf(err, sizeof err, "位置对不上（主机 %u，从机 %d），请重新开始对话", pos, st->n_past);
                 send_error(fd, seq, err);
                 continue;
             }
             memcpy(x, in, (size_t)T * E * 4);
+            st->keep = keep ? (int)T : 0;
             double t0 = now_ms();
             if (st->forward(st, x, (int)T, err, sizeof err)) { send_error(fd, seq, err); continue; }
             double dt = now_ms() - t0;
@@ -312,6 +317,7 @@ static int expect(remote_impl *r, int want_type, uint32_t *len, char *err, size_
 }
 
 int xj_remote_send(xj_stage *s, const float *x, int T, int want, char *err, size_t errlen) {
+    if (s->keep) { want |= XJ_WANT_KEEP; s->keep = 0; }
     remote_impl *r = s->impl;
     if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "一批 %d 个 token 超过上限", T); return -1; }
     if (r->fd < 0) { snprintf(err, errlen, "和从机的连接断了"); return -1; }
@@ -353,9 +359,16 @@ static int remote_forward(xj_stage *s, float *x, int T, char *err, size_t errlen
     return xj_remote_recv(s, x, NULL, NULL, err, errlen);
 }
 
-static int remote_logits(xj_stage *s, const float *x, float *logits, char *err, size_t errlen) {
+static int remote_logits(xj_stage *s, const float *x, int T, float *logits, char *err, size_t errlen) {
     snprintf(err, errlen, "输出头在主机上算");
     return -1;
+}
+
+// 只记下位置；从机在收到下一条 FORWARD（起始位置更小）时自己退回存档
+static int remote_rollback(xj_stage *s, int n_past, char *err, size_t errlen) {
+    if (n_past > s->n_past || n_past < 0) { snprintf(err, errlen, "从机退不到位置 %d", n_past); return -1; }
+    s->n_past = n_past;
+    return 0;
 }
 
 static void remote_reset(xj_stage *s) {
@@ -457,6 +470,7 @@ xj_stage *xj_remote_stage_new(const char *host, int port, uint32_t pin, const xj
     s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch;
     s->backend = "remote";
     s->forward = remote_forward; s->logits = remote_logits; s->reset = remote_reset; s->destroy = remote_destroy;
+    s->rollback = remote_rollback;
     s->impl = r;
     if (handshake(s, l0, l1, info, err, errlen)) { remote_destroy(s); return NULL; }
     return s;
@@ -512,33 +526,47 @@ static xj_stage *head_of(xj_pipeline *p) { return p->b ? p->b : p->a; }
 
 // 流水线预填充：从机算第 c 块的时候，主机同时算第 c+1 块的前半段。
 // 任何时候最多一块在从机上，两边都不会因为缓冲区满了互相卡住。
+// nlog：最后几个 token 要 logits（普通 1 个；验证时整批）。hid：每个 token 的最后一层输出（可以为空）。
+// keep：投机解码验证（整批一块，每段都留存档）。
 // 从机 / 网络出的错会置 p->remote_failed，外面据此决定要不要重连。
-static int eval_once(xj_pipeline *p, const int32_t *tok, int n, float *logits, char *err, size_t errlen) {
+static int eval_once(xj_pipeline *p, const int32_t *tok, int n, float *logits, int nlog, float *hid, bool keep,
+                     char *err, size_t errlen) {
     const int E = p->m->hp.n_embd, B = p->max_batch;
     const bool b_layers = p->b && p->b->l1 > p->b->l0;
     double t;
     if (n <= 0) { snprintf(err, errlen, "没有 token"); return -1; }
+    if (keep && n > B) { snprintf(err, errlen, "验证一批 %d 个超过上限 %d", n, B); return -1; }
+    if (nlog < 1) nlog = 1;
 
     if (!p->r) {
         for (int i = 0; i < n; i += B) {
             int T = n - i < B ? n - i : B;
             for (int k = 0; k < T; k++) xj_embed(p->m, tok[i + k], p->x + (size_t)k * E);
             t = now_ms();
+            if (keep) { p->a->keep = T; if (p->b && p->b->l1 > p->b->l0) p->b->keep = T; }
             if (p->a->forward(p->a, p->x, T, err, errlen)) return -1;
             if (p->b && p->b->forward(p->b, p->x, T, err, errlen)) return -1;
             p->t_local += now_ms() - t;
-            if (i + T == n && head_of(p)->logits(head_of(p), p->x + (size_t)(T - 1) * E, logits, err, errlen)) return -1;
+            if (hid) memcpy(hid + (size_t)i * E, p->x, sizeof(float) * T * E);
+            if (i + T == n) {
+                const int nl = nlog < T ? nlog : T;
+                t = now_ms();
+                if (head_of(p)->logits(head_of(p), p->x + (size_t)(T - nl) * E, nl, logits, err, errlen)) return -1;
+                p->t_local += now_ms() - t;
+            }
         }
         return 0;
     }
 
     if (!p->b) { snprintf(err, errlen, "有从机时主机后半段（带输出头）不能为空"); return -1; }
-    int prevT = 0;  // 在从机上的那一块有几个 token（0 = 没有）
+    const bool all = b_layers || hid || nlog > 1;
+    int prevT = 0, prevI = 0;  // 在从机上的那一块有几个 token（0 = 没有）、从第几个开始
     for (int i = 0;;) {
         const int T = i < n ? (n - i < B ? n - i : B) : 0;
         if (T) {
             for (int k = 0; k < T; k++) xj_embed(p->m, tok[i + k], p->x + (size_t)k * E);
             t = now_ms();
+            if (keep) p->a->keep = T;
             if (p->a->forward(p->a, p->x, T, err, errlen)) return -1;
             p->t_local += now_ms() - t;
         }
@@ -551,19 +579,26 @@ static int eval_once(xj_pipeline *p, const int32_t *tok, int n, float *logits, c
         }
         if (T) {
             const bool last = i + T >= n;
-            const int want = b_layers ? XJ_WANT_ALL : (last ? XJ_WANT_LAST : XJ_WANT_NONE);
+            const int want = all ? XJ_WANT_ALL : (last ? XJ_WANT_LAST : XJ_WANT_NONE);
+            if (keep) p->r->keep = T;
             if (xj_remote_send(p->r, p->x, T, want, err, errlen)) { p->remote_failed = true; return -1; }
         }
         if (prevT) {
             // 上一块从机的结果过后半段（要所有 token 的结果，后半段的 KV 缓存才完整）
-            const int rows = b_layers ? prevT : 1;
+            const int rows = all ? prevT : 1;
             t = now_ms();
+            if (keep && b_layers) p->b->keep = rows;
             if (b_layers && p->b->forward(p->b, p->xr, rows, err, errlen)) return -1;
+            if (hid) memcpy(hid + (size_t)prevI * E, p->xr, sizeof(float) * rows * E);
+            if (!T) {
+                const int nl = nlog < rows ? nlog : rows;
+                if (p->b->logits(p->b, p->xr + (size_t)(rows - nl) * E, nl, logits, err, errlen)) return -1;
+            }
             p->t_local += now_ms() - t;
-            if (!T && p->b->logits(p->b, p->xr + (size_t)(rows - 1) * E, logits, err, errlen)) return -1;
         }
         if (!T) break;
         prevT = T;
+        prevI = i;
         i += T;
     }
     return 0;
@@ -592,14 +627,15 @@ static int recover(xj_pipeline *p, char *err, size_t errlen) {
     if (!p->scratch_logits) { snprintf(err, errlen, "内存不够"); return -1; }
     pstatus(p, "已重连，正在重放之前的 %d 个 token……", p->n_hist);
     p->remote_failed = false;
-    return eval_once(p, p->hist, p->n_hist, p->scratch_logits, err, errlen);
+    return eval_once(p, p->hist, p->n_hist, p->scratch_logits, 1, NULL, false, err, errlen);
 }
 
-int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, char *err, size_t errlen) {
+static int eval_retry(xj_pipeline *p, const int32_t *tok, int n, float *logits, int nlog, float *hid, bool keep,
+                      char *err, size_t errlen) {
     int attempt = 0;
     for (;;) {
         p->remote_failed = false;
-        if (!eval_once(p, tok, n, logits, err, errlen)) break;
+        if (!eval_once(p, tok, n, logits, nlog, hid, keep, err, errlen)) break;
         // 不是从机的问题（比如上下文满了），或者不让重连：直接报错
         for (;;) {
             if (!p->r || !p->remote_failed || attempt >= p->reconnect_tries) return -1;
@@ -622,5 +658,21 @@ int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, c
         memcpy(p->hist + p->n_hist, tok, sizeof(int32_t) * n);
         p->n_hist += n;
     }
+    return 0;
+}
+
+int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, float *hid, char *err, size_t errlen) {
+    return eval_retry(p, tok, n, logits, 1, hid, false, err, errlen);
+}
+
+int xj_pipeline_verify(xj_pipeline *p, const int32_t *tok, int n, float *logits, float *hid, char *err, size_t errlen) {
+    return eval_retry(p, tok, n, logits, n, hid, true, err, errlen);
+}
+
+int xj_pipeline_rollback(xj_pipeline *p, int n_past, char *err, size_t errlen) {
+    if (p->a->rollback(p->a, n_past, err, errlen)) return -1;
+    if (p->r && p->r->rollback(p->r, n_past, err, errlen)) return -1;
+    if (p->b && p->b->l1 > p->b->l0 && p->b->rollback(p->b, n_past, err, errlen)) return -1;
+    if (p->r && p->n_hist > n_past) p->n_hist = n_past;
     return 0;
 }

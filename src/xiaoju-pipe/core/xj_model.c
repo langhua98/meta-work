@@ -58,6 +58,74 @@ static void find_special(const gguf_file *g, xj_hparams *hp) {
     hp->n_vocab = (int)kv->arr_n;
 }
 
+// 第 i 层的权重（L->recurrent 要先设好）
+static bool load_layer(const gguf_file *g, const xj_hparams *hp, int i, xj_layer *L, char *err, size_t errlen) {
+    char name[96];
+#define W(field, suffix, req) do { snprintf(name, sizeof name, "blk.%d.%s", i, suffix); \
+        if (!get_w(g, name, &L->field, req, err, errlen)) return false; } while (0)
+    W(attn_norm, "attn_norm.weight", true);
+    W(post_norm, "post_attention_norm.weight", true);
+    W(ffn_gate, "ffn_gate.weight", true);
+    W(ffn_up, "ffn_up.weight", true);
+    W(ffn_down, "ffn_down.weight", true);
+    if (L->recurrent) {
+        W(ssm_qkv, "attn_qkv.weight", true);
+        W(ssm_gate, "attn_gate.weight", true);
+        W(ssm_conv1d, "ssm_conv1d.weight", true);
+        W(ssm_dt, "ssm_dt.bias", true);
+        W(ssm_a, "ssm_a", true);
+        W(ssm_beta, "ssm_beta.weight", true);
+        W(ssm_alpha, "ssm_alpha.weight", true);
+        W(ssm_norm, "ssm_norm.weight", true);
+        W(ssm_out, "ssm_out.weight", true);
+        if (L->ssm_qkv.ne1 != hp->conv_dim || L->ssm_conv1d.type != XJ_F32 || L->ssm_conv1d.ne0 != hp->conv_k) {
+            snprintf(err, errlen, "第 %d 层线性注意力张量形状不对", i); return false;
+        }
+        if (L->ssm_a.type != XJ_F32 || L->ssm_dt.type != XJ_F32 || L->ssm_norm.type != XJ_F32) {
+            snprintf(err, errlen, "第 %d 层 ssm_a / ssm_dt / ssm_norm 要是 F32", i); return false;
+        }
+    } else {
+        W(wqkv, "attn_qkv.weight", false);
+        if (!L->wqkv.nbytes) {
+            W(wq, "attn_q.weight", true);
+            W(wk, "attn_k.weight", true);
+            W(wv, "attn_v.weight", true);
+        }
+        W(wo, "attn_output.weight", true);
+        W(q_norm, "attn_q_norm.weight", true);
+        W(k_norm, "attn_k_norm.weight", true);
+    }
+    if (L->attn_norm.type != XJ_F32 || L->post_norm.type != XJ_F32) { snprintf(err, errlen, "第 %d 层 norm 要是 F32", i); return false; }
+#undef W
+    return true;
+}
+
+// MTP 层：g 里的 blk.{block_count-1}，装进 m->layers[m->hp.n_layer]
+static bool load_mtp(xj_model *m, const gguf_file *g, char *err, size_t errlen) {
+    uint32_t bc = 0;
+    gguf_get_u32(g, "qwen35.block_count", &bc);
+    const int i = (int)bc - 1, il = m->hp.n_layer;
+    if (il + 1 > XJ_MAX_LAYERS) { snprintf(err, errlen, "层数太多"); return false; }
+    xj_layer *L = &m->layers[il];
+    memset(L, 0, sizeof(*L));
+    L->recurrent = false;
+    if (!load_layer(g, &m->hp, i, L, err, errlen)) return false;
+    char name[96];
+#define W(field, suffix) do { snprintf(name, sizeof name, "blk.%d.nextn.%s", i, suffix); \
+        if (!get_w(g, name, &m->field, true, err, errlen)) return false; } while (0)
+    W(mtp_eh, "eh_proj.weight");
+    W(mtp_enorm, "enorm.weight");
+    W(mtp_hnorm, "hnorm.weight");
+    W(mtp_head_norm, "shared_head_norm.weight");
+#undef W
+    if (m->mtp_eh.ne0 != 2 * m->hp.n_embd || m->mtp_eh.ne1 != m->hp.n_embd) { snprintf(err, errlen, "MTP eh_proj 形状不对"); return false; }
+    if (m->mtp_enorm.type != XJ_F32 || m->mtp_hnorm.type != XJ_F32 || m->mtp_head_norm.type != XJ_F32) {
+        snprintf(err, errlen, "MTP 的 norm 要是 F32"); return false;
+    }
+    m->has_mtp = true;
+    return true;
+}
+
 xj_model *xj_model_from_gguf(gguf_file *g, char *err, size_t errlen) {
     const char *arch; uint64_t alen;
     if (!gguf_get_str(g, "general.architecture", &arch, &alen) || alen != 6 || memcmp(arch, "qwen35", 6) != 0) {
@@ -113,46 +181,9 @@ xj_model *xj_model_from_gguf(gguf_file *g, char *err, size_t errlen) {
     if (!m->output.nbytes) m->output = m->tok_embd;  // 共用 embedding（4B 就是这样）
     if (!hp->n_vocab) hp->n_vocab = (int)m->tok_embd.ne1;
 
-    char name[96];
-#define W(field, suffix, req) do { snprintf(name, sizeof name, "blk.%d.%s", i, suffix); \
-        if (!get_w(g, name, &L->field, req, err, errlen)) goto fail; } while (0)
-    for (int i = 0; i < hp->n_layer; i++) {
-        xj_layer *L = &m->layers[i];
-        W(attn_norm, "attn_norm.weight", true);
-        W(post_norm, "post_attention_norm.weight", true);
-        W(ffn_gate, "ffn_gate.weight", true);
-        W(ffn_up, "ffn_up.weight", true);
-        W(ffn_down, "ffn_down.weight", true);
-        if (L->recurrent) {
-            W(ssm_qkv, "attn_qkv.weight", true);
-            W(ssm_gate, "attn_gate.weight", true);
-            W(ssm_conv1d, "ssm_conv1d.weight", true);
-            W(ssm_dt, "ssm_dt.bias", true);
-            W(ssm_a, "ssm_a", true);
-            W(ssm_beta, "ssm_beta.weight", true);
-            W(ssm_alpha, "ssm_alpha.weight", true);
-            W(ssm_norm, "ssm_norm.weight", true);
-            W(ssm_out, "ssm_out.weight", true);
-            if (L->ssm_qkv.ne1 != hp->conv_dim || L->ssm_conv1d.type != XJ_F32 || L->ssm_conv1d.ne0 != hp->conv_k) {
-                snprintf(err, errlen, "第 %d 层线性注意力张量形状不对", i); goto fail;
-            }
-            if (L->ssm_a.type != XJ_F32 || L->ssm_dt.type != XJ_F32 || L->ssm_norm.type != XJ_F32) {
-                snprintf(err, errlen, "第 %d 层 ssm_a / ssm_dt / ssm_norm 要是 F32", i); goto fail;
-            }
-        } else {
-            W(wqkv, "attn_qkv.weight", false);
-            if (!L->wqkv.nbytes) {
-                W(wq, "attn_q.weight", true);
-                W(wk, "attn_k.weight", true);
-                W(wv, "attn_v.weight", true);
-            }
-            W(wo, "attn_output.weight", true);
-            W(q_norm, "attn_q_norm.weight", true);
-            W(k_norm, "attn_k_norm.weight", true);
-        }
-        if (L->attn_norm.type != XJ_F32 || L->post_norm.type != XJ_F32) { snprintf(err, errlen, "第 %d 层 norm 要是 F32", i); goto fail; }
-    }
-#undef W
+    for (int i = 0; i < hp->n_layer; i++)
+        if (!load_layer(g, hp, i, &m->layers[i], err, errlen)) goto fail;
+    if (nextn > 0 && !load_mtp(m, g, err, errlen)) goto fail;
 
     uint64_t h = 1469598103934665603ull;
     h = fnv(h, hp, sizeof(*hp));
@@ -202,8 +233,62 @@ xj_model *xj_model_load_layers(const char *path, int l0, int l1, bool with_io, c
     return m;
 }
 
+// MTP 层所有张量（含 nextn.*）在文件里的范围
+static bool mtp_span(const xj_model *m, uint64_t *lo, uint64_t *hi) {
+    if (!m->has_mtp) return false;
+    *lo = UINT64_MAX; *hi = 0;
+    const xj_w *ws = (const xj_w *)&m->layers[m->hp.n_layer].attn_norm;
+    const int count = (int)((sizeof(xj_layer) - offsetof(xj_layer, attn_norm)) / sizeof(xj_w));
+    const xj_w *extra[4] = { &m->mtp_eh, &m->mtp_enorm, &m->mtp_hnorm, &m->mtp_head_norm };
+    for (int k = 0; k < count + 4; k++) {
+        const xj_w *w = k < count ? &ws[k] : extra[k - count];
+        if (!w->nbytes) continue;
+        if (w->file_off < *lo) *lo = w->file_off;
+        if (w->file_off + w->nbytes > *hi) *hi = w->file_off + w->nbytes;
+    }
+    return *hi > *lo;
+}
+
+int xj_model_mtp_range(gguf_file *g, uint64_t *lo, uint64_t *hi, char *err, size_t errlen) {
+    xj_model *m = xj_model_from_gguf(g, err, errlen);
+    if (!m) return -1;
+    bool ok = mtp_span(m, lo, hi);
+    free(m);  // 只放结构，g 是调用方的
+    if (!ok) { snprintf(err, errlen, "这个文件里没有 MTP 层"); return -1; }
+    return 0;
+}
+
+int xj_model_attach_mtp(xj_model *m, const char *path, char *err, size_t errlen) {
+    if (m->has_mtp) return 0;
+    gguf_file *g = gguf_open_header(path, err, errlen);
+    if (!g) return -1;
+    xj_model *t = xj_model_from_gguf(g, err, errlen);
+    if (!t) { gguf_close(g); return -1; }
+    const xj_hparams *a = &m->hp, *b = &t->hp;
+    if (a->n_layer != b->n_layer || a->n_embd != b->n_embd || a->n_ff != b->n_ff || a->n_head != b->n_head ||
+        a->n_head_kv != b->n_head_kv || a->head_dim != b->head_dim || a->n_vocab != b->n_vocab) {
+        snprintf(err, errlen, "MTP 文件和模型对不上（不是同一个模型）");
+        free(t); gguf_close(g); return -1;
+    }
+    uint64_t lo, hi;
+    if (!mtp_span(t, &lo, &hi)) { snprintf(err, errlen, "这个文件里没有 MTP 层"); free(t); gguf_close(g); return -1; }
+    if (!gguf_map_range(g, lo, hi, err, errlen)) { free(t); gguf_close(g); return -1; }
+    xj_layer *L = &m->layers[m->hp.n_layer];
+    *L = t->layers[t->hp.n_layer];
+    m->mtp_eh = t->mtp_eh; m->mtp_enorm = t->mtp_enorm; m->mtp_hnorm = t->mtp_hnorm; m->mtp_head_norm = t->mtp_head_norm;
+    xj_w *ws = (xj_w *)&L->attn_norm;
+    const int count = (int)((sizeof(xj_layer) - offsetof(xj_layer, attn_norm)) / sizeof(xj_w));
+    for (int k = 0; k < count; k++) fix_ptr(g, &ws[k]);
+    fix_ptr(g, &m->mtp_eh); fix_ptr(g, &m->mtp_enorm); fix_ptr(g, &m->mtp_hnorm); fix_ptr(g, &m->mtp_head_norm);
+    free(t);
+    m->mtp_gguf = g;
+    m->has_mtp = true;
+    return 0;
+}
+
 void xj_model_free(xj_model *m) {
     if (!m) return;
+    gguf_close(m->mtp_gguf);
     gguf_close(m->gguf);
     free(m);
 }

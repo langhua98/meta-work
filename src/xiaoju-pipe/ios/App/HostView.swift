@@ -61,6 +61,11 @@ final class HostController: ObservableObject {
     @Published var stats = ""
     @Published var status = ""          // 从机断线重连时的提示
     @Published var haveModel = false
+    // MTP 投机解码：主机上多算一层猜后面几个字，两台手机一次验证一批
+    @Published var useMTP: Bool { didSet { UserDefaults.standard.set(useMTP, forKey: "h.mtp") } }
+    @Published var draft: Int { didSet { UserDefaults.standard.set(draft, forKey: "h.draft") } }
+    @Published var haveMTP = false
+    let mtpDownloader = Downloader()
 
     let downloader = Downloader()
     let finder = WorkerFinder()
@@ -74,7 +79,10 @@ final class HostController: ObservableObject {
         modelID = d.string(forKey: "h.model") ?? ModelSpec.q9b.id
         workerIP = d.string(forKey: "h.ip") ?? ""
         pin = d.string(forKey: "h.pin") ?? ""
+        useMTP = d.object(forKey: "h.mtp") as? Bool ?? true
+        draft = d.object(forKey: "h.draft") as? Int ?? 3
         bags.append(downloader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
+        bags.append(mtpDownloader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
         bags.append(finder.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
         refresh()
     }
@@ -104,9 +112,18 @@ final class HostController: ObservableObject {
     }
 
     func refresh() {
+        haveMTP = model.mtp.map { Downloader.haveMTP($0) } ?? false
         let f = Paths.file(for: model)
         guard let l = ModelLayout.read(f) else { haveModel = false; return }
         haveModel = Downloader.haveLayers(model, 0, l.nLayer)
+    }
+
+    func downloadMTP() {
+        guard let m = model.mtp else { return }
+        Task {
+            await mtpDownloader.download(m, layers: nil, mtp: true)
+            await MainActor.run { self.refresh() }
+        }
     }
 
     func download() {
@@ -124,9 +141,11 @@ final class HostController: ObservableObject {
         let ip = solo ? "" : workerIP.trimmingCharacters(in: .whitespaces)
         let pin = UInt32(self.pin) ?? 0
         let ctx = Int32(self.ctx)
+        let mtpPath = (useMTP && haveMTP) ? model.mtp.map { Paths.file(for: $0).path } ?? "" : ""
+        let draft = Int32(mtpPath.isEmpty ? 0 : self.draft)
         queue.async {
-            var info = [CChar](repeating: 0, count: 512), err = [CChar](repeating: 0, count: 256)
-            let h = xjg_host_new(path, ip, 47321, pin, 0, 0, ctx, &info, Int32(info.count), &err, Int32(err.count))
+            var info = [CChar](repeating: 0, count: 640), err = [CChar](repeating: 0, count: 256)
+            let h = xjg_host_new(path, ip, 47321, pin, 0, 0, ctx, mtpPath, draft, &info, Int32(info.count), &err, Int32(err.count))
             let i = cString(info), e = cString(err)
             DispatchQueue.main.async {
                 self.connecting = false
@@ -211,6 +230,11 @@ final class HostController: ObservableObject {
                 if st.remote_ms > 0 {
                     s += String(format: "\n每个字：本机 %.0f ms，从机 %.0f ms，等从机（含 Wi‑Fi）%.0f ms", st.local_ms, st.remote_ms, st.wait_ms)
                 }
+                if st.spec_steps > 0 {
+                    s += String(format: "\n投机解码：猜中 %.0f%%，每步出 %.1f 个字，猜字 %.0f ms/步",
+                                100.0 * Double(st.spec_accepted) / Double(max(st.spec_drafted, 1)),
+                                Double(st.gen_tokens) / Double(st.spec_steps), st.draft_ms)
+                }
                 s += "\n上下文 \(st.n_past)/\(st.n_ctx)"
                 if st.reconnects > 0 { s += " · 从机断线后自动恢复过 \(st.reconnects) 次" }
                 self.stats = s
@@ -269,6 +293,26 @@ struct HostView: View {
                     TextField("配对码（从机屏幕上）", text: $c.pin).keyboardType(.numberPad)
                 }
                 if let m = c.memoryNote { Text(m).font(.footnote).foregroundColor(.secondary) }
+            }
+
+            if let m = c.model.mtp {
+                Section(header: Text("加速：MTP 投机解码"), footer: Text("Qwen3.5 自带一个猜字的小层（MTP）。主机先猜后面几个字，两台手机一次把这几个字一起验证，猜对几个就一次出几个；猜错的作废，回答和不加速时一样。只多下约 150 MB。")) {
+                    Toggle("开启", isOn: $c.useMTP)
+                    if c.useMTP {
+                        if let p = c.mtpDownloader.progress {
+                            ProgressView(value: p)
+                            Text(c.mtpDownloader.status).font(.footnote)
+                            Button("取消", role: .destructive) { c.mtpDownloader.cancel() }
+                        } else if c.haveMTP {
+                            Label("MTP 层已在本机", systemImage: "checkmark.circle.fill").foregroundColor(.green)
+                        } else {
+                            Button("下载 MTP 层（约 150 MB）") { c.downloadMTP() }
+                            Text(m.path.components(separatedBy: "/resolve/").first ?? "").font(.footnote).foregroundColor(.secondary)
+                        }
+                        if !c.mtpDownloader.error.isEmpty { Text(c.mtpDownloader.error).foregroundColor(.red).font(.footnote) }
+                        Stepper("每步猜 \(c.draft) 个字", value: $c.draft, in: 1...4)
+                    }
+                }
             }
 
             Section(header: Text("设置")) {

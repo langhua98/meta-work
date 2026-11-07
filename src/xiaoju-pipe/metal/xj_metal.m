@@ -14,7 +14,7 @@
 #include "../core/xj_stage.h"
 #include "xj_shader_types.h"
 
-typedef struct { uint64_t file_off; uint32_t buf; uint64_t off; } wmap;
+typedef struct { const void *data; uint32_t buf; uint64_t off; } wmap;   // 按数据指针找（MTP 可能来自另一个文件）
 
 @interface XJMetal : NSObject
 @property(nonatomic, strong) id<MTLDevice> dev;
@@ -22,6 +22,8 @@ typedef struct { uint64_t file_off; uint32_t buf; uint64_t off; } wmap;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *pso;
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *wbufs;
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *kc, *vc, *conv, *ssm;  // 每层一个（没用的放占位）
+@property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *ckc, *cks;  // 投机解码存档（每层一个，没用的放占位）
+@property(nonatomic) int n_ck;    // 每层存档位数
 @property(nonatomic, strong) id<MTLBuffer> x, h, A, B, C, D, G, SC, logits, dummy;
 @property(nonatomic) BOOL simd;   // 能用 mvs_*（simd_sum 版矩阵乘）
 @property(nonatomic) uint32_t lanes;  // mv1_* 每行几个线程（自动调优选出来的）
@@ -74,14 +76,18 @@ static const char *mv_name(uint32_t type, bool one) {
 // ---------- 权重映射 ----------
 
 static int find_map(metal_impl *im, const xj_w *w) {
-    for (int i = 0; i < im->n_maps; i++) if (im->maps[i].file_off == w->file_off) return i;
+    for (int i = 0; i < im->n_maps; i++) if (im->maps[i].data == w->data) return i;
     return -1;
 }
 
 static void collect(const xj_w *w, const xj_w **list, int *n) {
-    if (!w->nbytes) return;
-    for (int i = 0; i < *n; i++) if (list[i]->file_off == w->file_off) return;
+    if (!w->nbytes || !w->data) return;
+    for (int i = 0; i < *n; i++) if (list[i]->data == w->data) return;
     list[(*n)++] = w;
+}
+
+static bool in_map(const gguf_file *g, const xj_w *w) {
+    return g && g->map && (const uint8_t *)w->data >= g->map && (const uint8_t *)w->data + w->nbytes <= g->map + g->map_len;
 }
 
 static int cmp_w(const void *a, const void *b) {
@@ -89,21 +95,11 @@ static int cmp_w(const void *a, const void *b) {
     return x->file_off < y->file_off ? -1 : x->file_off > y->file_off;
 }
 
-static bool map_weights(xj_stage *s, metal_impl *im, XJMetal *o, char *err, size_t errlen) {
-    const xj_model *m = s->m;
+// 把 list 里（都在文件 g 里）的权重按文件顺序装进 GPU 缓冲
+static bool map_list(const gguf_file *g, const xj_w **list, int n, metal_impl *im, XJMetal *o, char *err, size_t errlen) {
     const uint64_t page = (uint64_t)getpagesize();
     const uint64_t maxlen = o.dev.maxBufferLength;
-    const xj_w **list = calloc(64 * (s->l1 - s->l0) + 8, sizeof(xj_w *));
-    int n = 0;
-    for (int il = s->l0; il < s->l1; il++) {
-        const xj_w *ws = (const xj_w *)&m->layers[il].attn_norm;
-        int count = (int)((sizeof(xj_layer) - offsetof(xj_layer, attn_norm)) / sizeof(xj_w));
-        for (int k = 0; k < count; k++) collect(&ws[k], list, &n);
-    }
-    if (s->has_head) { collect(&m->output_norm, list, &n); collect(&m->output, list, &n); }
     qsort(list, n, sizeof(list[0]), cmp_w);
-    im->maps = calloc(n ? n : 1, sizeof(wmap));
-    o.wbufs = [NSMutableArray array];
     // 按文件顺序把相邻权重装进同一个缓冲，每个缓冲不超过设备上限
     int i = 0;
     while (i < n) {
@@ -115,32 +111,63 @@ static bool map_weights(xj_stage *s, metal_impl *im, XJMetal *o, char *err, size
             // 中间隔着一大段别人的权重（比如主机后半段和输出头之间夹着从机那几层）就另起一个缓冲，
             // 不把用不到的那 1 GB 也交给 GPU
             if (j > i && list[j]->file_off > end + (8u << 20)) break;
-            if (e - start > maxlen) { snprintf(err, errlen, "一个张量就超过 GPU 缓冲上限（%llu MB）", maxlen >> 20); free(list); return false; }
+            if (e - start > maxlen) { snprintf(err, errlen, "一个张量就超过 GPU 缓冲上限（%llu MB）", maxlen >> 20); return false; }
             if (e > end) end = e;
             j++;
         }
-        const void *ptr = gguf_ptr(m->gguf, start, 1);
-        if (!ptr || start < m->gguf->map_off) { snprintf(err, errlen, "第 %d 层之后的权重没映射", s->l0); free(list); return false; }
-        id<MTLBuffer> b = [o.dev newBufferWithBytesNoCopy:(void *)ptr length:end - start
+        if (start < g->map_off) start = g->map_off;   // 映射起点（已按页对齐）之前的不在内存里
+        if (end > g->map_off + g->map_len) end = g->map_off + g->map_len;
+        const void *ptr = gguf_ptr(g, start, 1);
+        if (!ptr) { snprintf(err, errlen, "权重没映射进来"); return false; }
+        id<MTLBuffer> b = [o.dev newBufferWithBytesNoCopy:(void *)ptr length:(end - start + page - 1) / page * page
                                                   options:MTLResourceStorageModeShared deallocator:nil];
-        if (!b) { snprintf(err, errlen, "GPU 映射权重失败（%llu MB）", (end - start) >> 20); free(list); return false; }
+        if (!b) { snprintf(err, errlen, "GPU 映射权重失败（%llu MB）", (end - start) >> 20); return false; }
         for (int k = i; k < j; k++) {
             wmap *mp = &im->maps[im->n_maps++];
-            mp->file_off = list[k]->file_off;
+            mp->data = list[k]->data;
             mp->buf = (uint32_t)o.wbufs.count;
             mp->off = list[k]->file_off - start;
         }
         [o.wbufs addObject:b];
         i = j;
     }
+    return true;
+}
+
+static bool map_weights(xj_stage *s, metal_impl *im, XJMetal *o, char *err, size_t errlen) {
+    const xj_model *m = s->m;
+    const uint64_t page = (uint64_t)getpagesize();
+    const xj_w **all = calloc(64 * (s->l1 - s->l0) + 16, sizeof(xj_w *));
+    int n = 0;
+    for (int il = s->l0; il < s->l1; il++) {
+        const xj_w *ws = (const xj_w *)&m->layers[il].attn_norm;
+        int count = (int)((sizeof(xj_layer) - offsetof(xj_layer, attn_norm)) / sizeof(xj_w));
+        for (int k = 0; k < count; k++) collect(&ws[k], all, &n);
+    }
+    if (s->has_head) { collect(s->mtp ? &m->mtp_head_norm : &m->output_norm, all, &n); collect(&m->output, all, &n); }
+    if (s->mtp) { collect(&m->mtp_eh, all, &n); collect(&m->mtp_enorm, all, &n); collect(&m->mtp_hnorm, all, &n); }
+    im->maps = calloc(n ? n : 1, sizeof(wmap));
+    o.wbufs = [NSMutableArray array];
+    // MTP 层可能在另一个文件里：按所在文件分开装
+    const gguf_file *files[2] = { m->gguf, m->mtp_gguf };
+    const xj_w **list = calloc(n ? n : 1, sizeof(xj_w *));
+    int done = 0;
+    for (int f = 0; f < 2; f++) {
+        if (!files[f]) continue;
+        int k = 0;
+        for (int i = 0; i < n; i++) if (in_map(files[f], all[i])) list[k++] = all[i];
+        if (k && !map_list(files[f], list, k, im, o, err, errlen)) { free(all); free(list); return false; }
+        done += k;
+    }
+    if (done != n) { snprintf(err, errlen, "第 %d 层之后有权重没映射进来", s->l0); free(all); free(list); return false; }
     // 预读：每页摸一下，第一个 token 就不用等闪存（7P 上 8 层约 1 GB，要几秒）
     volatile uint8_t sink = 0;
     for (int k = 0; k < n; k++) {
-        const uint8_t *p = list[k]->data;
-        for (uint64_t off = 0; off < list[k]->nbytes; off += page) sink ^= p[off];
+        const uint8_t *p = all[k]->data;
+        for (uint64_t off = 0; off < all[k]->nbytes; off += page) sink ^= p[off];
     }
     (void)sink;
-    free(list);
+    free(all); free(list);
     return true;
 }
 
@@ -338,7 +365,7 @@ static void enc_linear(id<MTLComputeCommandEncoder> enc, xj_stage *s, int il, in
     enc_mv(enc, s, &L->ssm_beta, o.h, 0, E, o.C, 0, Hv, T, false);
     enc_mv(enc, s, &L->ssm_alpha, o.h, 0, E, o.D, 0, Hv, T, false);
     {
-        xj_conv_args a = { (uint32_t)T, CD, (uint32_t)hp->conv_k, 0 };
+        xj_conv_args a = { (uint32_t)T, CD, (uint32_t)hp->conv_k, 0, s->keep ? (uint32_t)T - 1 : 0 };
         uint32_t groups = (CD + 63) / 64;
         a.grid_x = gx_of(groups);
         [enc setComputePipelineState:P(o, "xj_conv_silu")];
@@ -346,13 +373,15 @@ static void enc_linear(id<MTLComputeCommandEncoder> enc, xj_stage *s, int il, in
         [enc setBuffer:o.conv[li] offset:0 atIndex:1];
         set_w(enc, s, &L->ssm_conv1d, 2);
         [enc setBytes:&a length:sizeof a atIndex:3];
+        [enc setBuffer:(a.ck_n ? o.ckc[li] : o.dummy) offset:0 atIndex:4];
         dispatch(enc, groups, 64);
     }
     view qv = { o.A, 0, CD, S }, kv = { o.A, (size_t)hp->key_dim, CD, S };
     enc_norm(enc, s, qv, qv, NULL, NULL, S, T * Hk, Hk, 1);
     enc_norm(enc, s, kv, kv, NULL, NULL, S, T * Hk, Hk, 1);
     {
-        xj_dn_args a = { (uint32_t)T, Hk, Hv, S, CD, (uint32_t)hp->key_dim, (uint32_t)(2 * hp->key_dim), DI, 1.0f / sqrtf((float)S) };
+        xj_dn_args a = { (uint32_t)T, Hk, Hv, S, CD, (uint32_t)hp->key_dim, (uint32_t)(2 * hp->key_dim), DI, 1.0f / sqrtf((float)S),
+                         s->keep ? (uint32_t)T - 1 : 0 };
         [enc setComputePipelineState:P(o, "xj_delta_net")];
         [enc setBuffer:o.A offset:0 atIndex:0];
         [enc setBuffer:o.C offset:0 atIndex:1];
@@ -362,6 +391,7 @@ static void enc_linear(id<MTLComputeCommandEncoder> enc, xj_stage *s, int il, in
         [enc setBuffer:o.ssm[li] offset:0 atIndex:5];
         [enc setBuffer:o.G offset:0 atIndex:6];
         [enc setBytes:&a length:sizeof a atIndex:7];
+        [enc setBuffer:(a.ck_n ? o.cks[li] : o.dummy) offset:0 atIndex:8];
         [enc dispatchThreadgroups:MTLSizeMake(Hv, 1, 1) threadsPerThreadgroup:MTLSizeMake(S, 1, 1)];
     }
     view ov = { o.G, 0, DI, S }, zv = { o.B, 0, DI, S };
@@ -369,16 +399,47 @@ static void enc_linear(id<MTLComputeCommandEncoder> enc, xj_stage *s, int il, in
     enc_mv(enc, s, &L->ssm_out, o.G, 0, DI, o.x, 0, E, T, true);
 }
 
+// 投机解码存档位（每个线性注意力层 n 份状态），不够就重新分配
+static int ensure_ck(xj_stage *s, int n, char *err, size_t errlen) {
+    XJMetal *o = M(s);
+    const xj_hparams *hp = &s->m->hp;
+    if (n <= o.n_ck) return 0;
+    o.ckc = [NSMutableArray array]; o.cks = [NSMutableArray array];
+    for (int il = s->l0; il < s->l1; il++) {
+        if (s->m->layers[il].recurrent) {
+            id<MTLBuffer> c = [o.dev newBufferWithLength:(size_t)n * hp->conv_dim * (hp->conv_k - 1) * 4 options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> m = [o.dev newBufferWithLength:(size_t)n * hp->h_v * hp->s_v * hp->s_k * 4 options:MTLResourceStorageModePrivate];
+            if (!c || !m) { o.n_ck = 0; snprintf(err, errlen, "投机解码存档 GPU 内存不够"); return -1; }
+            [o.ckc addObject:c]; [o.cks addObject:m];
+        } else {
+            [o.ckc addObject:o.dummy]; [o.cks addObject:o.dummy];
+        }
+    }
+    o.n_ck = n;
+    return 0;
+}
+
 static int metal_forward(xj_stage *s, float *x, int T, char *err, size_t errlen) {
     XJMetal *o = M(s);
     const xj_hparams *hp = &s->m->hp;
     const uint32_t E = hp->n_embd, FF = hp->n_ff;
-    if (T <= 0 || T > s->max_batch) { snprintf(err, errlen, "一次 %d 个 token，超过上限 %d", T, s->max_batch); return -1; }
-    if (s->n_past + T > s->n_ctx) { snprintf(err, errlen, "上下文满了（%d）", s->n_ctx); return -1; }
-    memcpy(o.x.contents, x, (size_t)T * E * 4);
+    if (T <= 0 || T > s->max_batch) { snprintf(err, errlen, "一次 %d 个 token，超过上限 %d", T, s->max_batch); s->keep = 0; return -1; }
+    if (s->n_past + T > s->n_ctx) { snprintf(err, errlen, "上下文满了（%d）", s->n_ctx); s->keep = 0; return -1; }
+    if (s->keep && T > 1 && ensure_ck(s, T - 1, err, errlen)) { s->keep = 0; return -1; }
+    if (T == 1) s->keep = 0;   // 只有一个 token：退回只会退到它之后，也就是当前状态
+    s->ck_start = s->n_past;
+    s->ck_T = s->keep ? T : 0;
+    memcpy(s->mtp ? o.h.contents : o.x.contents, x, (size_t)T * E * 4 * (s->mtp ? 2 : 1));
     @autoreleasepool {
         id<MTLCommandBuffer> cb = [o.queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        if (s->mtp) {
+            // [embedding ‖ 隐藏向量] 各自 RMSNorm（原地），过 eh_proj 变回 n_embd
+            view e = { o.h, 0, 2 * E, 0 }, h = { o.h, E, 2 * E, 0 };
+            enc_norm(enc, s, e, e, &s->m->mtp_enorm, NULL, E, T, 1, 0);
+            enc_norm(enc, s, h, h, &s->m->mtp_hnorm, NULL, E, T, 1, 0);
+            enc_mv(enc, s, &s->m->mtp_eh, o.h, 0, 2 * E, o.x, 0, E, T, false);
+        }
         for (int il = s->l0; il < s->l1; il++) {
             const xj_layer *L = &s->m->layers[il];
             view xv = { o.x, 0, E, 0 }, hv = { o.h, 0, E, 0 };
@@ -409,26 +470,66 @@ static int metal_forward(xj_stage *s, float *x, int T, char *err, size_t errlen)
     }
     memcpy(x, o.x.contents, (size_t)T * E * 4);
     s->n_past += T;
+    s->keep = 0;
     return 0;
 }
 
-static int metal_logits(xj_stage *s, const float *x, float *logits, char *err, size_t errlen) {
+static int metal_logits(xj_stage *s, const float *x, int T, float *logits, char *err, size_t errlen) {
     XJMetal *o = M(s);
     const xj_hparams *hp = &s->m->hp;
+    const uint32_t E = hp->n_embd, V = (uint32_t)s->m->output.ne1;
     if (!s->has_head) { snprintf(err, errlen, "这一段没有输出头"); return -1; }
-    memcpy(o.x.contents, x, (size_t)hp->n_embd * 4);
+    if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "输出头一次 %d 个 token 超过上限", T); return -1; }
+    memcpy(o.x.contents, x, (size_t)T * E * 4);
     @autoreleasepool {
         id<MTLCommandBuffer> cb = [o.queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-        view xv = { o.x, 0, (uint32_t)hp->n_embd, 0 }, hv = { o.h, 0, (uint32_t)hp->n_embd, 0 };
-        enc_norm(enc, s, xv, hv, &s->m->output_norm, NULL, hp->n_embd, 1, 1, 0);
-        enc_mv(enc, s, &s->m->output, o.h, 0, hp->n_embd, o.logits, 0, (uint32_t)s->m->output.ne1, 1, false);
+        view xv = { o.x, 0, E, 0 }, hv = { o.h, 0, E, 0 };
+        enc_norm(enc, s, xv, hv, s->mtp ? &s->m->mtp_head_norm : &s->m->output_norm, NULL, E, (uint32_t)T, 1, 0);
+        enc_mv(enc, s, &s->m->output, o.h, 0, E, o.logits, 0, V, T, false);
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
         if (cb.status != MTLCommandBufferStatusCompleted) { snprintf(err, errlen, "GPU 出错"); return -1; }
     }
-    memcpy(logits, o.logits.contents, sizeof(float) * s->m->output.ne1);
+    memcpy(logits, o.logits.contents, sizeof(float) * V * T);
+    return 0;
+}
+
+// 退回到这批里第 j 个 token 之后：存档拷回状态（GPU 上拷，主机 24 层 × 2 MB 也就一两毫秒）
+static int metal_rollback(xj_stage *s, int n_past, char *err, size_t errlen) {
+    XJMetal *o = M(s);
+    const xj_hparams *hp = &s->m->hp;
+    if (n_past == s->n_past) { s->ck_T = 0; return 0; }
+    bool recurrent = false;
+    for (int il = s->l0; il < s->l1; il++) if (s->m->layers[il].recurrent) recurrent = true;
+    if (!recurrent) {
+        if (n_past < 0 || n_past > s->n_past) { snprintf(err, errlen, "退不到位置 %d", n_past); return -1; }
+        s->n_past = n_past;
+        return 0;
+    }
+    const int j = n_past - s->ck_start - 1;
+    if (!s->ck_T || s->n_past != s->ck_start + s->ck_T || j < 0 || j >= s->ck_T - 1) {
+        snprintf(err, errlen, "退不到位置 %d（存档 %d+%d，当前 %d）", n_past, s->ck_start, s->ck_T, s->n_past);
+        return -1;
+    }
+    const size_t nc = (size_t)hp->conv_dim * (hp->conv_k - 1) * 4, ns = (size_t)hp->h_v * hp->s_v * hp->s_k * 4;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = [o.queue commandBuffer];
+        id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+        for (int il = s->l0; il < s->l1; il++) {
+            if (!s->m->layers[il].recurrent) continue;
+            const int li = il - s->l0;
+            [bl copyFromBuffer:o.ckc[li] sourceOffset:(size_t)j * nc toBuffer:o.conv[li] destinationOffset:0 size:nc];
+            [bl copyFromBuffer:o.cks[li] sourceOffset:(size_t)j * ns toBuffer:o.ssm[li] destinationOffset:0 size:ns];
+        }
+        [bl endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) { snprintf(err, errlen, "GPU 出错（回退）"); return -1; }
+    }
+    s->n_past = n_past;
+    s->ck_T = 0;
     return 0;
 }
 
@@ -453,7 +554,8 @@ static void metal_destroy(xj_stage *s) {
 xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int max_batch, bool has_head,
                              char *err, size_t errlen) {
     const xj_hparams *hp = &m->hp;
-    if (l0 < 0 || l1 > hp->n_layer || l0 > l1) { snprintf(err, errlen, "层范围 [%d,%d) 不对", l0, l1); return NULL; }
+    const bool mtp = m->has_mtp && l0 == hp->n_layer && l1 == hp->n_layer + 1;
+    if (l0 < 0 || (l1 > hp->n_layer && !mtp) || l0 > l1) { snprintf(err, errlen, "层范围 [%d,%d) 不对", l0, l1); return NULL; }
     for (int il = l0; il < l1; il++)
         if (!m->layers[il].ffn_down.data) { snprintf(err, errlen, "第 %d 层权重没有映射进来", il); return NULL; }
     if (has_head && !m->output.data) { snprintf(err, errlen, "输出头没有映射进来"); return NULL; }
@@ -505,9 +607,10 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
 
     xj_stage *s = calloc(1, sizeof(*s));
     metal_impl *im = calloc(1, sizeof(*im));
-    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch; s->has_head = has_head;
+    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch; s->has_head = has_head; s->mtp = mtp;
     s->backend = "metal";
     s->forward = metal_forward; s->logits = metal_logits; s->reset = metal_reset; s->destroy = metal_destroy;
+    s->rollback = metal_rollback;
     s->impl = im;
     im->obj = (__bridge_retained void *)o;
 
@@ -518,7 +621,7 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
     size_t qkv = 2 * (size_t)hp->n_head * hp->head_dim + 2 * (size_t)hp->n_head_kv * hp->head_dim;
     if (qkv > sf) sf = qkv;
     if ((size_t)hp->conv_dim > sf) sf = hp->conv_dim;
-    if ((size_t)hp->n_embd > sf) sf = hp->n_embd;
+    if ((size_t)hp->n_embd * 2 > sf) sf = 2 * (size_t)hp->n_embd;   // MTP 的 [embedding ‖ 隐藏向量]
     sf *= max_batch;
     im->sf = sf;
     MTLResourceOptions sh = MTLResourceStorageModeShared;
@@ -531,7 +634,7 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
     o.G = [dev newBufferWithLength:sf * 4 options:sh];
     o.SC = [dev newBufferWithLength:(size_t)max_batch * hp->n_head * n_ctx * 4 options:sh];
     o.dummy = [dev newBufferWithLength:256 options:sh];
-    if (has_head) o.logits = [dev newBufferWithLength:(size_t)m->output.ne1 * 4 options:sh];
+    if (has_head) o.logits = [dev newBufferWithLength:(size_t)m->output.ne1 * max_batch * 4 options:sh];
     o.kc = [NSMutableArray array]; o.vc = [NSMutableArray array]; o.conv = [NSMutableArray array]; o.ssm = [NSMutableArray array];
     for (int il = l0; il < l1; il++) {
         if (m->layers[il].recurrent) {

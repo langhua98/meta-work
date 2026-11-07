@@ -77,6 +77,21 @@ Qwen3.5 每 4 层里 3 层是 **Gated DeltaNet**（线性注意力），第 4 �
 
 所以 9B 两台合跑估计**每秒 3–5 个字**。每次回答后，界面上会显示本机、从机、等待各占多少毫秒，可以按实际情况调整从机的层数。
 
+## MTP 投机解码（0.5.0 起）
+
+两台合跑时每个字都要两台手机各读一遍自己那部分权重，7 Plus 慢，整条流水线就慢。投机解码让「读一遍权重」出好几个字：
+
+1. Qwen3.5 训练时自带一个 MTP（多 token 预测）层：拿主干最后一层的输出（未过 `output_norm`）和下一个字的 embedding，
+   各自 RMSNorm 后拼起来过 `eh_proj`，再过一个全注意力层和共享的输出头，猜再下一个字。主机连猜 k 个（只算这一层，很便宜）。
+2. 把「这一个字 + k 个猜的字」一批送进整条流水线（`xj_pipeline_verify`），两台手机都只读一遍权重。
+3. 从头比：主干在每个位置采样出的字等于猜的字就接受，第一个不等的位置换成主干自己采样的字。输出分布和不投机完全一样（贪心时一字不差）。
+4. 猜错的字作废：KV 缓存直接截断；线性注意力层是递推的，所以验证时每段都给每个 token 留一份状态存档（`keep`），
+   退回时把对应的存档拷回来（`rollback`）。从机不用额外的消息：下一条 `FORWARD` 的起始位置比它当前位置小，它就先退回去。
+
+MTP 层来自 [prithivMLmods/Qwen3.5-9B-MTP-GGUF](https://huggingface.co/prithivMLmods/Qwen3.5-9B-MTP-GGUF)（unsloth 的 GGUF 把它去掉了）。
+App 只下那个文件的文件头和 MTP 层（`blk.32.*`，约 150 MB），挂到 unsloth 的模型上（`xj_model_attach_mtp`）；从机什么都不用多下。
+代码在 `core/xj_spec.c`，测试见 `tests/e2e.sh` 第 5 段和 CI 里的「真模型投机解码」。
+
 ## 怎么用
 
 1. 两台手机都装 [Release「xiaoju-pipe」](https://github.com/langhua98/meta-work/releases/tag/xiaoju-pipe) 里的 `XiaojuPipe-latest.ipa`（小橘云盘「软件包」里也有一份 `XiaojuPipe-版本-build构建号.ipa`）（没签名，用 SideStore 或自己的证书签）。连同一个 Wi‑Fi（个人热点也行）。
@@ -128,22 +143,23 @@ TCP，小端。每条消息 16 字节头：`'XJP1'`、类型、标志、长度�
 | 主机 → 从机 | 从机 → 主机 |
 |---|---|
 | `HELLO` 版本、配对码、模型指纹、层范围（0,0 = 用从机准备好的）、上下文长度、批大小 | `HELLO_OK` 实际层范围、可用内存、权重大小、后端、GPU 名字 |
-| `FORWARD` 起始位置、T、要哪些输出、T×n_embd 个 float | `FORWARD_OUT` 过完从机那几层的隐藏向量（全部 / 最后一个 / 不要）、从机算了多久 |
+| `FORWARD` 起始位置、T、要哪些输出（可以带「留存档」标记）、T×n_embd 个 float | `FORWARD_OUT` 过完从机那几层的隐藏向量（全部 / 最后一个 / 不要）、从机算了多久 |
 | `RESET` 新对话 | `ACK` |
 | `PING` | `PONG` |
 | `BYE` | `ERROR` 中文原因 |
 
 从机会核对位置：主机发来的起始位置和从机已经算过的位置对不上时，从机拒绝这一批，避免 KV 缓存错位。
+起始位置更小、并且落在上一批带存档的范围里时，从机先退回到那里（投机解码猜错了）。协议版本 2，两台手机要装同一个版本。
 
 ## 文件
 
 ```
 core/   gguf.c（GGUF 解析、部分映射）  xj_model.c（Qwen3.5 结构）  xj_cpu.c（CPU 参考实现）
-        xj_net.c（协议、从机服务、主机流水线）  xj_tok.c（分词）  xj_quant.h（量化格式解码）
+        xj_net.c（协议、从机服务、主机流水线）  xj_spec.c（MTP 投机解码）  xj_tok.c（分词）  xj_quant.h（量化格式解码）
 metal/  xj_kernels.metal（A10 兼容内核）  xj_metal.m（GPU 缓冲、编码每一层）  xj_shader_types.h
 ios/    project.yml  App/（SwiftUI 界面、分块下载、Bonjour、XJGlue.c 胶水）
 tools/  xjpipe-run / xjpipe-host / xjpipe-worker / xjpipe-check / xjpipe-tok / gguf-slice / gguf-dump
-tests/  unit.c  e2e.sh（端到端）  make_tiny_model.py（随机权重小模型）  tok_check.py + tok_corpus.jsonl（分词对照）
+tests/  unit.c  e2e.sh（端到端）  make_tiny_model.py（随机权重小模型，--mtp 带 MTP 层）  mtp_sparse.py（只留 MTP 层）  tok_check.py + tok_corpus.jsonl（分词对照）
 ```
 
 ## 已知限制

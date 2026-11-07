@@ -50,7 +50,14 @@ typedef struct {
     xj_hparams hp;
     xj_w tok_embd, output_norm, output;    // output 为空时和 tok_embd 共用
     xj_layer layers[XJ_MAX_LAYERS];
-    uint64_t fingerprint;                  // 两台手机核对是不是同一个模型文件
+    uint64_t fingerprint;                  // 两台手机核对是不是同一个模型文件（不含 MTP 层）
+
+    // MTP（多 token 预测）头：投机解码时猜后面的字。结构 = 一个全注意力层（放在 layers[n_layer]）
+    // 前面加 enorm(下一个字的 embedding) ‖ hnorm(主干最后一层的输出，未过 output_norm) → eh_proj，
+    // 后面用 shared_head_norm + 主干的输出头。可以在模型文件里，也可以从另一个带 MTP 的 GGUF 单独挂上来。
+    bool has_mtp;
+    xj_w mtp_eh, mtp_enorm, mtp_hnorm, mtp_head_norm;
+    gguf_file *mtp_gguf;                   // MTP 来自另一个文件时（否则 NULL）
 } xj_model;
 
 // 打开模型。只解析结构，权重留在 mmap 里，用到哪层读哪层（没用到的页不进内存）。
@@ -60,6 +67,11 @@ xj_model *xj_model_load_layers(const char *path, int l0, int l1, bool with_io, c
 // 只用头部建结构（data 都为 NULL），从机按这个算出要下载哪些字节
 xj_model *xj_model_from_gguf(gguf_file *g, char *err, size_t errlen);
 void xj_model_free(xj_model *m);
+// 从另一个带 MTP 头的 GGUF（同一个模型，比如 prithivMLmods/Qwen3.5-9B-MTP-GGUF）挂上 MTP 层。
+// 那个文件只需要文件头和 MTP 层那一段（其余可以是空洞），见 xj_model_mtp_ranges。
+int xj_model_attach_mtp(xj_model *m, const char *path, char *err, size_t errlen);
+// 带 MTP 的 GGUF 里 MTP 层的字节范围 [lo, hi)（App 只下这一段）；没有 MTP 返回 -1
+int xj_model_mtp_range(gguf_file *g, uint64_t *lo, uint64_t *hi, char *err, size_t errlen);
 
 // [l0, l1) 这些层的权重在文件里的字节范围（按偏移排好、相邻的已合并）。
 // 输出到 ranges（每项 [起点, 终点)），返回个数；include_embd 时把 embedding / 输出头也算上。

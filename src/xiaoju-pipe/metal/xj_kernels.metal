@@ -525,6 +525,7 @@ kernel void xj_attn_out(device const float *sc [[buffer(0)]], device const half 
 // 因果卷积 + silu（原地）。一个线程一个通道，按 token 顺序走，卷积状态留着给下一批
 kernel void xj_conv_silu(device float *x [[buffer(0)]], device float *state [[buffer(1)]],
                          device const float *w [[buffer(2)]], constant xj_conv_args &a [[buffer(3)]],
+                         device float *ck [[buffer(4)]],
                          uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
                          uint3 ntg3 [[threads_per_threadgroup]]) {
     const uint ntg = ntg3.x;
@@ -540,6 +541,8 @@ kernel void xj_conv_silu(device float *x [[buffer(0)]], device float *state [[bu
         for (uint k = 0; k + 2 < a.K; k++) st[k] = st[k + 1];
         st[a.K - 2] = xv;
         x[t * a.C + c] = silu_f(acc);
+        if (t < a.ck_n)
+            for (uint k = 0; k + 1 < a.K; k++) ck[(t * a.C + c) * (a.K - 1) + k] = st[k];
     }
     for (uint k = 0; k + 1 < a.K; k++) state[c * (a.K - 1) + k] = st[k];
 }
@@ -550,6 +553,7 @@ kernel void xj_delta_net(device const float *qkv [[buffer(0)]], device const flo
                          device const float *alpha_raw [[buffer(2)]], device const float *dt [[buffer(3)]],
                          device const float *A [[buffer(4)]], device float *state [[buffer(5)]],
                          device float *out [[buffer(6)]], constant xj_dn_args &a [[buffer(7)]],
+                         device float *ck [[buffer(8)]],
                          uint3 tg [[threadgroup_position_in_grid]], uint j [[thread_index_in_threadgroup]]) {
     threadgroup float kk[512], qq[512];
     const uint hv = tg.x, hk = hv % a.Hk, S = a.S;
@@ -571,9 +575,12 @@ kernel void xj_delta_net(device const float *qkv [[buffer(0)]], device const flo
         }
         const float delta = (row[a.v_off + hv * S + j] - sk) * b;
         float o = 0;
+        device float *C = ck + ((ulong)t * a.Hv + hv) * S * S;
+        const bool keep = t < a.ck_n;
         for (uint i = 0; i < S; i++) {
             float m = M[i * S + j] + kk[i] * delta;
             M[i * S + j] = m;
+            if (keep) C[i * S + j] = m;
             o += m * qq[i];
         }
         out[t * a.out_tok_stride + hv * S + j] = o * a.qscale;

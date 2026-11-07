@@ -13,6 +13,8 @@ typedef struct {
     float *kc, *vc;
     // 线性注意力层：卷积状态 [conv_dim][conv_k-1]，递推状态 [h_v][s_v][s_k]（第 j 行是 value 的第 j 维）
     float *conv, *ssm;
+    // 投机解码存档：第 t 个 token 算完后的状态（t < n_ck）
+    float *ck_conv, *ck_ssm;
 } cpu_lstate;
 
 typedef struct {
@@ -21,6 +23,7 @@ typedef struct {
     float *h, *a, *b, *c, *d, *g, *u;
     float *rowbuf;    // 每个线程一行解码缓冲
     int nthreads;
+    int n_ck;         // 每层有几个存档位
 } cpu_impl;
 
 // ---------- 基础算子 ----------
@@ -189,6 +192,7 @@ static void attn_linear(xj_stage *s, cpu_impl *im, int il, const float *h, float
             }
         }
         float *ot = o + (size_t)t * hp->d_inner;
+        const bool ck = s->keep && t < T - 1;
 #pragma omp parallel for schedule(static)
         for (int hv = 0; hv < Hv; hv++) {
             const int hk = hv % Hk;  // 和 ggml_repeat 一样：value 头按 key 头数取模
@@ -211,19 +215,50 @@ static void attn_linear(xj_stage *s, cpu_impl *im, int il, const float *h, float
             const float *zh = z + (size_t)t * hp->d_inner + hv * S;
             rmsnorm(oh, oh, nw, S, hp->eps);
             for (int j = 0; j < S; j++) oh[j] *= silu(zh[j]);
+            if (ck) memcpy(st->ck_ssm + ((size_t)t * Hv + hv) * S * S, M, sizeof(float) * S * S);
         }
+        if (ck) memcpy(st->ck_conv + (size_t)t * CD * (KC - 1), st->conv, sizeof(float) * CD * (KC - 1));
     }
     matmul(im, &L->ssm_out, o, out, T);
 }
 
 // ---------- 整段 ----------
 
+// 存档位不够就加（每层 T-1 个：最后一个 token 之后的状态就是当前状态）
+static int ensure_ck(xj_stage *s, int n, char *err, size_t errlen) {
+    cpu_impl *im = s->impl;
+    const xj_hparams *hp = &s->m->hp;
+    if (n <= im->n_ck) return 0;
+    for (int il = s->l0; il < s->l1; il++) {
+        cpu_lstate *st = &im->ls[il - s->l0];
+        if (!st->ssm) continue;
+        free(st->ck_conv); free(st->ck_ssm);
+        st->ck_conv = malloc(sizeof(float) * n * hp->conv_dim * (hp->conv_k - 1));
+        st->ck_ssm = malloc(sizeof(float) * n * hp->h_v * hp->s_v * hp->s_k);
+        if (!st->ck_conv || !st->ck_ssm) { snprintf(err, errlen, "投机解码存档内存不够"); im->n_ck = 0; return -1; }
+    }
+    im->n_ck = n;
+    return 0;
+}
+
 static int cpu_forward(xj_stage *s, float *x, int T, char *err, size_t errlen) {
     cpu_impl *im = s->impl;
     const xj_hparams *hp = &s->m->hp;
     const int E = hp->n_embd;
-    if (T <= 0 || T > s->max_batch) { snprintf(err, errlen, "一次 %d 个 token，超过上限 %d", T, s->max_batch); return -1; }
-    if (s->n_past + T > s->n_ctx) { snprintf(err, errlen, "上下文满了（%d）", s->n_ctx); return -1; }
+    if (T <= 0 || T > s->max_batch) { snprintf(err, errlen, "一次 %d 个 token，超过上限 %d", T, s->max_batch); s->keep = 0; return -1; }
+    if (s->n_past + T > s->n_ctx) { snprintf(err, errlen, "上下文满了（%d）", s->n_ctx); s->keep = 0; return -1; }
+    if (s->keep && ensure_ck(s, T - 1, err, errlen)) { s->keep = 0; return -1; }
+    s->ck_start = s->n_past;
+    s->ck_T = s->keep ? T : 0;
+    if (s->mtp) {
+        // [embedding ‖ 隐藏向量] 各自 RMSNorm，拼起来过 eh_proj 变回 n_embd
+        const xj_model *m = s->m;
+        for (int t = 0; t < T; t++) {
+            rmsnorm(im->h + (size_t)t * 2 * E, x + (size_t)t * 2 * E, F(&m->mtp_enorm), E, hp->eps);
+            rmsnorm(im->h + (size_t)t * 2 * E + E, x + (size_t)t * 2 * E + E, F(&m->mtp_hnorm), E, hp->eps);
+        }
+        matmul(im, &m->mtp_eh, im->h, x, T);
+    }
 
     for (int il = s->l0; il < s->l1; il++) {
         const xj_layer *L = &s->m->layers[il];
@@ -240,14 +275,46 @@ static int cpu_forward(xj_stage *s, float *x, int T, char *err, size_t errlen) {
         for (size_t i = 0; i < (size_t)T * E; i++) x[i] += im->u[i];
     }
     s->n_past += T;
+    s->keep = 0;
     return 0;
 }
 
-static int cpu_logits(xj_stage *s, const float *x, float *logits, char *err, size_t errlen) {
+static int cpu_logits(xj_stage *s, const float *x, int T, float *logits, char *err, size_t errlen) {
     cpu_impl *im = s->impl;
+    const int E = s->m->hp.n_embd;
     if (!s->has_head) { snprintf(err, errlen, "这一段没有输出头"); return -1; }
-    rmsnorm(im->h, x, F(&s->m->output_norm), s->m->hp.n_embd, s->m->hp.eps);
-    matmul(im, &s->m->output, im->h, logits, 1);
+    if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "输出头一次 %d 个 token 超过上限", T); return -1; }
+    const xj_w *nw = s->mtp ? &s->m->mtp_head_norm : &s->m->output_norm;
+    for (int t = 0; t < T; t++) rmsnorm(im->h + (size_t)t * E, x + (size_t)t * E, F(nw), E, s->m->hp.eps);
+    matmul(im, &s->m->output, im->h, logits, T);
+    return 0;
+}
+
+static int cpu_rollback(xj_stage *s, int n_past, char *err, size_t errlen) {
+    cpu_impl *im = s->impl;
+    const xj_hparams *hp = &s->m->hp;
+    if (n_past == s->n_past) { s->ck_T = 0; return 0; }
+    bool recurrent = false;
+    for (int il = s->l0; il < s->l1; il++) if (im->ls[il - s->l0].ssm) recurrent = true;
+    if (!recurrent) {
+        if (n_past < 0 || n_past > s->n_past) { snprintf(err, errlen, "退不到位置 %d", n_past); return -1; }
+        s->n_past = n_past;
+        return 0;
+    }
+    const int j = n_past - s->ck_start - 1;
+    if (!s->ck_T || s->n_past != s->ck_start + s->ck_T || j < 0 || j >= s->ck_T - 1) {
+        snprintf(err, errlen, "退不到位置 %d（存档 %d+%d，当前 %d）", n_past, s->ck_start, s->ck_T, s->n_past);
+        return -1;
+    }
+    const size_t nc = (size_t)hp->conv_dim * (hp->conv_k - 1), ns = (size_t)hp->h_v * hp->s_v * hp->s_k;
+    for (int il = s->l0; il < s->l1; il++) {
+        cpu_lstate *st = &im->ls[il - s->l0];
+        if (!st->ssm) continue;
+        memcpy(st->conv, st->ck_conv + (size_t)j * nc, nc * 4);
+        memcpy(st->ssm, st->ck_ssm + (size_t)j * ns, ns * 4);
+    }
+    s->n_past = n_past;
+    s->ck_T = 0;
     return 0;
 }
 
@@ -268,6 +335,7 @@ static void cpu_destroy(xj_stage *s) {
     if (im) {
         if (im->ls) for (int i = 0; i < s->l1 - s->l0; i++) {
             free(im->ls[i].kc); free(im->ls[i].vc); free(im->ls[i].conv); free(im->ls[i].ssm);
+            free(im->ls[i].ck_conv); free(im->ls[i].ck_ssm);
         }
         free(im->ls); free(im->h); free(im->a); free(im->b); free(im->c); free(im->d); free(im->g); free(im->u);
         free(im->rowbuf);
@@ -281,7 +349,7 @@ static size_t scratch_floats(const xj_hparams *hp) {
     size_t qkv = 2 * (size_t)hp->n_head * hp->head_dim + 2 * (size_t)hp->n_head_kv * hp->head_dim;
     if (qkv > n) n = qkv;
     if ((size_t)hp->conv_dim > n) n = hp->conv_dim;
-    if ((size_t)hp->n_embd > n) n = hp->n_embd;
+    if ((size_t)hp->n_embd * 2 > n) n = 2 * (size_t)hp->n_embd;   // MTP 的 [embedding ‖ 隐藏向量]
     return n;
 }
 
@@ -307,16 +375,18 @@ void xj_embed(const xj_model *m, int32_t token, float *out) {
 xj_stage *xj_cpu_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int max_batch, bool has_head,
                            char *err, size_t errlen) {
     const xj_hparams *hp = &m->hp;
-    if (l0 < 0 || l1 > hp->n_layer || l0 > l1) { snprintf(err, errlen, "层范围 [%d,%d) 不对", l0, l1); return NULL; }
+    const bool mtp = m->has_mtp && l0 == hp->n_layer && l1 == hp->n_layer + 1;
+    if (l0 < 0 || (l1 > hp->n_layer && !mtp) || l0 > l1) { snprintf(err, errlen, "层范围 [%d,%d) 不对", l0, l1); return NULL; }
     if (hp->head_dim > 1024) { snprintf(err, errlen, "头维度太大"); return NULL; }
     for (int il = l0; il < l1; il++)
         if (!m->layers[il].ffn_down.data) { snprintf(err, errlen, "第 %d 层权重没有映射进来", il); return NULL; }
     if (has_head && !m->output.data) { snprintf(err, errlen, "输出头没有映射进来"); return NULL; }
     xj_stage *s = calloc(1, sizeof(*s));
     cpu_impl *im = calloc(1, sizeof(*im));
-    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch; s->has_head = has_head;
+    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch; s->has_head = has_head; s->mtp = mtp;
     s->backend = "cpu";
     s->forward = cpu_forward; s->logits = cpu_logits; s->reset = cpu_reset; s->destroy = cpu_destroy;
+    s->rollback = cpu_rollback;
     s->impl = im;
 
     im->nthreads = 1;
@@ -324,10 +394,9 @@ xj_stage *xj_cpu_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int max
     im->nthreads = omp_get_max_threads();
 #endif
     size_t sf = scratch_floats(hp) * (size_t)max_batch;
-    if (has_head && (size_t)hp->n_embd > sf) sf = hp->n_embd;
     im->h = malloc(sf * 4); im->a = malloc(sf * 4); im->b = malloc(sf * 4); im->c = malloc(sf * 4);
     im->d = malloc(sf * 4); im->g = malloc(sf * 4); im->u = malloc(sf * 4);
-    int64_t maxk = hp->n_embd;
+    int64_t maxk = 2 * (int64_t)hp->n_embd;
     if (hp->n_ff > maxk) maxk = hp->n_ff;
     if (hp->d_inner > maxk) maxk = hp->d_inner;
     if ((int64_t)hp->n_head * hp->head_dim > maxk) maxk = (int64_t)hp->n_head * hp->head_dim;

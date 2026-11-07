@@ -5,6 +5,7 @@
 权重是随机的，说出来的是乱码，但贪心解码是确定的，可以逐字对照。
 
     python3 tests/make_tiny_model.py /tmp/tiny.gguf
+    python3 tests/make_tiny_model.py /tmp/tiny-mtp.gguf --mtp   # 多一层 MTP（投机解码用），主干权重一样
 """
 import struct
 import sys
@@ -108,6 +109,26 @@ for i in range(LAYERS):
         add(p + "attn_q_norm.weight", norm_w(D))
         add(p + "attn_k_norm.weight", norm_w(D))
 
+MTP = "--mtp" in sys.argv[2:]
+if MTP:
+    # MTP 层：blk.{LAYERS}，一个全注意力层 + nextn.*（和 prithivMLmods 的 Qwen3.5-*-MTP-GGUF 一样的名字）
+    p = f"blk.{LAYERS}."
+    add(p + "attn_norm.weight", norm_w(E))
+    add(p + "post_attention_norm.weight", norm_w(E))
+    add(p + "ffn_gate.weight", f32(E, FF), 8)
+    add(p + "ffn_up.weight", f32(E, FF), 8)
+    add(p + "ffn_down.weight", f32(FF, E))
+    add(p + "attn_q.weight", f32(E, 2 * H * D), 8)
+    add(p + "attn_k.weight", f32(E, HKV * D))
+    add(p + "attn_v.weight", f32(E, HKV * D))
+    add(p + "attn_output.weight", f32(H * D, E))
+    add(p + "attn_q_norm.weight", norm_w(D))
+    add(p + "attn_k_norm.weight", norm_w(D))
+    add(p + "nextn.eh_proj.weight", f32(2 * E, E), 8)
+    add(p + "nextn.enorm.weight", norm_w(E))
+    add(p + "nextn.hnorm.weight", norm_w(E))
+    add(p + "nextn.shared_head_norm.weight", norm_w(E))
+
 # ---- 写 GGUF v3 ----
 def s(x):
     b = x.encode()
@@ -118,7 +139,7 @@ kvs = [
     ("general.architecture", STR, "qwen35"),
     ("general.name", STR, "xiaoju-tiny-random"),
     ("general.alignment", U32, ALIGN),
-    ("qwen35.block_count", U32, LAYERS),
+    ("qwen35.block_count", U32, LAYERS + (1 if MTP else 0)),
     ("qwen35.context_length", U32, 4096),
     ("qwen35.embedding_length", U32, E),
     ("qwen35.feed_forward_length", U32, FF),
@@ -135,6 +156,7 @@ kvs = [
     ("qwen35.ssm.group_count", U32, HK),
     ("qwen35.ssm.time_step_rank", U32, HV),
     ("qwen35.full_attention_interval", U32, 4),
+] + ([("qwen35.nextn_predict_layers", U32, 1)] if MTP else []) + [
     ("tokenizer.ggml.model", STR, "gpt2"),
     ("tokenizer.ggml.tokens", ARR, (STR, tokens)),
     ("tokenizer.ggml.merges", ARR, (STR, merges)),

@@ -42,12 +42,18 @@ typedef struct {
     double local_ms, remote_ms, wait_ms;   // 每个生成 token 的平均耗时
     int    n_past, n_ctx;
     int    reconnects;                     // 连上以来从机断线后自动恢复了几次
+    int    spec_steps, spec_drafted, spec_accepted;   // 投机解码：几步、猜了几个、猜中几个
+    double draft_ms;                       // MTP 猜字平均每步多少毫秒
 } xjg_stats;
 
 // worker_host 为空：整个模型都在本机跑。s1 = s2 = 0：用从机准备好的层。
-// info 里写一句「从机 xxx，第 a–b 层」之类的说明。
+// mtp_path：带 MTP 头的 GGUF（可以只下了文件头和 MTP 层），draft > 0 时用它做投机解码，每步猜 draft 个字；
+// 为空或 draft = 0 就不投机。info 里写一句「从机 xxx，第 a–b 层」之类的说明。
 void *xjg_host_new(const char *path, const char *worker_host, int port, uint32_t pin, int s1, int s2,
-                   int n_ctx, char *info, int infolen, char *err, int errlen);
+                   int n_ctx, const char *mtp_path, int draft, char *info, int infolen, char *err, int errlen);
+// 带 MTP 的 GGUF 文件头 → MTP 层的字节范围 [lo, hi)。头不够长时返回 0 并在 need 里给出要多少字节；出错 -1。
+int xjg_mtp_plan(const uint8_t *head, uint64_t len, uint64_t *lo, uint64_t *hi, uint64_t *need, uint64_t *data_off,
+                 char *err, int errlen);
 // 发一句话，流式回调吐出回答的文字。返回 0 成功，-1 出错（err 里有原因）。
 int   xjg_host_chat(void *h, const char *user, float temperature, int max_tokens,
                     xjg_piece_fn cb, void *ctx, xjg_stats *stats, char *err, int errlen);
