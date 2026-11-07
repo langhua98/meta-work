@@ -15,11 +15,15 @@ struct ModelSpec: Identifiable, Hashable {
         id: "9b", name: "Qwen3.5-9B · Q4_K_M", file: "Qwen3.5-9B-Q4_K_M.gguf",
         path: "unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
         note: "5.7 GB，每层 113–136 MB。两台合跑的主要目标")
+    static let q9b5 = ModelSpec(
+        id: "9b-q5", name: "Qwen3.5-9B · Q5_K_M", file: "Qwen3.5-9B-Q5_K_M.gguf",
+        path: "unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf",
+        note: "约 6.7 GB，比 Q4_K_M 更接近原版。15 单机放不太下，7 Plus 分 8–10 层")
     static let q4b = ModelSpec(
         id: "4b", name: "Qwen3.5-4B · Q4_K_M", file: "Qwen3.5-4B-Q4_K_M.gguf",
         path: "unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
         note: "2.7 GB，每层 64–70 MB。先用它试通链路")
-    static let all = [q9b, q4b]
+    static let all = [q9b, q9b5, q4b]
     static func by(_ id: String) -> ModelSpec { all.first { $0.id == id } ?? q9b }
 }
 
