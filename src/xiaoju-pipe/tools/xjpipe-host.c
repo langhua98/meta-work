@@ -88,6 +88,14 @@ int main(int argc, char **argv) {
         mtp = local(m, L, L + 1, n_ctx, batch, true, err, sizeof err);
         if (!mtp) { fprintf(stderr, "%s\n", err); return 1; }
         fprintf(stderr, "MTP 投机解码：每步猜 %d 个字\n", draft);
+        // norm 权重的均值（排查：转换时有没有 +1）
+        const xj_w *nw[] = { &m->mtp_enorm, &m->mtp_hnorm, &m->mtp_head_norm, &m->layers[L].attn_norm, &m->output_norm, &m->layers[0].attn_norm };
+        const char *nn[] = { "enorm", "hnorm", "shared_head_norm", "mtp.attn_norm", "output_norm", "blk0.attn_norm" };
+        for (int i = 0; i < 6; i++) {
+            double sum = 0; const float *f = nw[i]->data;
+            for (int j = 0; j < nw[i]->ne0; j++) sum += f[j];
+            fprintf(stderr, "  %s 均值 %.3f\n", nn[i], sum / nw[i]->ne0);
+        }
     }
 
     xj_pipeline p;
