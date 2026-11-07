@@ -44,6 +44,24 @@ class Cloud(base: String, private val token: String) {
 
     fun download(id: String): ByteArray = Net.request("GET", "$api/items/$id/content", token)
 
+    /** 慢慢传（限速 bps 字节/秒），给录像备份用。已经有同名的文件当传过了。 */
+    fun uploadSlow(path: String, data: ByteArray, bps: Int) {
+        try {
+            Net.request("PUT", "$api/files?path=${q(path)}", token, data, "video/quicktime", readTimeoutMs = 120_000, throttleBps = bps)
+        } catch (e: HttpError) {
+            if (e.code != 409) throw e
+        }
+    }
+
+    /** 经服务端用 Telegram 机器人发提醒，返回发给了哪个聊天（记下来下次带上）。 */
+    fun notify(text: String, jpg: ByteArray?, chat: Long): Long {
+        val body = JSONObject().put("text", text)
+        if (jpg != null) body.put("photo", android.util.Base64.encodeToString(jpg, android.util.Base64.NO_WRAP))
+        if (chat != 0L) body.put("chat", chat)
+        val r = Net.request("POST", "$api/notify", token, body.toString().toByteArray(Charsets.UTF_8), "application/json")
+        return JSONObject(String(r, Charsets.UTF_8)).optLong("chat", chat)
+    }
+
     /** 上传。PUT /api/agent/v1/files?path=（不是根路径的 /files）。 */
     fun upload(path: String, data: ByteArray, contentType: String = "application/octet-stream") {
         Net.request("PUT", "$api/files?path=${q(path)}", token, data, contentType)

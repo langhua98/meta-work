@@ -35,10 +35,8 @@ class RemoteService : Service() {
     private var worker: Thread? = null
     private var wake: PowerManager.WakeLock? = null
 
-    // 直播在单独的线程里跑，指令循环照常收指令。新的直播指令会先停掉旧的直播。
-    @Volatile private var live: Thread? = null
-    @Volatile private var liveSettings: LiveSettings? = null
-    private val liveStop = java.util.concurrent.atomic.AtomicBoolean(false)
+    // 相机（实时画面 + 移动侦测）在 CameraHub 自己的线程里跑，指令循环照常收指令
+    @Volatile private var hub: CameraHub? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,7 +57,8 @@ class RemoteService : Service() {
     private fun stopAll() {
         running = false
         Bus.running = false
-        liveStop.set(true)
+        hub?.let { h -> Thread({ h.shutdown() }, "hub-stop").start() }
+        hub = null
         worker?.interrupt(); worker = null
         runCatching { wake?.release() }; wake = null
         Torch.releaseLegacy()
@@ -84,6 +83,7 @@ class RemoteService : Service() {
         val filesDir = "/小橘推送/遥控/$device/文件"
 
         try { Bus.push("云盘：${cloud.me()}") } catch (e: Exception) { Bus.push("连不上云盘：${e.message}") }
+        hub = CameraHub(this, p, cloud, device, serviceRunning = { running }, status = ::notifyText).also { it.resume() }
 
         var useRelay = true
         var lastFileCheck = 0L
@@ -148,22 +148,35 @@ class RemoteService : Service() {
         Bus.push("执行：$action")
         notifyText("正在被远程使用：${label(action)}")
 
+        val h = hub
         if (action == "video") {
-            if (cmd.optString("transport") == "ws") startLive(cmd, device, id, ::reply)
-            else streamVideo(cloud, cmd, device, viaRelay, id, ::reply)
+            if (cmd.optString("transport") == "ws") startLive(cmd, id, ::reply)
+            else if (h?.cameraOn == true) {
+                reply(JSONObject().put("id", id).put("ok", false).put("text", "相机正在用（移动侦测 / 实时画面），旧方式看不了，更新小橘推送"))
+                restoreText()
+            } else streamVideo(cloud, cmd, device, viaRelay, id, ::reply)
             return
         }
-        if (action == "video_set" || (action == "torch" && live?.isAlive == true)) {
+        if (action == "video_set" || (action == "torch" && h?.cameraOn == true)) {
             adjustLive(cmd, action, id, ::reply)
             return
         }
-        if (live?.isAlive == true && action == "photo") {
-            reply(JSONObject().put("id", id).put("ok", false).put("text", "正在直播，相机被占用了，先停止看画面"))
-            notifyText("正在被远程使用：实时画面")
+        if (action in setOf("monitor", "monitor_status", "events", "event_get", "event_delete")) {
+            monitorCommand(cloud, cmd, action, id, viaRelay, ::reply)
+            return
+        }
+        if (action == "audio" && h?.micOn == true) {
+            reply(JSONObject().put("id", id).put("ok", false).put("text", "移动侦测正在录声音，麦克风被占用了（可以在侦测设置里关掉声音）"))
+            restoreText()
             return
         }
 
-        val result = Commands.run(this, cmd)
+        val result = if (action == "photo" && h?.cameraOn == true) {
+            // 相机开着（侦测 / 直播）：从画面截一张，不打断
+            val d = h.grab()
+            if (d == null) CmdResult("相机正在用，没截到画面，再试一次")
+            else CmdResult("从画面截了一张（相机正在侦测 / 直播，${d.size / 1024} KB）", listOf("photo.jpg" to d))
+        } else Commands.run(this, cmd)
 
         val files = JSONArray()
         for ((name, bytes) in result.files) {
@@ -182,34 +195,25 @@ class RemoteService : Service() {
         reply(JSONObject().put("id", id).put("do", action).put("ok", true)
             .put("text", result.text).put("files", files).put("at", at))
         Bus.push("完成：$action — ${result.text.lineSequence().firstOrNull().orEmpty()}")
-        notifyText("待命中，等指令")
+        restoreText()
     }
 
     /**
      * 实时画面（新）：WebSocket 长连接推流到服务端的直播通道，不限时长，看的人都走了就停。
-     * 相机回调里只管把帧交给 OkHttp 的发送队列，队列积压就丢帧，相机不会被网络卡住。
-     * 回执马上回：连上了回「开始直播」，连不上回原因（看的一端据此提示）。
+     * 相机和编码器在 CameraHub 里（和移动侦测共用）。回执马上回：连上了回「开始直播」，连不上回原因。
      */
-    private fun startLive(cmd: JSONObject, device: String, id: String, reply: (JSONObject) -> Unit) {
+    private fun startLive(cmd: JSONObject, id: String, reply: (JSONObject) -> Unit) {
         fun fail(text: String) {
             reply(JSONObject().put("id", id).put("do", "video").put("ok", false).put("text", text))
-            notifyText("待命中，等指令")
+            restoreText()
         }
+        val h = hub ?: run { fail("还没准备好，过几秒再试"); return }
         val room = cmd.optString("room")
         if (room.isBlank() || room.toByteArray(Charsets.UTF_8).size > 200) { fail("直播指令缺少房间名"); return }
         if (checkPermission(android.Manifest.permission.CAMERA, Process.myPid(), Process.myUid()) != PackageManager.PERMISSION_GRANTED) {
             fail("没有相机权限"); return
         }
-        // 先停掉正在进行的直播（比如看的一端刚关又开）
-        live?.let { old -> liveStop.set(true); runCatching { old.join(5000) } }
-        liveStop.set(false)
-
         val p = Prefs(this)
-        // codec=h264：新查看器（服务端也支持时才会要）；不带就是 JPEG，老查看器只认这个
-        val settings = LiveSettings(cmd.optString("lens") == "front", cmd.optInt("width", 480),
-            cmd.optInt("quality", 50), cmd.optInt("fps", 10), cmd.optString("codec", LiveSettings.JPEG))
-        settings.apply(cmd)   // 开播时就带的亮度、变焦、手电
-        val fps = settings.fps
         // av=true：新查看器，画面带时间戳；audio=true：还要声音（要麦克风权限）
         val av = cmd.optBoolean("av", false)
         val wantAudio = av && cmd.optBoolean("audio", false)
@@ -225,53 +229,98 @@ class RemoteService : Service() {
             wantAudio -> "开始直播（没有麦克风权限，只有画面）"
             else -> "开始直播"
         }
+        h.startLive(client, cmd, av, withAudio)
         reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", okText))
-        Bus.push("$okText，WebSocket，$fps 帧/秒，${if (settings.codec == LiveSettings.H264) "H.264" else "JPEG"}")
-        notifyText(if (withAudio) "正在被远程使用：实时画面（含声音）" else "正在被远程使用：实时画面")
-
-        liveSettings = settings
-        live = Thread({
-            val mic = if (withAudio) AudioCapture { data, codec, ts ->
-                if (client.subs > 0) client.sendAudio(StreamClient.audio(data, codec, ts))
-            } else null
-            if (mic != null && !mic.start()) Bus.push("声音没开成：${mic.error}")
-            val video = LiveVideo(settings, av, client)
-            try {
-                val end = System.currentTimeMillis() + LIVE_MAX_MS
-                Camera.live(settings, running = {
-                    running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000) &&
-                        System.currentTimeMillis() < end
-                }) { nv21, w, h, rot, ts -> video.frame(nv21, w, h, rot, ts) }
-            } catch (e: Exception) {
-                Bus.push("直播出错：${e.message}")
-            } finally {
-                video.close()
-                mic?.stop()
-                client.close()
-                Bus.push("直播结束：发出 ${client.sent} 帧，网络跟不上丢了 ${client.dropped} 帧")
-                notifyText("待命中，等指令")
-            }
-        }, "live").apply { start() }
+        Bus.push("$okText，WebSocket，${h.settings.fps} 帧/秒，${if (h.settings.codec == LiveSettings.H264) "H.264" else "JPEG"}")
     }
 
-    /** 直播中调参数：video_set（镜头、清晰度、画质、帧率、亮度、变焦、手电），或直播时的手电指令。 */
+    /** 直播 / 侦测中调相机：video_set（镜头、清晰度、画质、帧率、亮度、变焦、手电、编码），或相机开着时的手电指令。 */
     private fun adjustLive(cmd: JSONObject, action: String, id: String, reply: (JSONObject) -> Unit) {
-        val s = liveSettings
-        if (live?.isAlive != true || s == null) {
+        val h = hub
+        if (h == null || !h.cameraOn) {
             reply(JSONObject().put("id", id).put("do", action).put("ok", false).put("text", "现在没在直播"))
-            notifyText("待命中，等指令")
+            restoreText()
             return
         }
+        val s = h.settings
         val c = if (action == "torch") JSONObject().put("torch", cmd.optBoolean("on", true)) else cmd
         s.codecNote = ""
-        val changed = s.apply(c)
+        val changed = h.adjust(c)
         try { Thread.sleep(1200) } catch (e: InterruptedException) { }   // 等相机设好（换镜头大约 1 秒）
         val notes = listOf(s.unsupported, s.codecNote).filter { it.isNotEmpty() }
         val text = (if (changed.isEmpty()) "没有要改的" else "已调整：" + changed.joinToString("、")) +
             (if (notes.isEmpty()) "" else "（${notes.joinToString("；")}）")
         reply(JSONObject().put("id", id).put("do", action).put("ok", true).put("text", text))
         Bus.push(text)
-        notifyText("正在被远程使用：实时画面")
+        restoreText()
+    }
+
+    /**
+     * 移动侦测的指令：
+     *   monitor        改设置 / 开关（字段见 MonitorConfig），回现在的状态
+     *   monitor_status 状态（开没开、今天几段、待备份、Telegram 怎么样）
+     *   events         录好的事件列表（新的在前，带小图），limit / before 翻页
+     *   event_get      取一段视频（name）：备份过的给云盘路径；小的直接放回执里；大的先传到云盘
+     *   event_delete   删掉手机上的一段（云盘上的备份不动）
+     */
+    private fun monitorCommand(cloud: Cloud, cmd: JSONObject, action: String, id: String, viaRelay: Boolean, reply: (JSONObject) -> Unit) {
+        val h = hub
+        fun done(ok: Boolean, text: String, extra: (JSONObject) -> Unit = {}) {
+            val r = JSONObject().put("id", id).put("do", action).put("ok", ok).put("text", text)
+            extra(r)
+            reply(r)
+            restoreText()
+        }
+        if (h == null) { done(false, "还没准备好，过几秒再试"); return }
+        if (action == "monitor" && cmd.optBoolean("on", h.monitor.on) &&
+            checkPermission(android.Manifest.permission.CAMERA, Process.myPid(), Process.myUid()) != PackageManager.PERMISSION_GRANTED) {
+            done(false, "没有相机权限，去 App 里点「授权硬件」"); return
+        }
+        try {
+            when (action) {
+                "monitor" -> { val t = h.setMonitor(cmd); Bus.push(t); done(true, t) { it.put("status", h.statusJson()) } }
+                "monitor_status" -> done(true, h.describe()) { it.put("status", h.statusJson()) }
+                "events" -> {
+                    val list = h.eventsJson(cmd.optInt("limit", 30), cmd.optString("before"))
+                    done(true, "${list.length()} 段") { it.put("events", list) }
+                }
+                "event_delete" -> {
+                    val name = cmd.optString("name")
+                    done(h.store.delete(name), if (h.store.get(name) == null) "删了 $name" else "没删掉 $name")
+                }
+                "event_get" -> {
+                    val name = cmd.optString("name")
+                    val e = h.store.get(name) ?: run { done(false, "手机上没有 $name（可能已经满了被删掉，看云盘备份）"); return }
+                    val f = h.store.mov(name)
+                    val files = JSONArray()
+                    when {
+                        !e.video || !f.exists() -> {
+                            val j = h.store.jpg(name)
+                            if (j.exists()) files.put(JSONObject().put("name", "$name.jpg").put("data", Base64.encodeToString(j.readBytes(), Base64.NO_WRAP)))
+                        }
+                        e.uploaded.isNotEmpty() -> files.put(e.uploaded)
+                        viaRelay && f.length() <= RemoteBox.INLINE_LIMIT ->
+                            files.put(JSONObject().put("name", "$name.mov").put("data", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)))
+                        else -> files.put(h.uploader.uploadNow(e))
+                    }
+                    done(true, "$name，${e.durMs / 1000} 秒") { it.put("files", files).put("event", e.toJson()) }
+                }
+            }
+        } catch (ex: Exception) {
+            done(false, "出错了：${ex.message ?: ex.javaClass.simpleName}")
+        }
+    }
+
+    /** 指令做完，通知栏恢复成现在的状态。 */
+    private fun restoreText() {
+        val h = hub
+        notifyText(when {
+            h == null -> "待命中，等指令"
+            h.monitor.on && h.liveActive() -> "正在被远程使用：移动侦测 + 实时画面"
+            h.monitor.on -> "正在被远程使用：移动侦测中"
+            h.liveActive() -> "正在被远程使用：实时画面"
+            else -> "待命中，等指令"
+        })
     }
 
     /** 实时画面：连续抓帧推到视频信箱。只走即时信箱（文件信箱太慢，撑不起视频）。 */
@@ -305,7 +354,8 @@ class RemoteService : Service() {
     }
 
     private fun label(a: String) = mapOf("photo" to "拍照", "audio" to "录音", "location" to "定位",
-        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面")[a] ?: a
+        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面",
+        "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像")[a] ?: a
 
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }
