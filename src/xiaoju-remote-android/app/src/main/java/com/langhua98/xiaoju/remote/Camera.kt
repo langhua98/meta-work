@@ -48,8 +48,10 @@ object Camera {
 
     /**
      * 实时画面：连续从预览里取帧（NV21），按 settings 的帧率交给 onFrame。阻塞调用，直到 running 变 false。
-     * 用老相机的预览回调，4.2 也能跑。预览缓冲区是固定的几块轮着用（不每帧新分配内存，老手机上不会因为回收内存一顿一顿）；
-     * onFrame 返回后这块缓冲区就还给相机了，要留数据得自己拷。
+     * 用老相机的预览回调，4.2 也能跑。预览缓冲区是固定的两块轮着用（不每帧新分配内存，老手机上不会因为回收内存一顿一顿）；
+     * onFrame 返回后这块缓冲区会还给相机，要留数据得自己拷。
+     * 省电（见 FramePacer）：相机手里最多一块缓冲区，只在下一帧快该用时才给，用不上的帧在驱动里就丢了，不拷贝；
+     * 传感器帧率只选够用的最低一档（LiveSettings.pickFpsRange），守望时（settings.watch）换到更低的一档。
      * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
      * 直播中改 settings：镜头/清晰度/编码会关掉相机重开，其他的当场生效。
      */
@@ -63,10 +65,12 @@ object Camera {
             while (running()) {
                 val ver = s.version
                 val front = s.front
+                var pf = s.profile   // 开相机时用的帧率档（之后变了就换）
                 val ready = CountDownLatch(1)
                 var startErr: Throwable? = null
                 var cam: LegacyCamera? = null
                 var tex: SurfaceTexture? = null
+                var feed: Feed? = null
                 h.post {
                     try {
                         val id = findCamera(front)
@@ -78,8 +82,8 @@ object Camera {
                             s.width, s.codec == LiveSettings.H264)
                         sz?.let { p.setPreviewSize(it.first, it.second) }
                         p.previewFormat = ImageFormat.NV21
-                        // 预览帧率：最高的那档，而且最低不低于 15 帧/秒（再低曝光时间太长，一动就糊、像卡住）
-                        p.supportedPreviewFpsRange?.let { LiveSettings.pickFpsRange(it) }
+                        // 传感器帧率：够用的最低一档（跑得越快越费电）
+                        p.supportedPreviewFpsRange?.let { LiveSettings.pickFpsRange(it, s.fps, s.watch) }
                             ?.let { p.setPreviewFpsRange(it[0], it[1]) }
                         val modes = p.supportedFocusModes ?: emptyList()
                         if ("continuous-video" in modes) p.focusMode = "continuous-video"
@@ -97,42 +101,84 @@ object Camera {
                         val t = SurfaceTexture(20); tex = t
                         c.setPreviewTexture(t)
                         val size = fw * fh * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8
-                        repeat(3) { c.addCallbackBuffer(ByteArray(size)) }
-                        var nextAt = 0L
-                        c.setPreviewCallbackWithBuffer { data, camera ->
+                        // 缓冲区：两块轮着用，相机手里最多一块（下面这些变量只在相机线程 h 上碰）
+                        val pool = ArrayDeque<ByteArray>().apply { repeat(2) { add(ByteArray(size)) } }
+                        val st = Feed(c, pool)
+                        feed = st
+                        val pacer = FramePacer()
+                        c.setPreviewCallbackWithBuffer { data, _ ->
                             if (data == null) return@setPreviewCallbackWithBuffer
+                            st.inCam = maxOf(0, st.inCam - 1)
                             val now = System.currentTimeMillis()
-                            val gap = 1000L / s.fps
-                            if (now >= nextAt && running()) {
-                                // 按节拍抽帧：平均下来正好是设的帧率（不会因为相机 30 帧/秒的间隔凑不齐而变少）
-                                nextAt = if (now - nextAt > gap) now + gap else nextAt + gap
+                            // 按节拍抽帧：平均下来正好是要的帧率（守望时每秒 4 帧）
+                            if (running() && pacer.due(now, s.frameFps)) {
                                 val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
                                 try { onFrame(data, fw, fh, rot, ts) } catch (e: Throwable) { /* 丢这一帧 */ }
                             }
-                            camera.addCallbackBuffer(data)
+                            pool.addLast(data)
+                            // 下一帧快该用了才把缓冲区给相机；这之间的帧相机自己丢掉，不拷贝
+                            h.removeCallbacks(st)
+                            val d = pacer.returnDelay(System.currentTimeMillis())
+                            if (d <= 0) st.run() else h.postDelayed(st, d)
                         }
+                        st.run()
                         c.startPreview()
                     } catch (e: Throwable) { startErr = e } finally { ready.countDown() }
                 }
                 ready.await(8, TimeUnit.SECONDS)
                 startErr?.let { e ->
                     val done = CountDownLatch(1)
-                    h.post { cleanup(cam, tex); done.countDown() }
+                    h.post { feed?.let { it.open = false; h.removeCallbacks(it) }; cleanup(cam, tex); done.countDown() }
                     done.await(3, TimeUnit.SECONDS)
                     throw e
                 }
                 var tw = s.tweak
                 while (running() && s.version == ver) {
                     if (s.tweak != tw) { tw = s.tweak; h.post { cam?.let { runCatching { tweak(it, s, front) } } } }
+                    if (s.profile != pf) { pf = s.profile; h.post { cam?.let { runCatching { switchFps(it, s, feed) } } } }
                     try { Thread.sleep(100) } catch (e: InterruptedException) { break }
                 }
                 // 关掉这台相机（换镜头/清晰度时接着开新的）
                 val closed = CountDownLatch(1)
-                h.post { runCatching { cam?.setPreviewCallbackWithBuffer(null) }; cleanup(cam, tex); closed.countDown() }
+                h.post {
+                    feed?.let { it.open = false; h.removeCallbacks(it) }
+                    runCatching { cam?.setPreviewCallbackWithBuffer(null) }; cleanup(cam, tex); closed.countDown()
+                }
                 closed.await(3, TimeUnit.SECONDS)
             }
         } finally {
             ht.quit()
+        }
+    }
+
+    /** 给相机一块空缓冲区（相机手里已经有了就不给）。只在相机线程上用。 */
+    private class Feed(val cam: LegacyCamera, val pool: ArrayDeque<ByteArray>) : Runnable {
+        var inCam = 0
+        var open = true
+        override fun run() {
+            if (!open || inCam > 0) return
+            val b = pool.removeFirstOrNull() ?: return
+            try { cam.addCallbackBuffer(b); inCam++ } catch (e: RuntimeException) { pool.addLast(b) }
+        }
+    }
+
+    /**
+     * 相机开着时换传感器帧率档（进出守望）：大多数手机能直接设；不行就停一下预览再设（不用重开相机，大约 0.2 秒）。
+     * 停预览时相机手里的缓冲区可能被收走，重开后再给一块。
+     */
+    private fun switchFps(c: LegacyCamera, s: LiveSettings, feed: Feed?) {
+        val p = c.parameters
+        val r = p.supportedPreviewFpsRange?.let { LiveSettings.pickFpsRange(it, s.fps, s.watch) } ?: return
+        val cur = IntArray(2).also { p.getPreviewFpsRange(it) }
+        if (cur[0] == r[0] && cur[1] == r[1]) return
+        p.setPreviewFpsRange(r[0], r[1])
+        try {
+            c.parameters = p
+        } catch (e: RuntimeException) {
+            runCatching { c.stopPreview() }
+            runCatching { c.parameters = p }
+            c.startPreview()
+            feed?.let { it.inCam = 0; it.run() }
         }
     }
 

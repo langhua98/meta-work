@@ -70,9 +70,14 @@ class Cloud(base: String, private val token: String) {
     // ---- 即时信箱 ----
 
     /** 取走信箱里所有消息；没有就最多等 seconds 秒。 */
+    @Volatile private var pollConn: java.net.HttpURLConnection? = null
+
+    /** 把正在等的长轮询断掉（看门狗发现它卡住了：手机睡着时连接断了没收到）。 */
+    fun abortPoll() { runCatching { pollConn?.disconnect() } }
+
     fun relayWait(box: String, seconds: Int = 25): List<JSONObject> {
         val data = Net.request("GET", "$api/relay?box=${q(box)}&wait=$seconds", token,
-            readTimeoutMs = (seconds + 20) * 1000)
+            readTimeoutMs = (seconds + 20) * 1000, onConn = { pollConn = it })
         val arr = JSONObject(String(data, Charsets.UTF_8)).optJSONArray("messages") ?: JSONArray()
         val out = ArrayList<JSONObject>()
         for (i in 0 until arr.length()) arr.optJSONObject(i)?.optJSONObject("body")?.let { out.add(it) }

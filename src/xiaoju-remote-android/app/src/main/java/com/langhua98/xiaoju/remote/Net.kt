@@ -74,18 +74,22 @@ object Net {
      * 连接池里的旧连接可能已经被服务器关了，GET 遇到这种网络错误时马上用新连接再试一次。
      */
     fun request(method: String, url: String, token: String, body: ByteArray? = null,
-                contentType: String? = null, readTimeoutMs: Int = 60_000, throttleBps: Int = 0): ByteArray =
+                contentType: String? = null, readTimeoutMs: Int = 60_000, throttleBps: Int = 0,
+                onConn: ((HttpURLConnection?) -> Unit)? = null): ByteArray =
         try {
-            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps)
+            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn)
         } catch (e: java.io.IOException) {
             // 只重试 GET；等太久（读超时）不算连接坏了，不重试
             if (method != "GET" || e is java.net.SocketTimeoutException) throw e
-            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps)
+            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn)
         }
 
+    /** onConn：连接建好时交出来（别的线程可以 disconnect() 把卡住的请求断掉），结束时交 null。 */
     private fun requestOnce(method: String, url: String, token: String, body: ByteArray?,
-                            contentType: String?, readTimeoutMs: Int, throttleBps: Int): ByteArray {
+                            contentType: String?, readTimeoutMs: Int, throttleBps: Int,
+                            onConn: ((HttpURLConnection?) -> Unit)?): ByteArray {
         val conn = URL(url).openConnection() as HttpURLConnection
+        onConn?.invoke(conn)
         var keep = false
         try {
             if (conn is HttpsURLConnection) factory?.let { conn.sslSocketFactory = it }
@@ -128,6 +132,7 @@ object Net {
             keep = true
             return data
         } finally {
+            onConn?.invoke(null)
             // 成功：留着连接给下一个请求；出错：断开，免得把坏连接放回连接池
             if (!keep) conn.disconnect()
         }

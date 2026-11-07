@@ -5,9 +5,12 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.AlarmManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -16,6 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,7 +37,11 @@ class RemoteService : Service() {
 
     @Volatile private var running = false
     private var worker: Thread? = null
-    private var wake: PowerManager.WakeLock? = null
+    private var wifi: android.net.wifi.WifiManager.WifiLock? = null
+    private var watchdogOn = false
+    /** 长轮询从什么时候开始等（elapsedRealtime，睡着的时间也算），0 = 没在等 */
+    @Volatile private var pollSince = 0L
+    @Volatile private var cloudRef: Cloud? = null
 
     // 相机（实时画面 + 移动侦测）在 CameraHub 自己的线程里跑，指令循环照常收指令
     @Volatile private var hub: CameraHub? = null
@@ -53,8 +61,14 @@ class RemoteService : Service() {
             running = true
             Bus.running = true
             Bus.push("开始待命")
-            wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "xiaoju:remote").apply { acquire() }
+            Power.init(this)
+            // Wi-Fi 在锁屏后也别断（老系统有的设成「休眠时断开」，断了就收不到指令）
+            wifi = runCatching {
+                @Suppress("DEPRECATION")
+                (applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
+                    .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL, "xiaoju:wifi").apply { setReferenceCounted(false); acquire() }
+            }.getOrNull()
+            if (Power.canSleep) startWatchdog()
             worker = Thread({ loop() }, "remote-loop").apply { start() }
         }
         return START_STICKY
@@ -66,7 +80,8 @@ class RemoteService : Service() {
         hub?.let { h -> Thread({ h.shutdown() }, "hub-stop").start() }
         hub = null
         worker?.interrupt(); worker = null
-        runCatching { wake?.release() }; wake = null
+        stopWatchdog()
+        runCatching { wifi?.release() }; wifi = null
         Torch.releaseLegacy()
         Bus.push("已停止")
         stopForeground(true)
@@ -76,15 +91,20 @@ class RemoteService : Service() {
     override fun onDestroy() {
         running = false; Bus.running = false
         lanes.shutdown()
-        runCatching { wake?.release() }
+        stopWatchdog()
+        runCatching { wifi?.release() }; wifi = null
         super.onDestroy()
     }
 
-    private fun loop() {
+    /** 收件循环：自己拿一份「CPU 醒着」，只在等服务器回话时放掉（Power.sleepWhile），结束时放掉。 */
+    private fun loop() = Power.hold { loopInner() }
+
+    private fun loopInner() {
         val p = Prefs(this)
         if (p.token.isBlank()) { Bus.push("先填云盘令牌"); post { stopAll() }; return }
         Net.init(this)
         val cloud = Cloud(p.base, p.token)
+        cloudRef = cloud
         val device = p.device
         val inbox = "/小橘推送/遥控/$device/收件"
         val filesDir = "/小橘推送/遥控/$device/文件"
@@ -98,7 +118,9 @@ class RemoteService : Service() {
         while (running) {
             if (useRelay) {
                 try {
-                    val msgs = cloud.relayWait(RemoteBox.inbox(device))
+                    // 等服务器回话时 CPU 可以睡（别的事要 CPU 时自己会拿着，见 Power）
+                    pollSince = SystemClock.elapsedRealtime()
+                    val msgs = try { Power.sleepWhile { cloud.relayWait(RemoteBox.inbox(device)) } } finally { pollSince = 0L }
                     lastError = ""
                     for (cmd in msgs) dispatch(cloud, cmd, device, viaRelay = true, filesDir = filesDir)
                 } catch (e: Exception) {
@@ -132,13 +154,23 @@ class RemoteService : Service() {
         }
     }
 
-    /** 现在开着哪些费电的东西（info 指令的最后一行）。 */
+    /** 现在电耗在哪（info 指令最后几行）：实时电流、屏幕、开着的费电的东西。 */
     private fun powerText(h: CameraHub?): String {
         val on = ArrayList<String>()
-        if (h?.monitor?.on == true) on.add("移动侦测（相机一直开着，最费电，要插着电）")
+        if (h?.monitor?.on == true) on.add(when (h.stage()) {
+            "watch" -> "移动侦测（省电守望：相机每秒看 4 帧，不录像）"
+            else -> if (h.monitor.eco) "移动侦测（正在录像）" else "移动侦测（不省电：编码器一直开着，最费电）"
+        })
         if (h?.liveActive() == true) on.add("实时画面")
         else if (h?.cameraOn == true && h.monitor.on != true) on.add("相机")
-        return if (on.isEmpty()) "耗电：只在待命收指令" else "耗电：开着 " + on.joinToString("、")
+        val lines = ArrayList<String>()
+        PowerMeter.currentMa()?.let { lines.add("电流：约 $it mA（越小越省电）") }
+        @Suppress("DEPRECATION")
+        val screen = runCatching { (getSystemService(Context.POWER_SERVICE) as PowerManager).isScreenOn }.getOrDefault(false)
+        if (screen) lines.add("屏幕：亮着（很费电，不用时关掉屏幕）")
+        lines.add(if (on.isEmpty()) "耗电：只在待命收指令" + (if (Power.canSleep) "（等指令时 CPU 可以睡）" else "")
+                  else "耗电：开着 " + on.joinToString("、"))
+        return lines.joinToString("\n")
     }
 
     /** 把一条指令交给快线或慢线去做（不在收件循环里做，免得一条慢的挡住后面的）。 */
@@ -149,8 +181,10 @@ class RemoteService : Service() {
         // 相机开着时手电要等相机设好（几百毫秒），走慢线
         val fast = action in QUICK && !(action == "torch" && hub?.cameraOn == true)
         lanes.submit(id, fast) {
-            try { execute(cloud, cmd, device, viaRelay, filesDir) }
-            catch (e: Throwable) { Bus.push("指令 $action 出错：${e.message ?: e.javaClass.simpleName}") }
+            Power.hold {
+                try { execute(cloud, cmd, device, viaRelay, filesDir) }
+                catch (e: Throwable) { Bus.push("指令 $action 出错：${e.message ?: e.javaClass.simpleName}") }
+            }
         }
     }
 
@@ -445,6 +479,41 @@ class RemoteService : Service() {
         "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面",
         "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像", "bench" to "模型测速", "cancel" to "取消")[a] ?: a
 
+    // ---- 看门狗（只在等网络时让 CPU 睡的老系统上开）----
+    // 2 分钟叫醒一次：长轮询本该 25 秒就回来，等了 70 秒还没回来，说明连接卡死了（睡着时没收到数据），断掉重来。
+
+    private val watchdog = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            Power.acquire()   // 给收件循环几秒钟醒着的时间
+            Handler(Looper.getMainLooper()).postDelayed({ Power.release() }, 3_000)
+            val since = pollSince
+            if (since > 0 && SystemClock.elapsedRealtime() - since > 70_000) {
+                Bus.push("收指令的连接卡住了，重新连")
+                Thread({ cloudRef?.abortPoll() }, "abort-poll").start()
+            }
+        }
+    }
+
+    private fun watchdogIntent(): PendingIntent = PendingIntent.getBroadcast(this, 2,
+        Intent(ACTION_WATCHDOG).setPackage(packageName), piFlags())
+
+    private fun startWatchdog() {
+        if (watchdogOn) return
+        runCatching {
+            registerReceiver(watchdog, IntentFilter(ACTION_WATCHDOG))
+            (getSystemService(Context.ALARM_SERVICE) as AlarmManager).setRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                SystemClock.elapsedRealtime() + WATCHDOG_MS, WATCHDOG_MS, watchdogIntent())
+            watchdogOn = true
+        }.onFailure { Bus.push("看门狗没开成：${it.message}") }
+    }
+
+    private fun stopWatchdog() {
+        if (!watchdogOn) return
+        watchdogOn = false
+        runCatching { (getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(watchdogIntent()) }
+        runCatching { unregisterReceiver(watchdog) }
+    }
+
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }
 
@@ -478,9 +547,11 @@ class RemoteService : Service() {
 
     companion object {
         const val NOTIF_ID = 42
-        /** 一下就做完的指令：走快线，不等慢的 */
         /** 即时信箱好用时，多久看一眼文件信箱（只有很老的发送端还写文件信箱） */
         const val FILE_CHECK_MS = 10 * 60_000L
+        const val ACTION_WATCHDOG = "com.langhua98.xiaoju.remote.WATCHDOG"
+        const val WATCHDOG_MS = 2 * 60_000L
+        /** 一下就做完的指令：走快线，不等慢的 */
         val QUICK = setOf("info", "torch", "vibrate", "monitor", "monitor_status", "events", "event_delete", "cancel")
         /** 一次直播最长多久（服务端也会在 4 小时断开） */
         const val LIVE_MAX_MS = 4L * 60 * 60 * 1000

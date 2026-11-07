@@ -88,7 +88,9 @@ class LanServerTest {
 
     @Test fun fpsRangeAvoidsLowMinimum() {
         fun r(a: Int, b: Int) = intArrayOf(a, b)
-        assertArrayEquals(r(15000, 30000), LiveSettings.pickFpsRange(listOf(r(7500, 30000), r(15000, 30000), r(30000, 30000), r(15000, 15000))))
+        // 0.14 起：够用（15 帧）的最低一档，不再挑 30 帧那档（相机跑得越快越费电）
+        assertArrayEquals(r(15000, 15000), LiveSettings.pickFpsRange(listOf(r(7500, 30000), r(15000, 30000), r(30000, 30000), r(15000, 15000))))
+        assertArrayEquals(r(15000, 30000), LiveSettings.pickFpsRange(listOf(r(7500, 30000), r(15000, 30000), r(30000, 30000))))
         assertArrayEquals(r(30000, 30000), LiveSettings.pickFpsRange(listOf(r(4000, 30000), r(30000, 30000))))
         assertArrayEquals(r(10000, 24000), LiveSettings.pickFpsRange(listOf(r(5000, 24000), r(10000, 24000))))
         assertEquals(null, LiveSettings.pickFpsRange(emptyList()))

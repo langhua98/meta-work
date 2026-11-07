@@ -22,11 +22,19 @@ class MonitorConfig(
     val width: Int = 640,
     val fps: Int = 10,
     val quality: Int = 50,
+    /**
+     * 省电侦测（默认开）：没动静时「守望」，相机降到最低帧率档、每秒只看 4 帧，编码器和麦克风都关着；
+     * 有动静才开始录（动静前只有守望时留的几帧，最多 3 秒）。关掉 = 编码器一直开着，能录到动静前 preSec 秒，费电得多。
+     */
+    val eco: Boolean = true,
 ) {
     fun toJson(): JSONObject = JSONObject().put("on", on).put("sensitivity", sensitivity)
         .put("regions", JSONArray().apply { regions.forEach { r -> put(JSONArray().apply { r.forEach { put(it.toDouble()) } }) } })
         .put("pre", preSec).put("post", postSec).put("notify", notify).put("people", personOnly).put("cooldown", cooldownMin)
-        .put("audio", audio).put("upload", upload).put("lens", lens).put("width", width).put("fps", fps).put("quality", quality)
+        .put("audio", audio).put("upload", upload).put("lens", lens).put("width", width).put("fps", fps).put("quality", quality).put("eco", eco)
+
+    /** 省电侦测时动静前留几秒画面（守望时每秒 4 帧，最多 3 秒，内存另外有上限） */
+    val ecoPreMs: Long get() = minOf(preSec, 3) * 1000L
 
     /** 相机设置（交给 LiveSettings.apply）：侦测用 H.264 录像。 */
     fun cameraJson(): JSONObject = JSONObject().put("lens", lens).put("width", width).put("fps", fps)
@@ -48,6 +56,7 @@ class MonitorConfig(
         width = if (c.has("width")) c.optInt("width", width).coerceIn(240, 1280) else width,
         fps = if (c.has("fps")) c.optInt("fps", fps).coerceIn(1, 15) else fps,
         quality = if (c.has("quality")) c.optInt("quality", quality).coerceIn(20, 90) else quality,
+        eco = if (c.has("eco")) c.optBoolean("eco") else eco,
     )
 
     companion object {
