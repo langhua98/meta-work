@@ -27,6 +27,8 @@ class MotionDetector(val cols: Int = 32, val rows: Int = 24) {
     private var hits = 0
     private val cur = FloatArray(cols * rows)
     private val diff = FloatArray(cols * rows)
+    /** 最近一次看的时候哪些格子变了（相机原始方向） */
+    private val changedCells = BooleanArray(cols * rows)
 
     /**
      * 只检测这些区域。rects 是看的一端在「转正以后的画面」上框的 [x, y, w, h]（0…1），
@@ -64,7 +66,11 @@ class MotionDetector(val cols: Int = 32, val rows: Int = 24) {
         val s = sensitivity.coerceIn(1, 100)
         val thr = 5f + (100 - s) * 0.25f + 3f * noise
         var changed = 0
-        for (i in cur.indices) if ((m == null || m[i]) && diff[i] > thr) changed++
+        for (i in cur.indices) {
+            val c = (m == null || m[i]) && diff[i] > thr
+            changedCells[i] = c
+            if (c) changed++
+        }
         val frac = changed.toFloat() / n
         score = frac
         val need = maxOf(2f, n * (0.003f + (100 - s) / 100f * 0.03f))
@@ -86,6 +92,16 @@ class MotionDetector(val cols: Int = 32, val rows: Int = 24) {
         if (warm < 10) { hits = 0; return false }   // 刚开始曝光还在变
         hits = if (moving) hits + 1 else 0
         return hits >= 2
+    }
+
+    /** 这个框（0…1，相机原始方向）里，最近一次有没有格子变了：用来判断认出来的东西是不是正在动的那个。 */
+    @Synchronized fun moved(x1: Float, y1: Float, x2: Float, y2: Float): Boolean {
+        val c0 = (x1 * cols).toInt().coerceIn(0, cols - 1)
+        val c1 = (x2 * cols).toInt().coerceIn(0, cols - 1)
+        val r0 = (y1 * rows).toInt().coerceIn(0, rows - 1)
+        val r1 = (y2 * rows).toInt().coerceIn(0, rows - 1)
+        for (r in r0..r1) for (c in c0..c1) if (changedCells[r * cols + c]) return true
+        return false
     }
 
     /** 每格的平均亮度：格子里每隔 step 个点取一个。 */

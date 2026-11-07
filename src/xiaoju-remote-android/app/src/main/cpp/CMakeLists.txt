@@ -6,7 +6,7 @@ project(xjbench CXX)
 set(ncnn_DIR ${NCNN_DIR}/lib/cmake/ncnn)
 find_package(ncnn REQUIRED)
 
-add_library(xjbench SHARED bench.cpp)
+add_library(xjbench SHARED bench.cpp fastestdet.cpp detector_jni.cpp)
 target_link_libraries(xjbench ncnn log)
 # 去掉调试符号，安装包小一点
 set_target_properties(xjbench PROPERTIES LINK_FLAGS "-s")

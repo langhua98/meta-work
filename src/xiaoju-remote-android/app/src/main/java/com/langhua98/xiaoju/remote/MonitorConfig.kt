@@ -14,6 +14,7 @@ class MonitorConfig(
     val preSec: Int = 5,                // 动静前录几秒
     val postSec: Int = 15,              // 最后一次动静后再录几秒
     val notify: Boolean = true,         // 发 Telegram 提醒
+    val personOnly: Boolean = false,    // 只在认出人时提醒（别的动静照样录，只是不提醒）
     val cooldownMin: Int = 5,           // 两次提醒至少隔几分钟
     val audio: Boolean = true,          // 录声音
     val upload: Boolean = true,         // 慢慢备份到云盘
@@ -24,7 +25,7 @@ class MonitorConfig(
 ) {
     fun toJson(): JSONObject = JSONObject().put("on", on).put("sensitivity", sensitivity)
         .put("regions", JSONArray().apply { regions.forEach { r -> put(JSONArray().apply { r.forEach { put(it.toDouble()) } }) } })
-        .put("pre", preSec).put("post", postSec).put("notify", notify).put("cooldown", cooldownMin)
+        .put("pre", preSec).put("post", postSec).put("notify", notify).put("people", personOnly).put("cooldown", cooldownMin)
         .put("audio", audio).put("upload", upload).put("lens", lens).put("width", width).put("fps", fps).put("quality", quality)
 
     /** 相机设置（交给 LiveSettings.apply）：侦测用 H.264 录像。 */
@@ -39,6 +40,7 @@ class MonitorConfig(
         preSec = if (c.has("pre")) c.optInt("pre", preSec).coerceIn(0, 10) else preSec,
         postSec = if (c.has("post")) c.optInt("post", postSec).coerceIn(3, 120) else postSec,
         notify = if (c.has("notify")) c.optBoolean("notify") else notify,
+        personOnly = if (c.has("people")) c.optBoolean("people") else personOnly,
         cooldownMin = if (c.has("cooldown")) c.optInt("cooldown", cooldownMin).coerceIn(0, 120) else cooldownMin,
         audio = if (c.has("audio")) c.optBoolean("audio") else audio,
         upload = if (c.has("upload")) c.optBoolean("upload") else upload,

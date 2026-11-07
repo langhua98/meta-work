@@ -202,6 +202,7 @@ class CameraHub(
             .put("last", list.firstOrNull()?.name ?: "").put("pending", store.pendingUpload().size)
             .put("storage_mb", store.usedBytes() / (1 shl 20)).put("free_mb", store.dir.usableSpace / (1 shl 20))
             .put("telegram", notifier.status).put("backup", uploader.status).put("codec_note", settings.codecNote)
+            .put("objects", if (objectsOn()) "FastestDet" else "")
     }
 
     /** 事件列表（events 指令）：新的在前，带小图（base64）。 */
@@ -223,6 +224,7 @@ class CameraHub(
         thread?.let { runCatching { it.join(5_000) } }
         uploader.close()
         work.shutdown()
+        detect.shutdown()
     }
 
     // ---- 相机线程 ----
@@ -411,19 +413,84 @@ class CameraHub(
             detector.reset()   // 换了镜头、调了亮度：重新学背景
         }
         if (regionsDirty || r != detRot) { detector.setRegions(monitor.regions, r); detRot = r; regionsDirty = false }
-        if (!detector.analyze(nv21, w, h) || !recorder.motion(ts)) return
-        val e = recorder.current ?: return
-        lastEvent = e.name
-        Bus.push("有动静：${e.name}")
-        val copy = nv21.copyOf()
+        val moving = detector.analyze(nv21, w, h)
+        if (moving && recorder.motion(ts)) {
+            val e = recorder.current ?: return
+            lastEvent = e.name
+            Bus.push("有动静：${e.name}")
+            newEvent(e, nv21.copyOf(), w, h, r)
+            return
+        }
+        // 事件进行中：每 1.5 秒再认一次（新进来的人、刚才没认出来的）
+        if (recorder.recording && !detBusy && now - lastDetect > 1_500 && objectsOn()) {
+            lastDetect = now
+            detBusy = true
+            val copy = nv21.copyOf()
+            detect.execute { try { later(copy, w, h, r) } finally { detBusy = false } }
+        }
+    }
+
+    // ---- 认出动的是什么（FastestDet，见 ObjectDetector）：在单独一个后台线程上，一个核，只在有动静时跑 ----
+    private val detect = Executors.newSingleThreadExecutor()
+    @Volatile private var detBusy = false
+    @Volatile private var lastDetect = 0L
+    private val evCounts = HashMap<Int, Int>()      // 这次事件里认出过的：类别 → 最多同时几个
+    @Volatile private var evNotified = false
+
+    private fun objectsOn() = NativeBench.available
+
+    /** 认一帧，只留「会动的、而且就在画面变了的地方」的（不然床、椅子、停着的车每次都算进来）。 */
+    private fun recognize(nv21: ByteArray, w: Int, h: Int): List<ObjectDetector.Detection> {
+        if (!ObjectDetector.ready(ctx)) return emptyList()
+        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+        return ObjectDetector.detect(nv21, w, h).filter { it.canMove && detector.moved(it.x1, it.y1, it.x2, it.y2) }
+    }
+
+    /** 记下这次认出来的，更新正在录的那段的标签。返回现在的汇总。 */
+    private fun merge(ds: List<ObjectDetector.Detection>): String = synchronized(evCounts) {
+        for ((cls, n) in ds.groupingBy { it.cls }.eachCount()) evCounts[cls] = maxOf(evCounts[cls] ?: 0, n)
+        val text = ObjectDetector.summaryOf(evCounts)
+        recorder.current?.labels = text
+        text
+    }
+
+    /** 新的事件：认一下是什么、截图（框出来）、存小图、发提醒。 */
+    private fun newEvent(e: EventInfo, nv21: ByteArray, w: Int, h: Int, r: Int) {
+        synchronized(evCounts) { evCounts.clear() }
+        evNotified = false
+        lastDetect = System.currentTimeMillis()
+        detBusy = true
         val m = monitor
-        work.execute {
+        detect.execute {
             try {
-                val big = Snapshot.jpeg(copy, w, h, r, 80, 0)
+                val ds = if (objectsOn()) recognize(nv21, w, h) else emptyList()
+                val labels = merge(ds)
+                e.labels = labels
+                if (labels.isNotEmpty()) Bus.push("认出来：$labels")
+                val big = Snapshot.jpeg(nv21, w, h, r, 80, 0, ds)
                 store.jpg(e.name).writeBytes(big)
-                store.thumb(e.name).writeBytes(Snapshot.jpeg(copy, w, h, r, 60, 200))
-                if (m.notify) notifier.event(e.at, big, m.cooldownMin)
-            } catch (ex: Exception) { Bus.push("存截图出错：${ex.message}") }
+                store.thumb(e.name).writeBytes(Snapshot.jpeg(nv21, w, h, r, 60, 200, ds))
+                // 「只在有人时提醒」：认出人才发；认不了（没带模型）就照常发
+                if (m.notify && (!m.personOnly || !ObjectDetector.ready(ctx) || ds.any { it.isPerson })) {
+                    notifier.event(e.at, big, m.cooldownMin, labels)
+                    evNotified = true
+                }
+            } catch (ex: Exception) {
+                Bus.push("存截图出错：${ex.message}")
+            } finally { detBusy = false }
+        }
+    }
+
+    /** 事件进行中又认了一次：补上标签；「只在有人时提醒」又还没发过时，认出人就发。 */
+    private fun later(nv21: ByteArray, w: Int, h: Int, r: Int) {
+        val ds = recognize(nv21, w, h)
+        if (ds.isEmpty()) return
+        val labels = merge(ds)
+        val m = monitor
+        if (m.notify && m.personOnly && !evNotified && ds.any { it.isPerson }) {
+            evNotified = true
+            val e = recorder.current ?: return
+            notifier.event(e.at, Snapshot.jpeg(nv21, w, h, r, 80, 0, ds), m.cooldownMin, labels)
         }
     }
 
@@ -485,20 +552,48 @@ class CameraHub(
 
 /** NV21 → 转正的 JPEG（maxW > 0 时缩小到这么宽，做小图）。 */
 object Snapshot {
-    fun jpeg(nv21: ByteArray, w: Int, h: Int, rot: Int, quality: Int, maxW: Int): ByteArray {
+    /** boxes：认出来的东西，在图上框出来、写上名字 */
+    fun jpeg(nv21: ByteArray, w: Int, h: Int, rot: Int, quality: Int, maxW: Int,
+             boxes: List<ObjectDetector.Detection> = emptyList()): ByteArray {
         val raw = ByteArrayOutputStream()
         YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 95, raw)
         val r = (rot % 360 + 360) % 360
-        if (r == 0 && maxW <= 0 && quality >= 95) return raw.toByteArray()
+        if (r == 0 && maxW <= 0 && quality >= 95 && boxes.isEmpty()) return raw.toByteArray()
         val src = BitmapFactory.decodeByteArray(raw.toByteArray(), 0, raw.size()) ?: return raw.toByteArray()
         val outW = if (r == 90 || r == 270) h else w
         val scale = if (maxW in 1 until outW) maxW.toFloat() / outW else 1f
         val m = Matrix().apply { postRotate(r.toFloat()); postScale(scale, scale) }
-        val bmp = Bitmap.createBitmap(src, 0, 0, w, h, m, true)
+        var bmp = Bitmap.createBitmap(src, 0, 0, w, h, m, true)
+        if (boxes.isNotEmpty()) {
+            if (!bmp.isMutable) { val c = bmp.copy(Bitmap.Config.ARGB_8888, true); if (bmp !== src) bmp.recycle(); bmp = c }
+            draw(bmp, boxes, r)
+        }
         val out = ByteArrayOutputStream()
         bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
         if (bmp !== src) bmp.recycle()
         src.recycle()
         return out.toByteArray()
+    }
+
+    private fun draw(bmp: Bitmap, boxes: List<ObjectDetector.Detection>, rot: Int) {
+        val c = android.graphics.Canvas(bmp)
+        val bw = bmp.width.toFloat(); val bh = bmp.height.toFloat()
+        val line = android.graphics.Paint().apply {
+            style = android.graphics.Paint.Style.STROKE; color = 0xFFFF8C1A.toInt(); strokeWidth = maxOf(2f, bw / 160)
+        }
+        val text = android.graphics.Paint().apply {
+            color = 0xFFFFFFFF.toInt(); textSize = maxOf(10f, bw / 22); isAntiAlias = true
+        }
+        val back = android.graphics.Paint().apply { color = 0xCCFF8C1A.toInt() }
+        for (d in boxes) {
+            val u = ObjectDetector.upright(d, rot)
+            val x1 = u[0] * bw; val y1 = u[1] * bh; val x2 = u[2] * bw; val y2 = u[3] * bh
+            c.drawRect(x1, y1, x2, y2, line)
+            val label = d.name
+            val tw = text.measureText(label) + text.textSize / 2
+            val ty = if (y1 > text.textSize * 1.3f) y1 else y2 + text.textSize * 1.3f
+            c.drawRect(x1, ty - text.textSize * 1.25f, x1 + tw, ty, back)
+            c.drawText(label, x1 + text.textSize / 4, ty - text.textSize * 0.3f, text)
+        }
     }
 }
