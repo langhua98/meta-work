@@ -180,6 +180,8 @@ static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
             nm = w->type == XJ_Q4_K ? "mvs_q4_K" : w->type == XJ_Q5_K ? "mvs_q5_K" : "mvs_q6_K";
         else if (!strncmp(nm, "mv1_", 4) && o.lanes)
             a.lanes = o.lanes;   // mv1_*：用调优选出的每行线程数
+        else if (a.T > 1 && !generic && (w->type == XJ_Q4_K || w->type == XJ_Q5_K || w->type == XJ_Q6_K))
+            nm = w->type == XJ_Q4_K ? "mvb_q4_K" : w->type == XJ_Q5_K ? "mvb_q5_K" : "mvb_q6_K";   // 多 token
         const uint32_t rows = XJ_MV_ROWS * XJ_MV_LANES / a.lanes;
         const uint32_t groups = (uint32_t)((w->ne1 + rows - 1) / rows);
         [enc setComputePipelineState:P(o, nm)];
@@ -467,7 +469,8 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
     if (!lib) return NULL;
     o.pso = [NSMutableDictionary dictionary];
     const char *names[] = { "mv_f32", "mv_f16", "mv_bf16", "mv_q8_0", "mv_q4_K", "mv_q5_K", "mv_q6_K",
-                            "mv1_f32", "mv1_f16", "mv1_bf16", "mv1_q8_0", "mv1_q4_K", "mv1_q5_K", "mv1_q6_K", "xj_norm", "xj_rope",
+                            "mv1_f32", "mv1_f16", "mv1_bf16", "mv1_q8_0", "mv1_q4_K", "mv1_q5_K", "mv1_q6_K",
+                            "mvb_q4_K", "mvb_q5_K", "mvb_q6_K", "xj_norm", "xj_rope",
                             "xj_kv_store", "xj_attn_scores", "xj_softmax", "xj_attn_out", "xj_conv_silu", "xj_delta_net", "xj_swiglu" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         id<MTLFunction> f = [lib newFunctionWithName:@(names[i])];

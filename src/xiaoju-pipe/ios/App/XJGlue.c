@@ -223,12 +223,18 @@ static int sample(const float *lg, int n, float temp) {
     if (temp <= 0) return best;
     enum { K = 40 };
     int idx[K]; float val[K]; int k = 0;
+    // 记住当前前 K 名里最小的那个，只有换进新词时才重新找（以前每个词都扫 40 次，24 万词 ≈ 1000 万次比较）
+    int mi = 0;
     for (int i = 0; i < n; i++) {
-        if (k < K) { idx[k] = i; val[k] = lg[i]; k++; }
-        else {
-            int mi = 0;
+        float v = lg[i];
+        if (k < K) {
+            idx[k] = i; val[k] = v;
+            if (v < val[mi]) mi = k;
+            k++;
+        } else if (v > val[mi]) {
+            idx[mi] = i; val[mi] = v;
+            mi = 0;
             for (int j = 1; j < K; j++) if (val[j] < val[mi]) mi = j;
-            if (lg[i] > val[mi]) { idx[mi] = i; val[mi] = lg[i]; }
         }
     }
     // 从大到小排
