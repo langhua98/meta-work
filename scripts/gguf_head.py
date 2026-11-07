@@ -18,7 +18,7 @@ ver, nt, nkv = rd('I'), rd('Q'), rd('Q')
 print(f'version={ver} tensors={nt} kv={nkv}')
 for _ in range(nkv):
     k = rs(); v = val(rd('I'))
-    if not k.startswith('tokenizer.ggml.'): print(' ', k, '=', v)
+    if not k.startswith('tokenizer.') and not k.startswith('quantize.'): print(' ', k, '=', v)
 TN = {0: 'F32', 1: 'F16', 8: 'Q8_0', 12: 'Q4_K', 13: 'Q5_K', 14: 'Q6_K', 30: 'BF16'}
 for _ in range(nt):
     name = rs(); nd = rd('I'); dims = [rd('Q') for _ in range(nd)]; t = rd('I'); off = rd('Q')

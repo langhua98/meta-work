@@ -20,7 +20,7 @@ jobs:
             f=$(curl -sSL "https://huggingface.co/api/models/$repo/tree/main" | python3 -c "import json,sys; print([x['path'] for x in json.load(sys.stdin) if 'Q4_K_M' in x['path'] and 'mmproj' not in x['path']][0])")
             echo "== $f"
             curl -sSL -r 0-33554431 -o /tmp/h.gguf "https://huggingface.co/$repo/resolve/main/$f"
-            python3 ../../scripts/gguf_head.py /tmp/h.gguf 'nextn|mtp|output|token_embd|blk\.(3|23|24|31|32|33)\.' 
+            python3 ../../scripts/gguf_head.py /tmp/h.gguf 'nextn|mtp|output|token_embd|blk\.(31|32|33)\.' 
           done
       - name: unsloth 9B 对照（看 block_count 有没有变）
         run: |
