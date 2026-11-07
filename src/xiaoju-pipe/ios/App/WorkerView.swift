@@ -10,7 +10,14 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
     @Published var have = false
     let downloader = Downloader()
 
-    @Published var modelID: String { didSet { UserDefaults.standard.set(modelID, forKey: "w.model"); refresh() } }
+    @Published var modelID: String {
+        didSet {
+            UserDefaults.standard.set(modelID, forKey: "w.model")
+            // Q5_K_M 每层更大，7 Plus 放 8 层（约 1.3 GB）就到头了
+            if modelID == ModelSpec.q9b5.id && count > 8 { count = 8 }
+            refresh()
+        }
+    }
     @Published var start: Int { didSet { UserDefaults.standard.set(start, forKey: "w.start"); refresh() } }
     @Published var count: Int { didSet { UserDefaults.standard.set(count, forKey: "w.count"); refresh() } }
     let pin: UInt32
@@ -163,7 +170,7 @@ struct WorkerView: View {
             }
 
             Section(header: Text("这台手机负责哪几层"),
-                    footer: Text("7 Plus 内存 3 GB，App 大约能用 1.5–2 GB。9B 默认 10 层（第 12–21 层，约 1.3 GB），15 Pro Max 只剩约 3.4 GB；7 Plus 崩了就减到 8 层，主机崩了就再加 1–2 层。")) {
+                    footer: Text("7 Plus 内存 3 GB，权重放 1.3 GB 左右比较稳。9B Q4_K_M 放 10 层（第 12–21 层），Q5_K_M 每层更大，放 8 层（第 12–19 层）。7 Plus 崩了就减 1–2 层，主机崩了就加 1–2 层。")) {
                 if let l = c.layout {
                     Stepper("从第 \(c.start) 层开始", value: $c.start, in: 0...max(0, l.nLayer - c.count))
                     Stepper("一共 \(c.count) 层（到第 \(c.l1 - 1) 层）", value: $c.count, in: 1...max(1, l.nLayer - c.start))
