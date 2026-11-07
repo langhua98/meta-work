@@ -2,7 +2,9 @@ import SwiftUI
 import UIKit
 
 /// 实时画面查看器。
-/// 新：WebSocket 直播通道（/api/agent/v1/stream，服务端只转最新一帧，这边每收一帧回一句 ok，延迟不越拖越长），不限时长，点停止才停。
+/// 新：WebSocket 直播通道（/api/agent/v1/stream），不限时长，点停止才停。这边每收到一帧马上回一句 ok，
+/// 服务端最多让 8 帧在路上（延迟不越拖越长，离得远帧率也上得去）。
+/// 服务端支持时要被控端用硬件 H.264 编码（数据量只有 JPEG 的几分之一），这边用硬件解码；「兼容模式」或旧服务端用 JPEG。
 /// 旧：服务端还没有直播通道（404）时，退回即时信箱一帧帧长轮询（最多 60 秒）。
 @MainActor
 final class RemoteVideo: ObservableObject {
@@ -14,6 +16,11 @@ final class RemoteVideo: ObservableObject {
 
     @Published var muted = false { didSet { audio?.volume = muted ? 0 : 1 } }
     @Published private(set) var tip = ""   // 调参数后对方回的话
+    @Published private(set) var codec = ""     // 正在收的画面：H.264 / JPEG
+    @Published private(set) var kbps = 0
+    @Published private(set) var bufferMs = 0   // 有声音时的缓冲
+    @Published private(set) var serverH264 = false
+    @Published private(set) var askedH264 = false
 
     private var target = ""
 
@@ -23,12 +30,14 @@ final class RemoteVideo: ObservableObject {
     // 有声音时：声音和画面按同一条时间线播（见 RemoteAV.swift）；没声音时画面一到就显示，延迟最低
     private var withAudio = false
     private var audio: LiveAudio?
-    private var timeline = LiveTimeline(delay: 300)
+    private var timeline = LiveTimeline(delay: 200)
     private var pending: [(at: Double, img: UIImage)] = []
     private var display: Task<Void, Never>?
+    private var decoder = LiveH264Decoder()
+    private var bytes = (t: Date(), n: 0)
 
     func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false,
-               lens: String = "back") {
+               lens: String = "back", compat: Bool = false) {
         guard !running else { return }
         let s = Store.shared
         let dev = target.trimmingCharacters(in: .whitespaces)
@@ -36,7 +45,9 @@ final class RemoteVideo: ObservableObject {
         guard !s.cloudToken.isEmpty else { note = "先在设置里填云盘令牌"; return }
 
         running = true; frame = nil; frames = 0; fps = 0; note = "连接直播通道…"
-        withAudio = sound; pending = []; timeline = LiveTimeline(delay: 300); tip = ""
+        withAudio = sound; pending = []; timeline = LiveTimeline(delay: 200); tip = ""
+        codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false
+        decoder = LiveH264Decoder(); bytes = (Date(), 0)
         self.target = dev
         if sound {
             audio = try? LiveAudio()
@@ -64,8 +75,9 @@ final class RemoteVideo: ObservableObject {
                 note = "云盘地址不对"; running = false; return
             }
             socket = ws
-            // 第一条消息是 {"pub":false}；连不上时看是不是服务端还没有直播通道
-            do { _ = try await ws.receive() } catch {
+            // 第一条消息是 {"pub":false}（新服务端还带 "h264":true）；连不上时看是不是服务端还没有直播通道
+            let hello: URLSessionWebSocketTask.Message
+            do { hello = try await ws.receive() } catch {
                 let code = (ws.response as? HTTPURLResponse)?.statusCode ?? 0
                 ws.cancel()
                 if code == 404 {
@@ -76,6 +88,9 @@ final class RemoteVideo: ObservableObject {
                 }
                 running = false; return
             }
+            if case .string(let t) = hello, t.contains("\"h264\":true") { serverH264 = true }
+            askedH264 = serverH264 && !compat
+            cmd["codec"] = askedH264 ? "h264" : "jpeg"
             cmd["transport"] = "ws"; cmd["room"] = room
             do { try await relay.post(RemoteBox.inbox(dev), cmd) } catch {
                 note = "发起失败：\(error.localizedDescription)"; ws.cancel(); running = false; return
@@ -105,7 +120,7 @@ final class RemoteVideo: ObservableObject {
         let wsBase = base.hasPrefix("https") ? "wss" + base.dropFirst(5) : "ws" + base.dropFirst(4)
         guard var c = URLComponents(string: wsBase + "/api/agent/v1/stream") else { return nil }
         c.queryItems = [URLQueryItem(name: "role", value: "sub"), URLQueryItem(name: "ack", value: "1"),
-                        URLQueryItem(name: "room", value: room)]
+                        URLQueryItem(name: "window", value: "8"), URLQueryItem(name: "room", value: room)]
         guard let url = c.url else { return nil }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -116,8 +131,8 @@ final class RemoteVideo: ObservableObject {
     }
 
     /// 收：第 1 字节是类型。1 = 画面（旧）[1][角度/90][JPEG]；3 = 画面带时间戳 [3][角度/90][时间 8 字节][JPEG]；
-    /// 2 = 声音 [2][格式][时间 8 字节][μ-law]（格式 1 = 16 kHz，2 = 8 kHz）。
-    /// 每收到一帧画面回 ok，服务端才发下一帧；声音不用回。
+    /// 4 = H.264 [4][角度/90][时间 8 字节][标志][Annex-B]；2 = 声音 [2][格式][时间 8 字节][μ-law]（格式 1 = 16 kHz，2 = 8 kHz）。
+    /// 每收到一帧画面马上回 ok（不等解码），服务端才接着发；声音不用回。
     private func receiveLoop(_ ws: URLSessionWebSocketTask) async {
         var seenPub = false
         while running {
@@ -126,6 +141,7 @@ final class RemoteVideo: ObservableObject {
             switch msg {
             case .data(let d):
                 guard d.count > 2 else { continue }
+                count(d.count)
                 let kind = d[d.startIndex]
                 if kind == 2 {
                     guard withAudio, let audio, d.count > 10 else { continue }
@@ -136,19 +152,27 @@ final class RemoteVideo: ObservableObject {
                     audio.schedule(ulaw: d.subdata(in: (d.startIndex + 10)..<d.endIndex), rate: rate, at: at)
                     continue
                 }
-                guard kind == 1 || kind == 3 else { continue }
-                let head = kind == 3 ? 10 : 2
+                guard kind == 1 || kind == 3 || kind == 4 else { continue }
+                ws.send(.string("ok")) { _ in }
+                let head = kind == 4 ? 11 : (kind == 3 ? 10 : 2)
                 guard d.count > head else { continue }
                 var at: Double?
-                if kind == 3, withAudio {
+                if kind != 1, withAudio {
                     let ts = d.liveTimestamp(at: 2)
                     timeline.observe(senderMs: ts, arrivedMs: arrived)
                     at = timeline.playout(ts)
                 }
                 let rot = Int(d[d.startIndex + 1]) * 90
-                let jpeg = d.subdata(in: (d.startIndex + head)..<d.endIndex)
-                let img = await Task.detached { UIImage(data: jpeg)?.preparingForDisplay() }.value
-                try? await ws.send(.string("ok"))
+                let payload = d.subdata(in: (d.startIndex + head)..<d.endIndex)
+                let img: UIImage?
+                if kind == 4 {
+                    if codec != "H.264" { codec = "H.264" }
+                    let dec = decoder   // 按顺序一帧帧解（H.264 后面的帧要靠前面的）
+                    img = await Task.detached { dec.decode(payload).map { UIImage(cgImage: $0) } }.value
+                } else {
+                    if codec != "JPEG" { codec = "JPEG" }
+                    img = await Task.detached { UIImage(data: payload)?.preparingForDisplay() }.value
+                }
                 guard running, let img else { continue }
                 let shown = rotated(img, rot)
                 if let at {
@@ -164,6 +188,16 @@ final class RemoteVideo: ObservableObject {
                 continue
             }
         }
+    }
+
+    /// 网速：每秒算一次收到多少 kbps。
+    private func count(_ n: Int) {
+        bytes.n += n
+        let dt = Date().timeIntervalSince(bytes.t)
+        guard dt >= 1 else { return }
+        kbps = Int(Double(bytes.n) * 8 / dt / 1000)
+        bufferMs = withAudio ? Int(timeline.delay) : 0
+        bytes = (Date(), 0)
     }
 
     /// 有声音时：把到了播放时间的最新一帧显示出来，更早的扔掉。
@@ -207,6 +241,10 @@ final class RemoteVideo: ObservableObject {
     /// 直播中调参数（lens / width / quality / fps / exposure / zoom / torch），对方回的话放进 tip。
     func adjust(_ changes: [String: Any]) {
         guard running, !target.isEmpty else { return }
+        if changes["codec"] != nil {
+            guard serverH264 else { tip = "云盘服务端还不能转 H.264，只能用 JPEG"; return }
+            askedH264 = (changes["codec"] as? String) == "h264"
+        }
         let s = Store.shared
         let relay = RemoteRelay(base: s.cloudURL, token: s.cloudToken)
         let dev = target
@@ -261,6 +299,7 @@ struct RemoteVideoView: View {
     @State private var exposure = 0.0
     @State private var zoom = 0.0
     @State private var torch = false
+    @AppStorage("remoteVideoCompat") private var compat = false
 
     private let widths = [320, 480, 640, 960]
     private func widthName(_ w: Int) -> String { [320: "流畅", 480: "标准", 640: "高清", 960: "超清"][w] ?? "\(w)" }
@@ -284,13 +323,17 @@ struct RemoteVideoView: View {
 
                 if video.running {
                     HStack {
-                        Text("已显示 \(video.frames) 帧 · \(video.fps) 帧/秒").font(.footnote).foregroundStyle(Theme.muted)
+                        Text(stats).font(.footnote).foregroundStyle(Theme.muted)
                         Spacer()
                         if sound {
                             Button { Haptics.tap(); video.muted.toggle() } label: {
                                 Image(systemName: video.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             }
                         }
+                    }
+                    if video.askedH264 && video.codec == "JPEG" {
+                        Text("对方发的是 JPEG：安卓端要更新到 0.7，或者那台手机的硬件编码用不了").font(.footnote)
+                            .foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if !video.tip.isEmpty {
                         Text(video.tip).font(.footnote).foregroundStyle(Theme.orangeText).frame(maxWidth: .infinity, alignment: .leading)
@@ -302,7 +345,7 @@ struct RemoteVideoView: View {
                     if video.running { video.stop() }
                     else {
                         video.start(target: target, seconds: 0, fps: fps, width: width, quality: Int(quality),
-                                    sound: sound, lens: lens)
+                                    sound: sound, lens: lens, compat: compat)
                     }
                 } label: {
                     Label(video.running ? "停止" : "开始看画面", systemImage: video.running ? "stop.circle" : "play.circle")
@@ -366,10 +409,21 @@ struct RemoteVideoView: View {
                     .disabled(lens == "front")
                     .onChange(of: torch) { video.adjust(["torch": torch]) }
             } else {
-                Toggle("声音（和画面同步，多 0.3 秒缓冲）", isOn: $sound)
+                Toggle("声音（和画面同步，按网络情况自动缓冲 0.1～0.6 秒）", isOn: $sound)
             }
+            Toggle("兼容模式（JPEG：费流量、没那么流畅，H.264 画面不对时用）", isOn: $compat)
+                .onChange(of: compat) { video.adjust(["codec": compat ? "jpeg" : "h264"]) }
         }
         .font(.subheadline)
+    }
+
+    private var stats: String {
+        var parts = [String]()
+        if !video.codec.isEmpty { parts.append(video.codec) }
+        parts.append("\(video.fps) 帧/秒")
+        if video.kbps > 0 { parts.append("\(video.kbps) kbps") }
+        if video.bufferMs > 0 { parts.append("缓冲 \(video.bufferMs) ms") }
+        return parts.joined(separator: " · ")
     }
 
     private func row<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
