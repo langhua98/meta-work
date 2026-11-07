@@ -35,68 +35,109 @@ object Camera {
         return 0
     }
 
-    /**
-     * 实时画面：连续从预览里抓帧，每帧压成小 JPEG 交给 onFrame。阻塞调用，直到 running 变 false 或到时。
-     * 用老相机的预览回调（NV21）+ YuvImage 压 JPEG，比反复 takePicture 快得多，4.2 也能跑。
-     * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
-     */
+    /** 旧接口（即时信箱的旧直播用）：参数固定、有时长。 */
     fun stream(front: Boolean, targetW: Int, quality: Int, fps: Int, durationMs: Long,
                running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int, ts: Long) -> Unit) {
+        val end = System.currentTimeMillis() + durationMs
+        live(LiveSettings(front, targetW, quality, fps), { running() && System.currentTimeMillis() < end }, onFrame)
+    }
+
+    /**
+     * 实时画面：连续从预览里抓帧，每帧压成小 JPEG 交给 onFrame。阻塞调用，直到 running 变 false。
+     * 用老相机的预览回调（NV21）+ YuvImage 压 JPEG，比反复 takePicture 快得多，4.2 也能跑。
+     * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
+     * 直播中改 settings：镜头/清晰度会关掉相机重开，其他的当场生效。
+     */
+    fun live(s: LiveSettings, running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int, ts: Long) -> Unit) {
         if (LegacyCamera.getNumberOfCameras() == 0) throw IllegalStateException("这台手机没有摄像头")
         Torch.releaseLegacy()
         val ht = HandlerThread("vid").apply { start() }
         val h = Handler(ht.looper)
-        val ready = CountDownLatch(1)
-        var startErr: Throwable? = null
-        var cam: LegacyCamera? = null
-        var tex: SurfaceTexture? = null
-        var fw = 0; var fh = 0; var rot = 0
-        val minGap = 1000L / fps.coerceIn(1, 15)
-        val lastAt = AtomicLong(0L)
-
-        h.post {
-            try {
-                val id = findCamera(front)
-                val c = LegacyCamera.open(id)
-                cam = c
-                rot = LegacyCamera.CameraInfo().also { LegacyCamera.getCameraInfo(id, it) }.orientation
-                val p = c.parameters
-                val sz = p.supportedPreviewSizes
-                    .filter { it.width >= targetW }.minByOrNull { it.width }
-                    ?: p.supportedPreviewSizes.maxByOrNull { it.width }
-                sz?.let { p.setPreviewSize(it.width, it.height) }
-                p.previewFormat = ImageFormat.NV21
-                val modes = p.supportedFocusModes ?: emptyList()
-                if ("continuous-video" in modes) p.focusMode = "continuous-video"
-                else if ("continuous-picture" in modes) p.focusMode = "continuous-picture"
-                c.parameters = p
-                fw = c.parameters.previewSize.width
-                fh = c.parameters.previewSize.height
-                val t = SurfaceTexture(20); tex = t
-                c.setPreviewTexture(t)
-                c.setPreviewCallback { data, _ ->
-                    val now = System.currentTimeMillis()
-                    if (data == null || now - lastAt.get() < minGap || !running()) return@setPreviewCallback
-                    lastAt.set(now)
-                    val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
+        try {
+            while (running()) {
+                val ver = s.version
+                val front = s.front
+                val ready = CountDownLatch(1)
+                var startErr: Throwable? = null
+                var cam: LegacyCamera? = null
+                var tex: SurfaceTexture? = null
+                val lastAt = AtomicLong(0L)
+                h.post {
                     try {
-                        val out = ByteArrayOutputStream()
-                        YuvImage(data, ImageFormat.NV21, fw, fh, null)
-                            .compressToJpeg(Rect(0, 0, fw, fh), quality.coerceIn(20, 90), out)
-                        onFrame(out.toByteArray(), rot, ts)
-                    } catch (e: Throwable) { /* 丢这一帧 */ }
+                        val id = findCamera(front)
+                        val c = LegacyCamera.open(id)
+                        cam = c
+                        val rot = LegacyCamera.CameraInfo().also { LegacyCamera.getCameraInfo(id, it) }.orientation
+                        val p = c.parameters
+                        val sz = p.supportedPreviewSizes
+                            .filter { it.width >= s.width }.minByOrNull { it.width }
+                            ?: p.supportedPreviewSizes.maxByOrNull { it.width }
+                        sz?.let { p.setPreviewSize(it.width, it.height) }
+                        p.previewFormat = ImageFormat.NV21
+                        val modes = p.supportedFocusModes ?: emptyList()
+                        if ("continuous-video" in modes) p.focusMode = "continuous-video"
+                        else if ("continuous-picture" in modes) p.focusMode = "continuous-picture"
+                        c.parameters = p
+                        tweak(c, s, front)
+                        val fw = c.parameters.previewSize.width
+                        val fh = c.parameters.previewSize.height
+                        val t = SurfaceTexture(20); tex = t
+                        c.setPreviewTexture(t)
+                        c.setPreviewCallback { data, _ ->
+                            val now = System.currentTimeMillis()
+                            if (data == null || now - lastAt.get() < 1000L / s.fps || !running()) return@setPreviewCallback
+                            lastAt.set(now)
+                            val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
+                            try {
+                                val out = ByteArrayOutputStream()
+                                YuvImage(data, ImageFormat.NV21, fw, fh, null)
+                                    .compressToJpeg(Rect(0, 0, fw, fh), s.quality, out)
+                                onFrame(out.toByteArray(), rot, ts)
+                            } catch (e: Throwable) { /* 丢这一帧 */ }
+                        }
+                        c.startPreview()
+                    } catch (e: Throwable) { startErr = e } finally { ready.countDown() }
                 }
-                c.startPreview()
-            } catch (e: Throwable) { startErr = e } finally { ready.countDown() }
+                ready.await(8, TimeUnit.SECONDS)
+                startErr?.let { e ->
+                    val done = CountDownLatch(1)
+                    h.post { cleanup(cam, tex); done.countDown() }
+                    done.await(3, TimeUnit.SECONDS)
+                    throw e
+                }
+                var tw = s.tweak
+                while (running() && s.version == ver) {
+                    if (s.tweak != tw) { tw = s.tweak; h.post { cam?.let { runCatching { tweak(it, s, front) } } } }
+                    try { Thread.sleep(100) } catch (e: InterruptedException) { break }
+                }
+                // 关掉这台相机（换镜头/清晰度时接着开新的）
+                val closed = CountDownLatch(1)
+                h.post { runCatching { cam?.setPreviewCallback(null) }; cleanup(cam, tex); closed.countDown() }
+                closed.await(3, TimeUnit.SECONDS)
+            }
+        } finally {
+            ht.quit()
         }
-        ready.await(8, TimeUnit.SECONDS)
-        startErr?.let { h.post { cleanup(cam, tex); ht.quit() }; throw it }
+    }
 
-        val end = System.currentTimeMillis() + durationMs
-        while (running() && System.currentTimeMillis() < end) {
-            try { Thread.sleep(150) } catch (e: InterruptedException) { break }
+    /** 在开着的相机上设亮度、变焦、手电；不支持的记到 s.unsupported。 */
+    private fun tweak(c: LegacyCamera, s: LiveSettings, front: Boolean) {
+        val p = c.parameters
+        val no = ArrayList<String>()
+        val min = p.minExposureCompensation
+        val max = p.maxExposureCompensation
+        if (min != 0 || max != 0) p.exposureCompensation = LiveSettings.exposureIndex(s.exposure, min, max)
+        else if (s.exposure != 0f) no += "调亮度"
+        if (p.isZoomSupported) p.zoom = Math.round(s.zoom * p.maxZoom)
+        else if (s.zoom > 0f) no += "变焦"
+        val flash = p.supportedFlashModes ?: emptyList()
+        if (s.torch && !front && "torch" in flash) p.flashMode = "torch"
+        else {
+            if (s.torch) no += if (front) "前置镜头开手电" else "手电"
+            if ("off" in flash) p.flashMode = "off"
         }
-        h.post { runCatching { cam?.setPreviewCallback(null) }; cleanup(cam, tex); ht.quit() }
+        c.parameters = p
+        s.unsupported = if (no.isEmpty()) "" else "这台手机不支持" + no.joinToString("、")
     }
 
     private fun cleanup(cam: LegacyCamera?, tex: SurfaceTexture?) {

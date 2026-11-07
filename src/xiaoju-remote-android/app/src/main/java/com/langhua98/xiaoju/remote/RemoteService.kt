@@ -37,6 +37,7 @@ class RemoteService : Service() {
 
     // 直播在单独的线程里跑，指令循环照常收指令。新的直播指令会先停掉旧的直播。
     @Volatile private var live: Thread? = null
+    @Volatile private var liveSettings: LiveSettings? = null
     private val liveStop = java.util.concurrent.atomic.AtomicBoolean(false)
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -152,7 +153,11 @@ class RemoteService : Service() {
             else streamVideo(cloud, cmd, device, viaRelay, id, ::reply)
             return
         }
-        if (live?.isAlive == true && action in setOf("photo", "torch")) {
+        if (action == "video_set" || (action == "torch" && live?.isAlive == true)) {
+            adjustLive(cmd, action, id, ::reply)
+            return
+        }
+        if (live?.isAlive == true && action == "photo") {
             reply(JSONObject().put("id", id).put("ok", false).put("text", "正在直播，相机被占用了，先停止看画面"))
             notifyText("正在被远程使用：实时画面")
             return
@@ -200,10 +205,10 @@ class RemoteService : Service() {
         liveStop.set(false)
 
         val p = Prefs(this)
-        val front = cmd.optString("lens") == "front"
-        val fps = cmd.optInt("fps", 10).coerceIn(1, 15)
-        val width = cmd.optInt("width", 480).coerceIn(240, 960)
-        val quality = cmd.optInt("quality", 50).coerceIn(20, 85)
+        val settings = LiveSettings(cmd.optString("lens") == "front", cmd.optInt("width", 480),
+            cmd.optInt("quality", 50), cmd.optInt("fps", 10))
+        settings.apply(cmd)   // 开播时就带的亮度、变焦、手电
+        val fps = settings.fps
         // av=true：新查看器，画面带时间戳；audio=true：还要声音（要麦克风权限）
         val av = cmd.optBoolean("av", false)
         val wantAudio = av && cmd.optBoolean("audio", false)
@@ -223,14 +228,17 @@ class RemoteService : Service() {
         Bus.push("$okText，WebSocket，$fps 帧/秒")
         notifyText(if (withAudio) "正在被远程使用：实时画面（含声音）" else "正在被远程使用：实时画面")
 
+        liveSettings = settings
         live = Thread({
             val mic = if (withAudio) AudioCapture { data, codec, ts ->
                 if (client.subs > 0) client.sendAudio(StreamClient.audio(data, codec, ts))
             } else null
             if (mic != null && !mic.start()) Bus.push("声音没开成：${mic.error}")
             try {
-                Camera.stream(front, width, quality, fps, LIVE_MAX_MS, running = {
-                    running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000)
+                val end = System.currentTimeMillis() + LIVE_MAX_MS
+                Camera.live(settings, running = {
+                    running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000) &&
+                        System.currentTimeMillis() < end
                 }) { jpg, rot, ts ->
                     if (client.subs > 0) client.send(if (av) StreamClient.frameTs(jpg, rot, ts) else StreamClient.frame(jpg, rot))
                 }
@@ -243,6 +251,24 @@ class RemoteService : Service() {
                 notifyText("待命中，等指令")
             }
         }, "live").apply { start() }
+    }
+
+    /** 直播中调参数：video_set（镜头、清晰度、画质、帧率、亮度、变焦、手电），或直播时的手电指令。 */
+    private fun adjustLive(cmd: JSONObject, action: String, id: String, reply: (JSONObject) -> Unit) {
+        val s = liveSettings
+        if (live?.isAlive != true || s == null) {
+            reply(JSONObject().put("id", id).put("do", action).put("ok", false).put("text", "现在没在直播"))
+            notifyText("待命中，等指令")
+            return
+        }
+        val c = if (action == "torch") JSONObject().put("torch", cmd.optBoolean("on", true)) else cmd
+        val changed = s.apply(c)
+        try { Thread.sleep(1200) } catch (e: InterruptedException) { }   // 等相机设好（换镜头大约 1 秒）
+        val text = (if (changed.isEmpty()) "没有要改的" else "已调整：" + changed.joinToString("、")) +
+            (if (s.unsupported.isEmpty()) "" else "（${s.unsupported}）")
+        reply(JSONObject().put("id", id).put("do", action).put("ok", true).put("text", text))
+        Bus.push(text)
+        notifyText("正在被远程使用：实时画面")
     }
 
     /** 实时画面：连续抓帧推到视频信箱。只走即时信箱（文件信箱太慢，撑不起视频）。 */
@@ -276,7 +302,7 @@ class RemoteService : Service() {
     }
 
     private fun label(a: String) = mapOf("photo" to "拍照", "audio" to "录音", "location" to "定位",
-        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面")[a] ?: a
+        "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面")[a] ?: a
 
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }

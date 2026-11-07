@@ -12,8 +12,8 @@ android {
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 6
+        versionName = "0.6"
         multiDexEnabled = true
     }
 
@@ -50,4 +50,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:3.12.13")
 
     testImplementation("junit:junit:4.13.2")
+    // 安卓自带的 org.json 在电脑上跑测试时是空壳，测试用真的
+    testImplementation("org.json:json:20231013")
 }

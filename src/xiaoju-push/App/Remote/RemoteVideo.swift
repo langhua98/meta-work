@@ -13,6 +13,9 @@ final class RemoteVideo: ObservableObject {
     @Published private(set) var fps = 0
 
     @Published var muted = false { didSet { audio?.volume = muted ? 0 : 1 } }
+    @Published private(set) var tip = ""   // 调参数后对方回的话
+
+    private var target = ""
 
     private var task: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
@@ -24,7 +27,8 @@ final class RemoteVideo: ObservableObject {
     private var pending: [(at: Double, img: UIImage)] = []
     private var display: Task<Void, Never>?
 
-    func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false) {
+    func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false,
+               lens: String = "back") {
         guard !running else { return }
         let s = Store.shared
         let dev = target.trimmingCharacters(in: .whitespaces)
@@ -32,7 +36,8 @@ final class RemoteVideo: ObservableObject {
         guard !s.cloudToken.isEmpty else { note = "先在设置里填云盘令牌"; return }
 
         running = true; frame = nil; frames = 0; fps = 0; note = "连接直播通道…"
-        withAudio = sound; pending = []; timeline = LiveTimeline(delay: 300)
+        withAudio = sound; pending = []; timeline = LiveTimeline(delay: 300); tip = ""
+        self.target = dev
         if sound {
             audio = try? LiveAudio()
             audio?.volume = muted ? 0 : 1
@@ -45,7 +50,7 @@ final class RemoteVideo: ObservableObject {
         }
         let relay = RemoteRelay(base: s.cloudURL, token: s.cloudToken)
         let id = idString()
-        var base: [String: Any] = ["id": id, "do": "video", "lens": "back",
+        var base: [String: Any] = ["id": id, "do": "video", "lens": lens,
                                    "fps": wantFps, "width": width, "quality": quality,
                                    "av": true, "audio": sound]
         if !s.remotePair.isEmpty { base["pair"] = s.remotePair }
@@ -199,6 +204,25 @@ final class RemoteVideo: ObservableObject {
         if running { note = "直播结束" }
     }
 
+    /// 直播中调参数（lens / width / quality / fps / exposure / zoom / torch），对方回的话放进 tip。
+    func adjust(_ changes: [String: Any]) {
+        guard running, !target.isEmpty else { return }
+        let s = Store.shared
+        let relay = RemoteRelay(base: s.cloudURL, token: s.cloudToken)
+        let dev = target
+        let id = idString()
+        var cmd = changes
+        cmd["id"] = id; cmd["do"] = "video_set"
+        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        let send = cmd
+        tip = "调整中…"
+        Task {
+            do { try await relay.post(RemoteBox.inbox(dev), send) } catch { tip = "没发出去：\(error.localizedDescription)"; return }
+            let r = (try? await relay.wait(RemoteBox.receipt(dev, id), seconds: 15))?.first
+            tip = (r?["text"] as? String) ?? "对方没回话"
+        }
+    }
+
     func stop() {
         running = false
         display?.cancel(); display = nil
@@ -231,57 +255,127 @@ struct RemoteVideoView: View {
     @StateObject private var video = RemoteVideo()
     @State private var fps = 10
     @State private var sound = true
+    @State private var lens = "back"
+    @State private var width = 480
+    @State private var quality = 50.0
+    @State private var exposure = 0.0
+    @State private var zoom = 0.0
+    @State private var torch = false
+
+    private let widths = [320, 480, 640, 960]
+    private func widthName(_ w: Int) -> String { [320: "流畅", 480: "标准", 640: "高清", 960: "超清"][w] ?? "\(w)" }
 
     var body: some View {
-        VStack(spacing: 12) {
-            ZStack {
-                Rectangle().fill(Color.black)
-                if let img = video.frame {
-                    Image(uiImage: img).resizable().scaledToFit()
-                } else {
-                    VStack(spacing: 8) {
-                        if video.running { ProgressView().tint(.white) }
-                        Text(video.note.isEmpty ? "没有画面" : video.note).foregroundStyle(.white.opacity(0.8))
-                    }
-                }
-            }
-            .aspectRatio(4.0/3.0, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-
-            if video.running {
-                HStack {
-                    Text("已显示 \(video.frames) 帧 · \(video.fps) 帧/秒").font(.footnote).foregroundStyle(Theme.muted)
-                    Spacer()
-                    if sound {
-                        Button { Haptics.tap(); video.muted.toggle() } label: {
-                            Image(systemName: video.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        ScrollView {
+            VStack(spacing: 12) {
+                ZStack {
+                    Rectangle().fill(Color.black)
+                    if let img = video.frame {
+                        Image(uiImage: img).resizable().scaledToFit()
+                    } else {
+                        VStack(spacing: 8) {
+                            if video.running { ProgressView().tint(.white) }
+                            Text(video.note.isEmpty ? "没有画面" : video.note).foregroundStyle(.white.opacity(0.8))
                         }
                     }
                 }
-            } else {
-                Stepper("帧率 \(fps) 帧/秒", value: $fps, in: 1...15)
-                Toggle("声音（和画面同步，多 0.3 秒缓冲）", isOn: $sound)
-            }
+                .aspectRatio(4.0/3.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            Button {
-                Haptics.tap()
-                if video.running { video.stop() }
-                else { video.start(target: target, seconds: 0, fps: fps, width: 480, quality: 50, sound: sound) }
-            } label: {
-                Label(video.running ? "停止" : "开始看画面", systemImage: video.running ? "stop.circle" : "play.circle")
-                    .frame(maxWidth: .infinity).padding(.vertical, 6)
-                    .foregroundStyle(video.running ? Theme.redText : Theme.orangeText).fontWeight(.semibold)
-            }
-            .buttonStyle(.bordered)
+                if video.running {
+                    HStack {
+                        Text("已显示 \(video.frames) 帧 · \(video.fps) 帧/秒").font(.footnote).foregroundStyle(Theme.muted)
+                        Spacer()
+                        if sound {
+                            Button { Haptics.tap(); video.muted.toggle() } label: {
+                                Image(systemName: video.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            }
+                        }
+                    }
+                    if !video.tip.isEmpty {
+                        Text(video.tip).font(.footnote).foregroundStyle(Theme.orangeText).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
 
-            Text("一直播到点「停止」。画面经云盘服务器中转，不写存储。对方那台要开着待命。")
-                .font(.caption2).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
-            Spacer()
+                Button {
+                    Haptics.tap()
+                    if video.running { video.stop() }
+                    else {
+                        video.start(target: target, seconds: 0, fps: fps, width: width, quality: Int(quality),
+                                    sound: sound, lens: lens)
+                    }
+                } label: {
+                    Label(video.running ? "停止" : "开始看画面", systemImage: video.running ? "stop.circle" : "play.circle")
+                        .frame(maxWidth: .infinity).padding(.vertical, 6)
+                        .foregroundStyle(video.running ? Theme.redText : Theme.orangeText).fontWeight(.semibold)
+                }
+                .buttonStyle(.bordered)
+
+                controls
+
+                Text("一直播到点「停止」。画面经云盘服务器中转，不写存储。对方那台要开着待命。直播中调参数大约 1 秒生效。")
+                    .font(.caption2).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
+            }
+            .padding(16)
         }
-        .padding(16)
         .background(Theme.bg)
         .navigationTitle("实时画面")
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear { video.stop() }
+    }
+
+    /// 开始前选好；直播中改了马上发给对方。
+    @ViewBuilder private var controls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("镜头", selection: $lens) {
+                Text("后置").tag("back")
+                Text("前置").tag("front")
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: lens) {
+                if lens == "front" { torch = false }
+                video.adjust(["lens": lens])
+            }
+
+            Picker("清晰度", selection: $width) {
+                ForEach(widths, id: \.self) { w in Text(widthName(w)).tag(w) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: width) { video.adjust(["width": width]) }
+
+            row("画质 \(Int(quality))") {
+                Slider(value: $quality, in: 20...85, step: 5) { editing in
+                    if !editing { video.adjust(["quality": Int(quality)]) }
+                }
+            }
+            Stepper("帧率 \(fps) 帧/秒", value: $fps, in: 1...15)
+                .onChange(of: fps) { video.adjust(["fps": fps]) }
+
+            if video.running {
+                row("亮度 \(exposure == 0 ? "自动" : String(format: "%+.1f", exposure))") {
+                    Slider(value: $exposure, in: -1...1, step: 0.1) { editing in
+                        if !editing { video.adjust(["exposure": exposure]) }
+                    }
+                }
+                row("变焦 \(Int(zoom * 100))%") {
+                    Slider(value: $zoom, in: 0...1, step: 0.05) { editing in
+                        if !editing { video.adjust(["zoom": zoom]) }
+                    }
+                }
+                Toggle("手电（后置镜头才有）", isOn: $torch)
+                    .disabled(lens == "front")
+                    .onChange(of: torch) { video.adjust(["torch": torch]) }
+            } else {
+                Toggle("声音（和画面同步，多 0.3 秒缓冲）", isOn: $sound)
+            }
+        }
+        .font(.subheadline)
+    }
+
+    private func row<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).foregroundStyle(Theme.muted).font(.footnote)
+            content()
+        }
     }
 }
