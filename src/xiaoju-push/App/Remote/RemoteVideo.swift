@@ -243,7 +243,12 @@ final class RemoteVideo: ObservableObject {
 
     /// 等第一条消息，超时返回 nil（超时会断开这条连接）。
     private func firstMessage(_ ws: URLSessionWebSocketTask, timeout: Double) async -> URLSessionWebSocketTask.Message? {
-        let timer = Task { try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)); ws.cancel() }
+        // 注意：收到消息后会取消这个计时器，被取消时 sleep 会提前返回，这时绝不能断开连接
+        // （以前就是这里把刚连上的 Wi-Fi 直连和换回的服务器连接都断掉了，直播一帧都收不到）
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            if !Task.isCancelled { ws.cancel() }
+        }
         defer { timer.cancel() }
         return try? await ws.receive()
     }
