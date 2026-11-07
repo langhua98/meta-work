@@ -38,6 +38,25 @@ jobs:
         run: |
           python3 -c "import numpy" 2>/dev/null || pip3 install numpy
           OMP_NUM_THREADS=1 make e2e
+      - name: App 里的模型链接支持分段下载（HTTP Range → 206）
+        run: |
+          # App 先用 Range 拿文件头（16 MB），再只下从机那几层；这里用和 App 一样的请求测一遍
+          fail=0
+          for host in huggingface.co hf-mirror.com; do
+            for path in unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf; do
+              url="https://$host/$path"
+              out=$(curl -sS -L -r 0-16777215 -o /tmp/head.gguf --max-time 120 \
+                -w '%{http_code} %{size_download} %{time_total}s %{num_redirects} 次跳转 → %{url_effective}' "$url" 2>&1) || true
+              echo "$host $(basename "$path")：$out" | cut -c1-300
+              set -- $out
+              if [ "$1" != 206 ] || [ "$2" != 16777216 ]; then
+                echo "::warning::$url 分段下载不正常：$out"
+                [ "$host" = huggingface.co ] && fail=1
+              fi
+            done
+          done
+          ./build/gguf-dump /tmp/head.gguf 2>&1 | head -3 || true
+          exit $fail
 
   test:
     runs-on: ${{ inputs.runner || 'macos-26' }}

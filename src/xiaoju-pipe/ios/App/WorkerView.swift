@@ -49,6 +49,7 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
 
     func fetchLayout() {
         Task {
+            // 出错时 downloader.error 会显示在「下载」那一栏
             if let l = try? await downloader.fetchLayout(model) { await MainActor.run { self.layout = l } }
         }
     }
@@ -169,12 +170,13 @@ struct WorkerView: View {
                     row("权重", l.mb(c.start, c.l1).mb)
                     row("现在可用内存", (Double(xjg_free_memory()) / 1048576).mb)
                 } else {
-                    Button("读取模型结构（只下几 MB）") { c.fetchLayout() }
+                    Button("读取模型结构（只下几 MB）") { c.fetchLayout() }.disabled(dl.progress != nil)
                 }
             }
             .disabled(c.running)
 
             Section(header: Text("下载")) {
+                SourcePicker().disabled(dl.progress != nil)
                 if let p = dl.progress {
                     ProgressView(value: p)
                     Text(dl.status).font(.footnote)
@@ -216,5 +218,16 @@ struct WorkerView: View {
 
     private func row(_ k: String, _ v: String) -> some View {
         HStack { Text(k); Spacer(); Text(v).foregroundColor(.secondary).multilineTextAlignment(.trailing) }
+    }
+}
+
+/// 下载源：自动 / 国内镜像 / 官方
+struct SourcePicker: View {
+    @AppStorage("dl.source") private var source = DownloadSource.auto.rawValue
+
+    var body: some View {
+        Picker("下载源", selection: $source) {
+            ForEach(DownloadSource.allCases) { Text($0.label).tag($0.rawValue) }
+        }
     }
 }

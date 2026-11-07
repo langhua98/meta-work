@@ -237,6 +237,7 @@ struct HostView: View {
                 Picker("模型", selection: $c.modelID) {
                     ForEach(ModelSpec.all) { Text($0.name).tag($0.id) }
                 }
+                if !c.haveModel { SourcePicker().disabled(c.downloader.progress != nil) }
                 if let p = c.downloader.progress {
                     ProgressView(value: p)
                     Text(c.downloader.status).font(.footnote)
