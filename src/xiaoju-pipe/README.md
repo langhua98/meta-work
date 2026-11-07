@@ -96,7 +96,12 @@ make && make test
 - 同一进程拆两段、两个进程走 TCP、从机只用 531 MB 稀疏文件（第 12–19 层），第一个词的分数都是 15.99396，生成的文字一字不差；
 - 两轮对话能记住上文；配对码不对、从机没有主机要的层时都会拒绝并说明原因。
 
-Metal 内核由 GitHub Actions 在 Mac 上对照 CPU 参考实现（`.github/workflows/xiaoju-pipe.yml` 的 test），并按 iOS 15 目标编译一遍。A10 真机上还没跑过。
+已经验证过的（GitHub Actions 的 Mac，Apple Paravirtual GPU，Qwen3.5-0.8B Q4_K_M，`.github/workflows/xiaoju-pipe.yml` 的 test）：
+- Metal 和 CPU 参考实现对照：第 0–7 层、第 16–23 层，预填充 12 个 token 再逐个算 3 个，隐藏向量相对误差 4e-5 到 6e-4，输出头第一名一致；
+- 两个进程走 TCP，从机用 Metal 算第 8–15 层（109 MB 稀疏文件），主机用 Metal 算其余部分，输出和单机一字不差；
+- 内核按 iOS 15 目标（`-std=ios-metal2.4 -mios-version-min=15.0`）编译通过。
+
+**还没在 A10 真机上跑过。** A10 有的限制（线程组大小、没有 simdgroup、只能整数个线程组）内核都按规矩写了，但真机上的速度和内存只能装上去测。
 
 ## 协议（`core/xj_net.h`）
 
