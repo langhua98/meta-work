@@ -69,12 +69,57 @@ final class Downloader: ObservableObject {
 
     /// 只拿文件头（几 MB），看模型结构
     func fetchLayout(_ m: ModelSpec) async throws -> ModelLayout {
-        var want: UInt64 = 16 << 20
-        while true {
-            let (data, _) = try await get(m.url, 0, want)
-            do { return try Downloader.plan(data, 0, 1).layout }
-            catch let e as NeedMore { want = max(e.bytes, want * 2) }
+        cancelled = false
+        await ui { self.progress = 0; self.error = ""; self.status = "读取模型结构……" }
+        do {
+            let url = try await pickURL(m)
+            await ui { self.status = "读取模型结构（\(url.host ?? "")）……" }
+            var want: UInt64 = 16 << 20
+            while true {
+                let (data, _) = try await get(url, 0, want)
+                do {
+                    let l = try Downloader.plan(data, 0, 1).layout
+                    await ui { self.progress = nil; self.status = "" }
+                    return l
+                } catch let e as NeedMore { want = max(e.bytes, want * 2) }
+            }
+        } catch {
+            let msg = error.localizedDescription
+            await ui { self.progress = nil; self.error = msg }
+            throw error
         }
+    }
+
+    /// 这次会话里已经确认能连上的下载站
+    private static var goodHost: [DownloadSource: String] = [:]
+
+    /// 选下载站：自动时同时试镜像和官方站，谁先回应用谁；都不通就直接报错，不在那儿干等
+    private func pickURL(_ m: ModelSpec) async throws -> URL {
+        let src = DownloadSource.current
+        if let h = Downloader.goodHost[src] { return m.url(h) }
+        await ui { self.status = "测试下载源（\(src.hosts.joined(separator: "、"))）……" }
+        let winner = await withTaskGroup(of: String?.self) { g -> String? in
+            for h in src.hosts { g.addTask { await Downloader.reachable(m.url(h)) ? h : nil } }
+            for await r in g { if let r { g.cancelAll(); return r } }
+            return nil
+        }
+        guard let w = winner else {
+            let other = src == .auto ? "" : "换个「下载源」试试，"
+            let names = src.hosts.joined(separator: " 和 ")
+            throw XJError((src.hosts.count > 1 ? "\(names) 都连不上" : "连不上 \(names)") + "（等了 15 秒）。\(other)检查网络，或者用电脑把完整的 .gguf 拷进「文件」App。")
+        }
+        Downloader.goodHost[src] = w
+        return m.url(w)
+    }
+
+    /// 15 秒内能不能连上，并且支持分段下载（206）。只看响应头就断开，
+    /// 万一对方不认 Range 回了整个文件也不会真去下 5.7 GB
+    private static func reachable(_ url: URL) async -> Bool {
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        guard let res = try? await URLSession.shared.bytes(for: req) else { return false }
+        res.0.task.cancel()
+        return (res.1 as? HTTPURLResponse)?.statusCode == 206
     }
 
     /// 主机：layers = nil 下整个文件；从机：只下 [l0, l1)
@@ -82,11 +127,13 @@ final class Downloader: ObservableObject {
         cancelled = false
         await ui { self.progress = 0; self.error = ""; self.status = "读取模型结构……" }
         do {
-            // 1. 文件头 + 总大小
+            // 1. 选下载站，拿文件头 + 总大小
+            let src = try await pickURL(m)
+            await ui { self.status = "读取模型结构（\(src.host ?? "")）……" }
             var want: UInt64 = 16 << 20
             var head = Data(), total: UInt64 = 0, plan: Plan
             while true {
-                (head, total) = try await get(m.url, 0, want)
+                (head, total) = try await get(src, 0, want)
                 do { plan = try Downloader.plan(head, layers?.0 ?? 0, layers?.1 ?? 1); break }
                 catch let e as NeedMore { want = max(e.bytes, want * 2) }
             }
@@ -128,7 +175,7 @@ final class Downloader: ObservableObject {
             defer { try? h.close() }
             for (lo, hi) in todo {
                 if cancelled { throw XJError("已取消") }
-                let (data, _) = try await get(m.url, lo, hi - lo)
+                let (data, _) = try await get(src, lo, hi - lo)
                 guard UInt64(data.count) == hi - lo else { throw XJError("服务器回的字节数不对（\(data.count)）") }
                 try h.seek(toOffset: lo)
                 try h.write(contentsOf: data)
@@ -139,7 +186,7 @@ final class Downloader: ObservableObject {
                 }
                 got += hi - lo
                 let speed = Double(got) / max(Date().timeIntervalSince(started), 0.1) / 1048576
-                let msg = String(format: "%@ / %@，%.1f MB/s", (Double(got) / 1048576).mb, (Double(bytes) / 1048576).mb, speed)
+                let msg = String(format: "%@ / %@，%.1f MB/s（%@）", (Double(got) / 1048576).mb, (Double(bytes) / 1048576).mb, speed, src.host ?? "")
                 await ui { self.progress = Double(got) / Double(max(bytes, 1)); self.status = msg }
             }
             try JSONEncoder().encode(parts).write(to: Paths.parts(for: m))
@@ -150,13 +197,15 @@ final class Downloader: ObservableObject {
         }
     }
 
-    /// GET 一段字节，返回数据和文件总大小
+    /// GET 一段字节，返回数据和文件总大小。失败重试 3 次，界面上显示在重试
     private func get(_ url: URL, _ lo: UInt64, _ len: UInt64) async throws -> (Data, UInt64) {
         var req = URLRequest(url: url)
         req.setValue("bytes=\(lo)-\(lo + len - 1)", forHTTPHeaderField: "Range")
-        req.timeoutInterval = 60
+        req.timeoutInterval = 30
+        let host = url.host ?? ""
         var lastError: Error = XJError("下载失败")
         for attempt in 0..<4 {
+            if cancelled { throw XJError("已取消") }
             do {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 guard let r = resp as? HTTPURLResponse else { throw XJError("没有 HTTP 响应") }
@@ -168,10 +217,16 @@ final class Downloader: ObservableObject {
                 return (data, total)
             } catch {
                 lastError = error
-                try await Task.sleep(nanoseconds: UInt64(2 << attempt) * 1_000_000_000)
+                if attempt == 3 { break }
+                let wait = 2 << attempt
+                let why = error.localizedDescription
+                await ui { self.status = "\(host)：\(why)。\(wait) 秒后重试（第 \(attempt + 1)/3 次）" }
+                try await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
             }
         }
-        throw lastError
+        // 自动选的站中途不行了，下次重新选
+        for (k, v) in Downloader.goodHost where v == host { Downloader.goodHost[k] = nil }
+        throw XJError("连不上 \(host)：\(lastError.localizedDescription)。可以在「下载源」换一个再试，已下好的部分不会重下。")
     }
 
     private func ui(_ f: @escaping () -> Void) async {

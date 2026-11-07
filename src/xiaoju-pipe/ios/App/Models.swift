@@ -5,19 +5,46 @@ struct ModelSpec: Identifiable, Hashable {
     let id: String
     let name: String
     let file: String
-    let url: URL
+    /// Hugging Face 上的路径（仓库/resolve/main/文件），官方站和镜像站都用它
+    let path: String
     let note: String
+
+    func url(_ host: String) -> URL { URL(string: "https://\(host)/\(path)")! }
 
     static let q9b = ModelSpec(
         id: "9b", name: "Qwen3.5-9B · Q4_K_M", file: "Qwen3.5-9B-Q4_K_M.gguf",
-        url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf")!,
+        path: "unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
         note: "5.7 GB，每层 113–136 MB。两台合跑的主要目标")
     static let q4b = ModelSpec(
         id: "4b", name: "Qwen3.5-4B · Q4_K_M", file: "Qwen3.5-4B-Q4_K_M.gguf",
-        url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf")!,
+        path: "unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
         note: "2.7 GB，每层 64–70 MB。先用它试通链路")
     static let all = [q9b, q4b]
     static func by(_ id: String) -> ModelSpec { all.first { $0.id == id } ?? q9b }
+}
+
+/// 从哪儿下模型。国内直连 huggingface.co 常常连不上，hf-mirror.com 是国内镜像，文件一模一样。
+enum DownloadSource: String, CaseIterable, Identifiable {
+    case auto, mirror, hf
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "自动（哪个先连上用哪个）"
+        case .mirror: return "hf-mirror.com（国内镜像）"
+        case .hf: return "huggingface.co（官方）"
+        }
+    }
+    var hosts: [String] {
+        switch self {
+        case .auto: return ["hf-mirror.com", "huggingface.co"]
+        case .mirror: return ["hf-mirror.com"]
+        case .hf: return ["huggingface.co"]
+        }
+    }
+    static var current: DownloadSource {
+        get { DownloadSource(rawValue: UserDefaults.standard.string(forKey: "dl.source") ?? "") ?? .auto }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "dl.source") }
+    }
 }
 
 enum Paths {
