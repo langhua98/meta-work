@@ -32,7 +32,8 @@ final class RemoteMonitor: ObservableObject {
     @Published var width = 640
 
     @Published private(set) var loaded = false
-    @Published private(set) var busy = false
+    @Published private(set) var inflight = 0   // 几条指令在等回执（可以同时好几条）
+    var busy: Bool { inflight > 0 }
     @Published private(set) var note = ""
     @Published private(set) var statusLine = ""
     @Published private(set) var telegram = ""
@@ -71,7 +72,7 @@ final class RemoteMonitor: ObservableObject {
     }
 
     func refresh() async {
-        busy = true; defer { busy = false }
+        inflight += 1; defer { inflight -= 1 }
         guard let r = await call("monitor_status") else { return }
         take(r)
         loaded = true
@@ -79,7 +80,7 @@ final class RemoteMonitor: ObservableObject {
 
     /// 打开 / 关闭 / 改设置：把这边的设置全发过去。
     func save(turnOn: Bool? = nil) async {
-        busy = true; defer { busy = false }
+        inflight += 1; defer { inflight -= 1 }
         var cmd: [String: Any] = [
             "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "cooldown": cooldown,
             "audio": audio, "upload": upload, "lens": lens, "width": width,
@@ -122,7 +123,7 @@ final class RemoteMonitor: ObservableObject {
     }
 
     func loadEvents(more: Bool = false) async {
-        busy = true; defer { busy = false }
+        inflight += 1; defer { inflight -= 1 }
         var extra: [String: Any] = ["limit": 30]
         if more, let last = events.last { extra["before"] = last.name }
         guard let r = await call("events", extra), let list = r["events"] as? [[String: Any]] else { return }
@@ -144,7 +145,7 @@ final class RemoteMonitor: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let local = dir.appendingPathComponent("\(target)-\(e.name).\(e.video ? "mov" : "jpg")")
         if FileManager.default.fileExists(atPath: local.path) { return local }
-        busy = true; defer { busy = false }
+        inflight += 1; defer { inflight -= 1 }
         note = e.size > (5 << 20) && e.uploaded.isEmpty ? "视频比较大，对方先传到云盘再给你，要等一会儿…" : "取视频…"
         guard let r = await call("event_get", ["name": e.name], wait: 180) else { return nil }
         guard (r["ok"] as? Bool) != false else { note = (r["text"] as? String) ?? "取不到"; return nil }
@@ -172,7 +173,7 @@ final class RemoteMonitor: ObservableObject {
 
     /// 让对方拍一张（相机开着时从画面截），框选区域用。
     func snapshot() async -> UIImage? {
-        busy = true; defer { busy = false }
+        inflight += 1; defer { inflight -= 1 }
         guard let r = await call("photo", ["lens": lens], wait: 40) else { return nil }
         for entry in (r["files"] as? [Any]) ?? [] {
             if let o = entry as? [String: Any], let b64 = o["data"] as? String, let d = Data(base64Encoded: b64) {
@@ -199,7 +200,7 @@ struct RemoteMonitorView: View {
                 Toggle(isOn: Binding(get: { m.on }, set: { v in Haptics.tap(); Task { await m.save(turnOn: v) } })) {
                     Label("移动侦测", systemImage: "figure.walk.motion").foregroundStyle(Theme.orangeText)
                 }
-                .disabled(m.busy || !m.loaded)
+                .disabled(!m.loaded)
                 if !m.statusLine.isEmpty { Text(m.statusLine).font(.footnote).foregroundStyle(Theme.muted) }
                 if !m.telegram.isEmpty { Text("Telegram：\(m.telegram)").font(.footnote).foregroundStyle(Theme.muted) }
                 if !m.backup.isEmpty { Text("备份：\(m.backup)").font(.footnote).foregroundStyle(Theme.muted) }
@@ -235,7 +236,7 @@ struct RemoteMonitorView: View {
                     Haptics.tap()
                     Task { await m.save() }
                 } label: { Label("保存设置", systemImage: "checkmark.circle").foregroundStyle(Theme.orangeText) }
-                .disabled(m.busy || !m.loaded)
+                .disabled(!m.loaded)
             }
             .listRowBackground(Theme.card)
 

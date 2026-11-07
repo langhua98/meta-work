@@ -45,6 +45,7 @@ class ModelBench(private val ctx: Context, private val hub: CameraHub?) {
             sb.append("每次认一张图要多少毫秒：最快 / 平均（1 核 · 2 核 · 4 核）\n")
             val threads = listOf(1, 2, 4).filter { it <= maxOf(cores, 1) }
             for (m in models) {
+                if (Thread.currentThread().isInterrupted) { sb.append("（被取消了，后面的没测）\n"); break }
                 val param = try { ctx.assets.open("models/${m.file}").bufferedReader().readText() } catch (e: Exception) {
                     sb.append("${m.name}：模型文件读不了\n"); continue
                 }

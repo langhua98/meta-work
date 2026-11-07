@@ -59,6 +59,15 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 
 | `bench` | — | 模型测速（0.10）：几个能认人的小模型各跑一遍（1/2/4 核），有人看实时画面时再测直播帧率掉多少；大约 1 分钟 |
 
+| `cancel` | `target`（要取消的那条指令的 id） | 打断一条还在做的慢指令（测速、录音…），替它回「已取消」 |
+
+### 同时收好几条指令（0.11）
+
+- 收件循环只管分发，马上接着收：快的（`info`、`torch`、`vibrate`、`monitor`、`monitor_status`、`events`、`event_delete`、`cancel`）
+  走单独一条线，慢的（拍照、录音、定位、测速、开直播…）最多 3 条一起跑。一条慢的不会挡住后面的。
+- 两条指令要用同一个相机 / 麦克风时，后来的马上回 `ok:false, busy:true`（「相机正在忙（正在拍照）」），不默默排队。
+- 指令带 `"ack": true` 时，慢指令先回一条 `pending:true` 的回执（「收到了，正在拍照…」），做完再回正式的；不带就只回正式的（老版本照常）。
+
 ### 模型测速（0.10，C++）
 
 - 推理用 ncnn（腾讯开源，BSD），C++ 代码在 `app/src/main/cpp/`。先跑 `scripts/build-ncnn-android.sh` 编好 ncnn
