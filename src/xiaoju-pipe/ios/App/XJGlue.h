@@ -40,6 +40,7 @@ typedef struct {
     double prefill_s, gen_s;
     double local_ms, remote_ms, wait_ms;   // 每个生成 token 的平均耗时
     int    n_past, n_ctx;
+    int    reconnects;                     // 连上以来从机断线后自动恢复了几次
 } xjg_stats;
 
 // worker_host 为空：整个模型都在本机跑。s1 = s2 = 0：用从机准备好的层。
@@ -51,6 +52,8 @@ int   xjg_host_chat(void *h, const char *user, float temperature, int max_tokens
                     xjg_piece_fn cb, void *ctx, xjg_stats *stats, char *err, int errlen);
 int   xjg_host_reset(void *h, char *err, int errlen);   // 新对话
 double xjg_host_ping(void *h);                           // 到从机的往返延迟（毫秒），没有从机返回 -1
+// 从机断线时的提示（「从机出错……第 1 次重连」「已重连，正在重放……」），在 chat 的线程里回调
+void  xjg_host_set_status(void *h, xjg_log_fn fn, void *ctx);
 void  xjg_host_free(void *h);
 
 // 本机的局域网 IP（给从机界面显示），多个用换行隔开

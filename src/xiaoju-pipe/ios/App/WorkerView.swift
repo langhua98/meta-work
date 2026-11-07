@@ -17,6 +17,9 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
     let port: Int32 = 47321
 
     private var handle: UnsafeMutableRawPointer?
+    /// 用户点了「开始待命」还没点「停止」。App 被切到后台时 iOS 会收回监听端口，
+    /// 回到前台后按这个自动重新待命，主机那边会自己重连。
+    private var wantRunning = false
     private var service: NetService?
     private var bag: AnyCancellable?
 
@@ -66,6 +69,7 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
 
     func startServing() {
         guard !running else { return }
+        wantRunning = true
         var err = [CChar](repeating: 0, count: 256)
         let me = Unmanaged.passUnretained(self).toOpaque()
         let logFn: xjg_log_fn = { ctx, msg in
@@ -94,7 +98,15 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
     }
 
     func stopServing() {
+        wantRunning = false
         if let h = handle { xjg_worker_stop(h) }
+    }
+
+    /// 回到前台：之前在待命、后来被系统停掉了，就重新开始
+    func resumeIfNeeded() {
+        guard wantRunning, !running, handle == nil, UIApplication.shared.applicationState == .active else { return }
+        log("回到前台，重新开始待命")
+        startServing()
     }
 
     private func finish() {
@@ -104,7 +116,12 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
         service?.stop()
         service = nil
         UIApplication.shared.isIdleTimerDisabled = false
-        log("已停止待命")
+        if wantRunning {
+            log("待命意外停止（App 可能被切到了后台），回到前台会自动恢复")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.resumeIfNeeded() }
+        } else {
+            log("已停止待命")
+        }
     }
 
     /// 在局域网里用 Bonjour 广播自己，主机列表里能直接点到
@@ -131,6 +148,7 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
 
 struct WorkerView: View {
     @StateObject private var c = WorkerController()
+    @Environment(\.scenePhase) private var phase
     private var dl: Downloader { c.downloader }
 
     var body: some View {
@@ -177,7 +195,7 @@ struct WorkerView: View {
                 row("端口", String(c.port))
                 if c.running {
                     Button("停止待命", role: .destructive) { c.stopServing() }
-                    Text("保持亮屏、App 在前台。iOS 不让后台的 App 用 GPU。").font(.footnote).foregroundColor(.orange)
+                    Text("保持亮屏、App 在前台。iOS 不让后台的 App 用 GPU；不小心切走了，切回来会自动恢复待命，主机那边会自己重连接着聊。").font(.footnote).foregroundColor(.orange)
                 } else {
                     Button("开始待命") { c.startServing() }.disabled(!c.have)
                 }
@@ -193,6 +211,7 @@ struct WorkerView: View {
         }
         .navigationTitle("从机")
         .onAppear { c.refresh() }
+        .onChange(of: phase) { p in if p == .active { c.resumeIfNeeded() } }
     }
 
     private func row(_ k: String, _ v: String) -> some View {

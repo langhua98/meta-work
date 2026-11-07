@@ -3,9 +3,11 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +31,7 @@ static double now_ms(void) {
 static void sock_opts(int fd) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
 #ifdef SO_NOSIGPIPE
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
@@ -106,7 +109,6 @@ static void send_error(int fd, uint32_t seq, const char *msg) {
 // ================= 从机 =================
 
 static void wlog(xj_worker *w, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-#include <stdarg.h>
 static void wlog(xj_worker *w, const char *fmt, ...) {
     char b[512];
     va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
@@ -124,6 +126,13 @@ static void serve_conn(xj_worker *w, int fd, const char *peer) {
     double busy = 0, t_start = now_ms();
 
     for (;;) {
+        // 等下一条消息的同时看着监听端口：主机断线重连时，旧连接可能还没被发现是死的
+        // （Wi‑Fi 断开时对方来不及发 FIN），这时新连接优先，旧的直接丢掉。
+        struct pollfd pf[2] = { { fd, POLLIN, 0 }, { w->listen_fd, POLLIN, 0 } };
+        int np = w->listen_fd >= 0 ? 2 : 1;
+        if (poll(pf, (nfds_t)np, -1) < 0) { if (errno == EINTR) continue; break; }
+        if (w->stop) break;
+        if (np == 2 && pf[1].revents && !pf[0].revents) { wlog(w, "有新的连接进来，先断开 %s 的旧连接", peer); break; }
         int type = xj_recv_msg(fd, &buf, &cap, &len, &seq, err, sizeof err);
         if (type < 0 || w->stop) break;
         const uint8_t *in = buf;
@@ -251,6 +260,8 @@ void xj_worker_stop(xj_worker *w) {
 
 typedef struct {
     int fd;
+    char *host; int port; uint32_t pin;   // 重连用
+    int n_ctx;
     uint32_t seq;
     void *buf; uint32_t cap;
     int pending;            // 已发出、还没收的 FORWARD 个数
@@ -273,6 +284,7 @@ static int expect(remote_impl *r, int want_type, uint32_t *len, char *err, size_
 int xj_remote_send(xj_stage *s, const float *x, int T, int want, char *err, size_t errlen) {
     remote_impl *r = s->impl;
     if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "一批 %d 个 token 超过上限", T); return -1; }
+    if (r->fd < 0) { snprintf(err, errlen, "和从机的连接断了"); return -1; }
     uint8_t hdr[12], *o = hdr;
     p32(&o, (uint32_t)s->n_past); p32(&o, (uint32_t)T); p32(&o, (uint32_t)want);
     r->sent_at = now_ms();
@@ -319,8 +331,12 @@ static int remote_logits(xj_stage *s, const float *x, float *logits, char *err, 
 static void remote_reset(xj_stage *s) {
     remote_impl *r = s->impl;
     char err[128]; uint32_t len;
+    s->n_past = 0;
+    if (r->fd < 0) { r->pending = 0; return; }  // 断着：下次 eval 会重连
     while (r->pending) { r->pending--; expect(r, XJ_MSG_FORWARD_OUT, &len, err, sizeof err); }
-    if (!xj_send_msg(r->fd, XJ_MSG_RESET, ++r->seq, NULL, 0, NULL, 0)) expect(r, XJ_MSG_ACK, &len, err, sizeof err);
+    if (xj_send_msg(r->fd, XJ_MSG_RESET, ++r->seq, NULL, 0, NULL, 0) || expect(r, XJ_MSG_ACK, &len, err, sizeof err)) {
+        close(r->fd); r->fd = -1;  // 下次 eval 重连
+    }
     s->n_past = 0;
 }
 
@@ -329,7 +345,7 @@ static void remote_destroy(xj_stage *s) {
     remote_impl *r = s->impl;
     if (r) {
         if (r->fd >= 0) { xj_send_msg(r->fd, XJ_MSG_BYE, ++r->seq, NULL, 0, NULL, 0); close(r->fd); }
-        free(r->buf); free(r);
+        free(r->buf); free(r->host); free(r);
     }
     free(s);
 }
@@ -339,6 +355,7 @@ bool xj_stage_is_remote(const xj_stage *s) { return s && s->forward == remote_fo
 double xj_remote_ping(xj_stage *s) {
     remote_impl *r = s->impl;
     char err[128]; uint32_t len;
+    if (r->fd < 0) return -1;
     double t0 = now_ms();
     uint8_t pay[64] = {0};
     if (xj_send_msg(r->fd, XJ_MSG_PING, ++r->seq, pay, sizeof pay, NULL, 0)) return -1;
@@ -373,27 +390,16 @@ static int connect_to(const char *host, int port, char *err, size_t errlen) {
     return fd;
 }
 
-xj_stage *xj_remote_stage_new(const char *host, int port, uint32_t pin, const xj_model *m, int l0, int l1,
-                              int n_ctx, int max_batch, xj_hello_ok *info, char *err, size_t errlen) {
-    int fd = connect_to(host, port, err, errlen);
-    if (fd < 0) return NULL;
-    xj_stage *s = calloc(1, sizeof(*s));
-    remote_impl *r = calloc(1, sizeof(*r));
-    r->fd = fd;
-    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch;
-    s->backend = "remote";
-    s->forward = remote_forward; s->logits = remote_logits; s->reset = remote_reset; s->destroy = remote_destroy;
-    s->impl = r;
-
+// 发 HELLO、收 HELLO_OK，把从机报的层范围写回 s
+static int handshake(xj_stage *s, int l0, int l1, xj_hello_ok *info, char *err, size_t errlen) {
+    remote_impl *r = s->impl;
     uint8_t hello[36], *o = hello;
-    p32(&o, XJ_PROTO_VERSION); p32(&o, pin); p64(&o, m->fingerprint);
-    p32(&o, (uint32_t)l0); p32(&o, (uint32_t)l1); p32(&o, (uint32_t)n_ctx); p32(&o, (uint32_t)max_batch);
+    p32(&o, XJ_PROTO_VERSION); p32(&o, r->pin); p64(&o, s->m->fingerprint);
+    p32(&o, (uint32_t)l0); p32(&o, (uint32_t)l1); p32(&o, (uint32_t)r->n_ctx); p32(&o, (uint32_t)s->max_batch);
     uint32_t len;
-    if (xj_send_msg(fd, XJ_MSG_HELLO, ++r->seq, hello, sizeof hello, NULL, 0) || expect(r, XJ_MSG_HELLO_OK, &len, err, errlen)) {
-        remote_destroy(s);
-        return NULL;
-    }
-    if (len < 116) { snprintf(err, errlen, "从机握手回包太短"); remote_destroy(s); return NULL; }
+    if (xj_send_msg(r->fd, XJ_MSG_HELLO, ++r->seq, hello, sizeof hello, NULL, 0)) { snprintf(err, errlen, "发给从机失败（连接断了）"); return -1; }
+    if (expect(r, XJ_MSG_HELLO_OK, &len, err, errlen)) return -1;
+    if (len < 116) { snprintf(err, errlen, "从机握手回包太短"); return -1; }
     xj_hello_ok tmp, *hi = info ? info : &tmp;
     const uint8_t *in = r->buf;
     hi->version = g32(&in); hi->fingerprint = g64(&in); hi->l0 = g32(&in); hi->l1 = g32(&in);
@@ -401,7 +407,47 @@ xj_stage *xj_remote_stage_new(const char *host, int port, uint32_t pin, const xj
     memcpy(hi->backend, in, 16); hi->backend[15] = 0; in += 16;
     memcpy(hi->device, in, 64); hi->device[63] = 0;
     s->l0 = (int)hi->l0; s->l1 = (int)hi->l1;
+    s->n_past = 0;
+    r->pending = 0;
+    // 握手完了收超时收紧到 1 分钟：Wi‑Fi 断了要能较快发现、去重连
+    // （一块预填充在 A10 上也就一两秒，第一次读权重慢一点也够）
+    struct timeval tv = { 60, 0 };
+    setsockopt(r->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    return 0;
+}
+
+xj_stage *xj_remote_stage_new(const char *host, int port, uint32_t pin, const xj_model *m, int l0, int l1,
+                              int n_ctx, int max_batch, xj_hello_ok *info, char *err, size_t errlen) {
+    int fd = connect_to(host, port, err, errlen);
+    if (fd < 0) return NULL;
+    xj_stage *s = calloc(1, sizeof(*s));
+    remote_impl *r = calloc(1, sizeof(*r));
+    r->fd = fd;
+    r->host = strdup(host); r->port = port; r->pin = pin; r->n_ctx = n_ctx;
+    s->m = m; s->l0 = l0; s->l1 = l1; s->n_ctx = n_ctx; s->max_batch = max_batch;
+    s->backend = "remote";
+    s->forward = remote_forward; s->logits = remote_logits; s->reset = remote_reset; s->destroy = remote_destroy;
+    s->impl = r;
+    if (handshake(s, l0, l1, info, err, errlen)) { remote_destroy(s); return NULL; }
     return s;
+}
+
+int xj_remote_reconnect(xj_stage *s, char *err, size_t errlen) {
+    remote_impl *r = s->impl;
+    if (r->fd >= 0) { close(r->fd); r->fd = -1; }
+    r->pending = 0;
+    s->n_past = 0;
+    int fd = connect_to(r->host, r->port, err, errlen);
+    if (fd < 0) return -1;
+    r->fd = fd;
+    const int l0 = s->l0, l1 = s->l1;
+    if (handshake(s, l0, l1, NULL, err, errlen)) { close(r->fd); r->fd = -1; return -1; }
+    if (s->l0 != l0 || s->l1 != l1) {  // 不会发生：HELLO 里明确要了这几层
+        snprintf(err, errlen, "从机重连后层范围变了");
+        close(r->fd); r->fd = -1;
+        return -1;
+    }
+    return 0;
 }
 
 // ================= 主机：流水线 =================
@@ -414,12 +460,18 @@ int xj_pipeline_init(xj_pipeline *p, const xj_model *m, xj_stage *a, xj_stage *r
     if (b && b->max_batch < p->max_batch) p->max_batch = b->max_batch;
     p->x = malloc(sizeof(float) * m->hp.n_embd * p->max_batch);
     p->xr = malloc(sizeof(float) * m->hp.n_embd * p->max_batch);
+    p->reconnect_tries = 5;
     return p->x && p->xr ? 0 : -1;
 }
 
-void xj_pipeline_free(xj_pipeline *p) { free(p->x); free(p->xr); p->x = p->xr = NULL; }
+void xj_pipeline_free(xj_pipeline *p) {
+    free(p->x); free(p->xr); free(p->hist); free(p->scratch_logits);
+    p->x = p->xr = p->scratch_logits = NULL;
+    p->hist = NULL; p->n_hist = p->hist_cap = 0;
+}
 
 int xj_pipeline_reset(xj_pipeline *p, char *err, size_t errlen) {
+    p->n_hist = 0;
     p->a->reset(p->a);
     if (p->r) p->r->reset(p->r);
     if (p->b) p->b->reset(p->b);
@@ -430,7 +482,8 @@ static xj_stage *head_of(xj_pipeline *p) { return p->b ? p->b : p->a; }
 
 // 流水线预填充：从机算第 c 块的时候，主机同时算第 c+1 块的前半段。
 // 任何时候最多一块在从机上，两边都不会因为缓冲区满了互相卡住。
-int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, char *err, size_t errlen) {
+// 从机 / 网络出的错会置 p->remote_failed，外面据此决定要不要重连。
+static int eval_once(xj_pipeline *p, const int32_t *tok, int n, float *logits, char *err, size_t errlen) {
     const int E = p->m->hp.n_embd, B = p->max_batch;
     const bool b_layers = p->b && p->b->l1 > p->b->l0;
     double t;
@@ -462,14 +515,14 @@ int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, c
         if (prevT) {
             int got = 0; uint32_t us = 0;
             t = now_ms();
-            if (xj_remote_recv(p->r, p->xr, &got, &us, err, errlen)) return -1;
+            if (xj_remote_recv(p->r, p->xr, &got, &us, err, errlen)) { p->remote_failed = true; return -1; }
             p->t_remote += us / 1000.0;
             p->t_net += now_ms() - t;  // 主机在这里干等的时间（含从机还没算完的部分）
         }
         if (T) {
             const bool last = i + T >= n;
             const int want = b_layers ? XJ_WANT_ALL : (last ? XJ_WANT_LAST : XJ_WANT_NONE);
-            if (xj_remote_send(p->r, p->x, T, want, err, errlen)) return -1;
+            if (xj_remote_send(p->r, p->x, T, want, err, errlen)) { p->remote_failed = true; return -1; }
         }
         if (prevT) {
             // 上一块从机的结果过后半段（要所有 token 的结果，后半段的 KV 缓存才完整）
@@ -482,6 +535,62 @@ int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, c
         if (!T) break;
         prevT = T;
         i += T;
+    }
+    return 0;
+}
+
+static void pstatus(xj_pipeline *p, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void pstatus(xj_pipeline *p, const char *fmt, ...) {
+    if (!p->on_status) return;
+    char b[384];
+    va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    p->on_status(p->status_ctx, b);
+}
+
+static void sleep_ms(int ms) {
+    struct timespec t = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&t, &t) && errno == EINTR) {}
+}
+
+// 重连从机，所有段清空，再把 hist 里的 token 全部重新过一遍
+static int recover(xj_pipeline *p, char *err, size_t errlen) {
+    if (xj_remote_reconnect(p->r, err, errlen)) { p->remote_failed = true; return -1; }
+    p->a->reset(p->a);
+    p->b->reset(p->b);
+    if (!p->n_hist) return 0;
+    if (!p->scratch_logits) p->scratch_logits = malloc(sizeof(float) * p->m->hp.n_vocab);
+    if (!p->scratch_logits) { snprintf(err, errlen, "内存不够"); return -1; }
+    pstatus(p, "已重连，正在重放之前的 %d 个 token……", p->n_hist);
+    p->remote_failed = false;
+    return eval_once(p, p->hist, p->n_hist, p->scratch_logits, err, errlen);
+}
+
+int xj_pipeline_eval(xj_pipeline *p, const int32_t *tok, int n, float *logits, char *err, size_t errlen) {
+    int attempt = 0;
+    for (;;) {
+        p->remote_failed = false;
+        if (!eval_once(p, tok, n, logits, err, errlen)) break;
+        // 不是从机的问题（比如上下文满了），或者不让重连：直接报错
+        for (;;) {
+            if (!p->r || !p->remote_failed || attempt >= p->reconnect_tries) return -1;
+            attempt++;
+            pstatus(p, "从机出错：%s。%d 秒后第 %d 次重连……", err, attempt < 3 ? attempt : 3, attempt);
+            sleep_ms(1000 * (attempt < 3 ? attempt : 3));
+            if (!recover(p, err, errlen)) break;
+        }
+        p->n_reconnects++;
+        pstatus(p, "从机恢复了，接着算");
+    }
+    // 记下来，断线后重放用
+    if (p->r) {
+        if (p->n_hist + n > p->hist_cap) {
+            int cap = (p->n_hist + n) * 2;
+            int32_t *nh = realloc(p->hist, sizeof(int32_t) * cap);
+            if (!nh) { snprintf(err, errlen, "内存不够"); return -1; }
+            p->hist = nh; p->hist_cap = cap;
+        }
+        memcpy(p->hist + p->n_hist, tok, sizeof(int32_t) * n);
+        p->n_hist += n;
     }
     return 0;
 }

@@ -1,6 +1,7 @@
 // 小橘双机推理：命令行工具用的分词器（Qwen3.5 的 byte-level BPE）。
 // 预分词按 tokenizer.json 里的正则手写；非 ASCII 字符只粗分「标点 / 空白 / 文字」，
-// 少数罕见字符切法可能和官方不同（不影响能不能跑）。iPhone 主机 App 用 llama.cpp 的分词器，结果完全一致。
+// 少数罕见字符切法可能和官方不同（不影响能不能跑）。
+// CI 里用 tests/tok_check.py 和官方 tokenizer.json 逐条对照（见 .github/workflows/xiaoju-pipe.yml）。
 #include "xj_tok.h"
 
 #include <stdio.h>
