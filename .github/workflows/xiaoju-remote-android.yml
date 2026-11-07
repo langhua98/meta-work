@@ -54,7 +54,8 @@ jobs:
 
       - name: Build ncnn for Android (armeabi-v7a)
         if: steps.ncnn.outputs.cache-hit != 'true'
-        run: PREFIX=$HOME/ncnn/armv7 WORK=$RUNNER_TEMP/ncnn sh scripts/build-ncnn-android.sh
+        # ANDROID_NDK 一定要指定：机器自带的 ANDROID_NDK 是最新的 NDK，跟 App 用的 r23c 链不到一起
+        run: ANDROID_NDK=$ANDROID_HOME/ndk/23.2.8568313 PREFIX=$HOME/ncnn/armv7 WORK=$RUNNER_TEMP/ncnn sh scripts/build-ncnn-android.sh
 
       - name: Object detection test (desktop)
         # 电脑版 ncnn 也放在 ~/ncnn 里一起缓存；源码用上一步下好的（缓存命中时 run.sh 自己下）
