@@ -101,7 +101,7 @@ jobs:
             src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
 
       - name: Upload to 小橘云盘 /软件包/
-        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 XiaojuRemote-Android- 包删掉
+        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 xiaoju-remote-android- 包删掉
         env:
           XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
         run: |
@@ -110,7 +110,7 @@ jobs:
             exit 1
           fi
           ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
-          apk="XiaojuRemote-Android-$ver-build${{ github.run_number }}.apk"
+          apk="xiaoju-remote-android-$ver-build${{ github.run_number }}.apk"
           cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
-          python3 scripts/upload_package.py "$apk" XiaojuRemote-Android-
+          python3 scripts/upload_package.py "$apk" xiaoju-remote-android-
           echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"
