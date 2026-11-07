@@ -3,6 +3,7 @@ name: Build 小橘遥控 apk
 # src/xiaoju-remote-android/：在 GitHub 的 Ubuntu 机器上用 Android SDK 编译，
 # 先编好 ncnn（NDK r23c，32 位 ARM），安装包才带 C++：模型测速、认出动的是什么（物体识别）。
 # 编之前在电脑上用同一份 C++ 和模型认几张照片（tests/detector），再跑 Kotlin 单元测试，都过了才编安装包。
+# 编好的 APK 每次都传到小橘云盘「软件包」（AGENTS.md 的约定）。
 # 用 debug 签名的 APK（能直接装，不用签名工具）发布到 Release「xiaoju-remote-android」（每次覆盖）。
 # 安卓已搁置（见 AGENTS.md），只留手动触发，推送不自动编译。
 on:
@@ -81,6 +82,21 @@ jobs:
         run: |
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk out/xiaoju-remote-latest.apk
+
+      - name: Upload to 小橘云盘 /软件包/
+        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 XiaojuRemote-Android- 包删掉
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: |
+          if [ -z "$XIAOJU_TOKEN" ]; then
+            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），APK 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑。"
+            exit 1
+          fi
+          ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
+          apk="XiaojuRemote-Android-$ver-build${{ github.run_number }}.apk"
+          cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
+          python3 scripts/upload_package.py "$apk" XiaojuRemote-Android-
+          echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

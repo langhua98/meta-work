@@ -36,3 +36,7 @@
 云盘「软件包」（/软件包/，分享页 share.html#XrCiZRZM0WSwMdYiqyV3TA）：
 - 编好的新安装包传到这里（PUT /api/agent/v1/files?path=/软件包/<文件名>）。
 - 同一个软件传完新包后，把这个软件的旧包删掉（DELETE 只进回收站），文件夹里每个软件只留最新一版。
+- William 的要求：**每次编出新的 APK 都要传到「软件包」**（安卓 workflow 会自动传，文件名 XiaojuRemote-Android-<版本>-build<构建号>.apk；
+  本地编的用 scripts/upload_package.py 传）。**每次有新的 ipa / APK，都在回复里把直接下载链接发给他**：
+  - 小橘推送 ipa：https://github.com/langhua98/meta-work/releases/download/xiaoju-push/XiaojuPush-latest.ipa
+  - 小橘遥控安卓 APK：https://github.com/langhua98/meta-work/releases/download/xiaoju-remote-android/xiaoju-remote-latest.apk
