@@ -1,0 +1,113 @@
+name: Build 小橘双机 app
+
+# 小橘双机（src/xiaoju-pipe/）：两台 iPhone 合跑 Qwen3.5。
+#   test：Mac 上编译命令行工具、跑单元测试，再用 Qwen3.5-0.8B 对照 Metal 内核和 CPU 参考实现的结果。
+#   ios：XcodeGen 生成工程，编译没签名的 .ipa（最低 iOS 15，7 Plus 能装），发布到 Release「xiaoju-pipe」。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "用哪种 Mac（macos-26 排不上时换 macos-15）"
+        default: macos-26
+  push:
+    paths:
+      - "src/xiaoju-pipe/**"
+      - ".github/workflows/xiaoju-pipe.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xiaoju-pipe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    defaults:
+      run:
+        working-directory: src/xiaoju-pipe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build command-line tools
+        run: make CFLAGS="-O2 -Wall -Wno-unknown-pragmas -fobjc-arc"
+      - name: Unit tests
+        run: make test CFLAGS="-O2 -Wall -Wno-unknown-pragmas -fobjc-arc"
+      - name: Check iOS 15 Metal compile (A10 / Apple3)
+        run: |
+          # 和 7 Plus 一样的目标：iOS 15，看内核有没有用到 A10 没有的东西
+          xcrun -sdk iphoneos metal -std=ios-metal2.4 -mios-version-min=15.0 -I metal -c metal/xj_kernels.metal -o /tmp/k.air
+          xcrun -sdk iphoneos metallib /tmp/k.air -o /tmp/k.metallib
+          ls -l /tmp/k.metallib
+      - uses: actions/cache@v4
+        with:
+          path: ~/models
+          key: qwen35-08b-q4km
+      - name: Download Qwen3.5-0.8B (same architecture, 0.5 GB)
+        run: |
+          mkdir -p ~/models
+          f=~/models/Qwen3.5-0.8B-Q4_K_M.gguf
+          [ -s "$f" ] || curl -fL --retry 5 -o "$f" https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
+          ls -l "$f"
+      - name: Metal vs CPU (every kernel, both layer types, output head)
+        run: |
+          f=~/models/Qwen3.5-0.8B-Q4_K_M.gguf
+          system_profiler SPDisplaysDataType | head -20 || true
+          ./build/xjpipe-check "$f" --layers 0:8
+          ./build/xjpipe-check "$f" --layers 16:24
+      - name: Two processes over TCP (Metal worker on layers 8-15)
+        run: |
+          f=~/models/Qwen3.5-0.8B-Q4_K_M.gguf
+          ./build/gguf-slice "$f" /tmp/slice.gguf 8:16
+          ./build/xjpipe-worker /tmp/slice.gguf --layers 8:16 --pin 1234 > /tmp/worker.log 2>&1 &
+          sleep 3
+          ./build/xjpipe-host "$f" "用一句话介绍一下北京。" --worker 127.0.0.1 --pin 1234 --n 24 | tee /tmp/split.txt
+          ./build/xjpipe-host "$f" "用一句话介绍一下北京。" --n 24 | tee /tmp/solo.txt
+          kill %1 || true
+          cat /tmp/worker.log
+          # 两边都是同一套 Metal 内核，贪心解码应该一字不差
+          diff /tmp/split.txt /tmp/solo.txt && echo "拆分和单机输出一致"
+
+  ios:
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pick the newest Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build
+        working-directory: src/xiaoju-pipe/ios
+        run: |
+          xcodegen generate
+          xcodebuild -project XiaojuPipe.xcodeproj -scheme XiaojuPipe -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
+          app=build/Build/Products/Release-iphoneos/XiaojuPipe.app
+          [ -f "$app/default.metallib" ] || { echo "::error::default.metallib 没编进 App（Metal 内核）"; exit 1; }
+          min=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")
+          echo "最低 iOS $min"
+          [ "$min" = "15.0" ] || { echo "::error::最低系统不是 iOS 15（7 Plus 装不上）"; exit 1; }
+          mkdir Payload && cp -R "$app" Payload/
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
+          ipa="XiaojuPipe-$version-build$GITHUB_RUN_NUMBER.ipa"
+          zip -qry "$GITHUB_WORKSPACE/$ipa" Payload
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "IPA=$ipa" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA }}
+          path: ${{ env.IPA }}
+      - name: Publish to the xiaoju-pipe release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete xiaoju-pipe --yes --cleanup-tag || true
+          cp "$IPA" XiaojuPipe-latest.ipa
+          gh release create xiaoju-pipe "$IPA" XiaojuPipe-latest.ipa --prerelease \
+            --title "小橘双机 ${VERSION}（构建 ${GITHUB_RUN_NUMBER}）" \
+            --notes "没签名的测试版（${GITHUB_REF_NAME} ${GITHUB_SHA::7}），两台手机都装这一个，用 SideStore 或自己的证书签名。见 src/xiaoju-pipe/README.md。"
