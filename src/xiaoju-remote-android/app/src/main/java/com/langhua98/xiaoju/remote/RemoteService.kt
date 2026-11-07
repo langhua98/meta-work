@@ -27,7 +27,7 @@ import java.util.Locale
  * 待命服务（前台服务 + 常驻通知，被远程使用时通知栏写明在做什么）。
  * 流程和 xiaoju-remote 仓库的 RemoteEngine 一致：
  *  - 快路：即时信箱长轮询，指令一到马上执行，回执也走即时信箱（文件 5 MB 以内 base64 放回执里）。
- *  - 慢路：服务端没有即时信箱（404/405/501）时，轮询文件信箱；用即时信箱时也每 30 秒看一眼文件信箱。
+ *  - 慢路：服务端没有即时信箱（404/405/501）时，轮询文件信箱；用即时信箱时也每 10 分钟看一眼文件信箱。
  */
 class RemoteService : Service() {
 
@@ -113,8 +113,8 @@ class RemoteService : Service() {
                         sleep(2000)
                     }
                 }
-                // 旧的发送端还会写文件信箱，每 30 秒看一眼
-                if (System.currentTimeMillis() - lastFileCheck < 30_000) continue
+                // 旧的发送端还会写文件信箱，隔一会儿看一眼（省电：以前 30 秒一次，现在 10 分钟）
+                if (System.currentTimeMillis() - lastFileCheck < FILE_CHECK_MS) continue
             }
             lastFileCheck = System.currentTimeMillis()
             val items = cloud.list(inbox).filter { !it.isFolder && it.name.endsWith(".json") }.sortedBy { it.name }
@@ -130,6 +130,15 @@ class RemoteService : Service() {
             }
             if (!useRelay) sleep(2000)
         }
+    }
+
+    /** 现在开着哪些费电的东西（info 指令的最后一行）。 */
+    private fun powerText(h: CameraHub?): String {
+        val on = ArrayList<String>()
+        if (h?.monitor?.on == true) on.add("移动侦测（相机一直开着，最费电，要插着电）")
+        if (h?.liveActive() == true) on.add("实时画面")
+        else if (h?.cameraOn == true && h.monitor.on != true) on.add("相机")
+        return if (on.isEmpty()) "耗电：只在待命收指令" else "耗电：开着 " + on.joinToString("、")
     }
 
     /** 把一条指令交给快线或慢线去做（不在收件循环里做，免得一条慢的挡住后面的）。 */
@@ -248,7 +257,10 @@ class RemoteService : Service() {
             val d = h.grab()
             if (d == null) CmdResult("相机正在用，没截到画面，再试一次")
             else CmdResult("从画面截了一张（相机正在侦测 / 直播，${d.size / 1024} KB）", listOf("photo.jpg" to d))
-        } else Commands.run(this, cmd)
+        } else Commands.run(this, cmd).let { r ->
+            // 设备信息里写上现在开着哪些费电的东西，方便看电耗在哪
+            if (action == "info") CmdResult(r.text + "\n" + powerText(h), r.files) else r
+        }
 
         val files = JSONArray()
         for ((name, bytes) in result.files) {
@@ -467,6 +479,8 @@ class RemoteService : Service() {
     companion object {
         const val NOTIF_ID = 42
         /** 一下就做完的指令：走快线，不等慢的 */
+        /** 即时信箱好用时，多久看一眼文件信箱（只有很老的发送端还写文件信箱） */
+        const val FILE_CHECK_MS = 10 * 60_000L
         val QUICK = setOf("info", "torch", "vibrate", "monitor", "monitor_status", "events", "event_delete", "cancel")
         /** 一次直播最长多久（服务端也会在 4 小时断开） */
         const val LIVE_MAX_MS = 4L * 60 * 60 * 1000

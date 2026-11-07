@@ -51,7 +51,16 @@ object Commands {
         val level = b?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = b?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         val pct = if (level >= 0 && scale > 0) "${level * 100 / scale}%" else "未知"
-        return "型号：${Build.MANUFACTURER} ${Build.MODEL}\n系统：Android ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）\n电量：$pct"
+        val plugged = b?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        val charging = when (plugged) {
+            BatteryManager.BATTERY_PLUGGED_AC -> "，在充电（插头）"
+            BatteryManager.BATTERY_PLUGGED_USB -> "，在充电（USB，比较慢）"
+            0 -> "，没在充电"
+            else -> "，在充电"
+        }
+        val temp = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1000) ?: -1000   // 0.1 ℃
+        val tempText = if (temp > -1000) "，电池 ${temp / 10}.${temp % 10} ℃" else ""
+        return "型号：${Build.MANUFACTURER} ${Build.MODEL}\n系统：Android ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）\n电量：$pct$charging$tempText"
     }
 
     private fun photo(ctx: Context, front: Boolean): CmdResult {
