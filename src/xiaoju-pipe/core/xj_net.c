@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,6 +211,27 @@ static void serve_conn(xj_worker *w, int fd, const char *peer) {
     free(buf); free(x);
 }
 
+// 让从机的 Wi‑Fi 别睡。连着 iPhone 热点时，手机网卡一闲下来就进省电模式，热点发来的包要攒到下一次
+// 唤醒（约 100 ms）才收得到，实测往返 116 ms，比从机算 10 层还慢。从机每 10 ms 往主机发一个 1 字节的 UDP
+// （发到 discard 端口，主机不用收），网卡就一直醒着。只在有连接时发，流量约 3 KB/s。
+typedef struct { struct sockaddr_storage to; socklen_t tl; volatile int run; pthread_t th; } waker;
+
+static void *waker_main(void *p) {
+    waker *k = p;
+    int u = socket(k->to.ss_family, SOCK_DGRAM, 0);
+    if (u < 0) return NULL;
+    if (k->to.ss_family == AF_INET6) ((struct sockaddr_in6 *)&k->to)->sin6_port = htons(9);
+    else ((struct sockaddr_in *)&k->to)->sin_port = htons(9);
+    const char b = 0;
+    while (k->run) {
+        sendto(u, &b, 1, MSG_NOSIGNAL, (struct sockaddr *)&k->to, k->tl);
+        struct timespec ts = { 0, 10 * 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    close(u);
+    return NULL;
+}
+
 int xj_worker_serve(xj_worker *w, int port, char *err, size_t errlen) {
     int lf = socket(AF_INET6, SOCK_STREAM, 0);
     bool v6 = lf >= 0;
@@ -241,7 +263,15 @@ int xj_worker_serve(xj_worker *w, int port, char *err, size_t errlen) {
         if (!getnameinfo((struct sockaddr *)&ss, sl, host, sizeof host, NULL, 0, NI_NUMERICHOST)) snprintf(peer, sizeof peer, "%.60s", host);
         sock_opts(fd);
         w->conn_fd = fd;
+        waker *k = calloc(1, sizeof *k);
+        bool waking = false;
+        if (k) {
+            memcpy(&k->to, &ss, sl); k->tl = sl; k->run = 1;
+            waking = pthread_create(&k->th, NULL, waker_main, k) == 0;
+        }
         serve_conn(w, fd, peer);
+        if (waking) { k->run = 0; pthread_join(k->th, NULL); }
+        free(k);
         w->conn_fd = -1;
         close(fd);
     }
