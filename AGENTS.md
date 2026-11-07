@@ -27,6 +27,8 @@
 - 协议跟 langhua98/xiaoju-remote（iPhone 被控端）的 AGENTS.md 保持一致：即时信箱 /api/agent/v1/relay 优先，文件信箱兜底；
   实时画面走 xiaoju-cloud 的直播通道 /api/agent/v1/stream（WebSocket），帧格式见 StreamClient.kt。改协议几边要一起改。
   画面优先用手机硬件 H.264（类型 4，H264Encoder.kt / 小橘推送 RemoteH264.swift），编码器不行或看的一端开兼容模式就用 JPEG（类型 3）。
+- 移动侦测（安卓 0.8，CameraHub.kt）：录像先存手机，再慢慢备份到云盘（别一下子往云盘写很多：云盘后面是 Telegram，会限流）；
+  提醒走云盘服务端的 /api/agent/v1/notify（Telegram 机器人）。指令见 src/xiaoju-remote-android/README.md。
 - 联网用 Conscrypt 2.5.2（最后一个支持 API 9+ 的版本）+ App 自带根证书 res/raw/roots.pem；WebSocket 用 OkHttp 3.12。
 - 它的 workflow 只保留手动触发；本地用 Android SDK 编译，APK 传到云盘「软件包」。
 - iOS 15 被控端已经拆到单独的仓库 langhua98/xiaoju-remote。
