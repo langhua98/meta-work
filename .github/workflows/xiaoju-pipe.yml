@@ -43,11 +43,12 @@ jobs:
           # App 先用 Range 拿文件头（16 MB），再只下从机那几层；这里用和 App 一样的请求测一遍
           fail=0
           for host in huggingface.co hf-mirror.com; do
-            for path in unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf; do
+            for path in unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q5_K_M.gguf unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf; do
               url="https://$host/$path"
               out=$(curl -sS -L -r 0-16777215 -o /tmp/head.gguf --max-time 120 \
                 -w '%{http_code} %{size_download} %{time_total}s %{num_redirects} 次跳转 → %{url_effective}' "$url" 2>&1) || true
               echo "$host $(basename "$path")：$out" | cut -c1-300
+              curl -sSIL --max-time 30 "$url" | grep -i '^x-linked-size\|^content-length' | tail -2 || true
               set -- $out
               if [ "$1" != 206 ] || [ "$2" != 16777216 ]; then
                 echo "::warning::$url 分段下载不正常：$out"
@@ -91,6 +92,16 @@ jobs:
           system_profiler SPDisplaysDataType | head -20 || true
           ./build/xjpipe-check "$f" --layers 0:8
           ./build/xjpipe-check "$f" --layers 16:24
+          echo "== 对比：生成阶段用通用内核（旧版）"
+          XJ_MV_GENERIC=1 ./build/xjpipe-check "$f" --layers 0:24
+          echo "== 生成阶段专用内核（不用 simd，7 Plus 上用的这套）"
+          XJ_MV_NOSIMD=1 ./build/xjpipe-check "$f" --layers 0:24
+          for n in 16 8 4; do
+            echo "== 生成阶段专用内核，每行 $n 线程"
+            XJ_MV_NOSIMD=1 XJ_MV_LANES=$n ./build/xjpipe-check "$f" --layers 0:24
+          done
+          echo "== 新芯片的 simd_sum 版（设备支持时）"
+          ./build/xjpipe-check "$f" --layers 0:24
       - name: Tokenizer vs official tokenizer.json
         run: |
           python3 -m venv /tmp/venv

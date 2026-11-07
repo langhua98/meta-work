@@ -21,6 +21,7 @@ typedef struct {
     xu32 x_stride, y_stride;// 每个 token 的输入 / 输出间隔（float 个数）
     xu32 add;               // 1：结果加到 y 上（残差连接）
     xu32 grid_x;            // 二维网格展开用
+    xu32 lanes;             // mv1_*：每行几个线程（32/16/8/4），一组 128 线程 = 128/lanes 行。由自动调优选
 } xj_mv_args;
 
 // RMSNorm / L2 归一化 / 门控归一化。第 r 行的位置 = (r / rows_per_tok) * tok_stride + (r % rows_per_tok) * row_stride

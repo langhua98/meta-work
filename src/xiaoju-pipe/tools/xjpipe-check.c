@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef __APPLE__
 static double rel_diff(const float *a, const float *b, size_t n) {
@@ -38,7 +39,7 @@ int main(int argc, char **argv) {
     if (!m) { fprintf(stderr, "%s\n", err); return 1; }
     if (l1 > m->hp.n_layer) l1 = m->hp.n_layer;
     xj_tok *tok = xj_tok_new(m->gguf, err, sizeof err);
-    const int E = m->hp.n_embd, B = 16, CTX = 64;
+    const int E = m->hp.n_embd, B = 16, CTX = 128;
     xj_stage *c = xj_cpu_stage_new(m, l0, l1, CTX, B, true, err, sizeof err);
     xj_stage *g = c ? xj_metal_stage_new(m, l0, l1, CTX, B, true, err, sizeof err) : NULL;
     if (!c || !g) { fprintf(stderr, "%s\n", err); return 1; }
@@ -66,6 +67,26 @@ int main(int argc, char **argv) {
     int ac = argmax(lc, m->hp.n_vocab), ag = argmax(lg, m->hp.n_vocab);
     fprintf(stderr, "输出头：相对误差 %.2e，第一名 CPU %d / Metal %d %s\n", r, ac, ag, (r < 2e-2 && ac == ag) ? "OK" : "不一致");
     if (!(r < 2e-2) || ac != ag) bad++;
+
+    // 速度：Metal 一次 1 个 token（生成阶段），这几层权重整个读一遍的等效带宽
+    {
+        double wbytes = 0;
+        for (uint64_t i = 0; i < m->gguf->n_tensors; i++) {
+            int il;
+            if (sscanf(m->gguf->tensors[i].name, "blk.%d.", &il) == 1 && il >= l0 && il < l1) wbytes += (double)m->gguf->tensors[i].nbytes;
+        }
+        const int N = 32;
+        struct timespec t0, t1;
+        for (int k = 0; k < N + 2; k++) {
+            if (k == 2) clock_gettime(CLOCK_MONOTONIC, &t0);   // 前两个不计（预热）
+            xj_embed(m, toks[k % n], xg);
+            if (g->forward(g, xg, 1, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6) / N;
+        fprintf(stderr, "速度：%d 层（%.0f MB 权重）每个 token %.2f ms，等效 %.1f GB/s\n", l1 - l0, wbytes / 1048576, ms,
+                wbytes / (ms / 1e3) / 1e9);
+    }
     g->reset(g); c->reset(c);
     c->destroy(c); g->destroy(g);
     printf(bad ? "FAIL\n" : "PASS\n");

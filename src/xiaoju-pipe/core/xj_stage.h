@@ -37,6 +37,8 @@ xj_stage *xj_cpu_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int max
 xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int max_batch, bool has_head,
                              char *err, size_t errlen);
 const char *xj_metal_device_name(void);
+// Metal 自动调优的结果（每行线程数和各自耗时），没调过是空串
+const char *xj_metal_tune_note(void);
 #endif
 
 // token → 隐藏向量（查 embedding 表解码一行，CPU 做，很快）

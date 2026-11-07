@@ -134,6 +134,168 @@ MV_KERNEL(mv_q4_K, T_Q4_K)
 MV_KERNEL(mv_q5_K, T_Q5_K)
 MV_KERNEL(mv_q6_K, T_Q6_K)
 
+// ---------- 生成阶段（一次 1 个 token）专用的矩阵乘向量 ----------
+// 生成时每个字都要把从机那几层权重整个读一遍，速度基本由读权重的带宽决定。上面的通用版先把 32 个元素解码进
+// float w[32] 再乘，寄存器用得多（A10 上 mv_q6_K 每组只能开 224 线程），还要按 token 循环。
+// 这里一个线程一次处理 Q4_K / Q5_K 的两个单元（共用同一段 4 位数据，只读一次）、Q6_K 的半个块（128 个元素），
+// 边解码边乘，用 uchar4 / float4 成批读，只留一个累加器。
+
+// Q4_K：第 p 对单元（64 个元素 = 一个块里的第 2jp、2jp+1 单元，共用 32 字节的 4 位数据）
+static inline float q4k_pair(device const uchar *r, uint p, device const float *x) {
+    device const uchar *b = r + (p / 4) * 144;
+    const uint jp = p % 4;
+    float d = rdh(b), dmin = rdh(b + 2), s0, m0, s1, m1;
+    scale_min_k4(2 * jp, b + 4, s0, m0);
+    scale_min_k4(2 * jp + 1, b + 4, s1, m1);
+    device const uchar4 *q = (device const uchar4 *)(b + 16 + 32 * jp);
+    device const float4 *xa = (device const float4 *)(x + p * 64), *xb = xa + 8;
+    float4 lo = 0, hi = 0, sa = 0, sb = 0;
+    for (int i = 0; i < 8; i++) {
+        uchar4 v = q[i];
+        float4 a = xa[i], c = xb[i];
+        lo += float4(v & uchar4(0xF)) * a;
+        hi += float4(v >> uchar4(4)) * c;
+        sa += a; sb += c;
+    }
+    const float4 one = 1;
+    return d * (s0 * dot(lo, one) + s1 * dot(hi, one)) - dmin * (m0 * dot(sa, one) + m1 * dot(sb, one));
+}
+
+// Q5_K：同上，多一位高位（32 字节 qh，第 j 个单元用第 j 位）
+static inline float q5k_pair(device const uchar *r, uint p, device const float *x) {
+    device const uchar *b = r + (p / 4) * 176;
+    const uint jp = p % 4;
+    float d = rdh(b), dmin = rdh(b + 2), s0, m0, s1, m1;
+    scale_min_k4(2 * jp, b + 4, s0, m0);
+    scale_min_k4(2 * jp + 1, b + 4, s1, m1);
+    device const uchar4 *qh = (device const uchar4 *)(b + 16), *ql = (device const uchar4 *)(b + 48 + 32 * jp);
+    device const float4 *xa = (device const float4 *)(x + p * 64), *xb = xa + 8;
+    const uchar4 h0 = uchar4(2 * jp), h1 = uchar4(2 * jp + 1);
+    float4 lo = 0, hi = 0, sa = 0, sb = 0;
+    for (int i = 0; i < 8; i++) {
+        uchar4 v = ql[i], h = qh[i];
+        float4 a = xa[i], c = xb[i];
+        lo += float4((v & uchar4(0xF)) + (((h >> h0) & uchar4(1)) << uchar4(4))) * a;
+        hi += float4((v >> uchar4(4)) + (((h >> h1) & uchar4(1)) << uchar4(4))) * c;
+        sa += a; sb += c;
+    }
+    const float4 one = 1;
+    return d * (s0 * dot(lo, one) + s1 * dot(hi, one)) - dmin * (m0 * dot(sa, one) + m1 * dot(sb, one));
+}
+
+// Q6_K：第 h 个半块（128 个元素）。4 个单元共用 32 字节高位，两两共用 32 字节低位。
+// 块长 210 字节，不是 4 的倍数，只能按字节读。
+static inline float q6k_half(device const uchar *r, uint h, device const float *x) {
+    device const uchar *b = r + (h / 2) * 210;
+    const uint n = h % 2;
+    device const uchar *ql = b + n * 64, *qh = b + 128 + n * 32;
+    device const char *sc = (device const char *)(b + 192 + n * 8);
+    device const float *xp = x + h * 128;
+    float acc = 0;
+    for (int half16 = 0; half16 < 2; half16++) {
+        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int k = 0; k < 16; k++) {
+            const int l = half16 * 16 + k;
+            const int a = ql[l], c = ql[l + 32], hb = qh[l];
+            s0 += float(int((a & 0xF) | ((hb & 3) << 4)) - 32) * xp[l];
+            s1 += float(int((c & 0xF) | (((hb >> 2) & 3) << 4)) - 32) * xp[l + 32];
+            s2 += float(int((a >> 4) | (((hb >> 4) & 3) << 4)) - 32) * xp[l + 64];
+            s3 += float(int((c >> 4) | (((hb >> 6) & 3) << 4)) - 32) * xp[l + 96];
+        }
+        acc += float(sc[half16]) * s0 + float(sc[2 + half16]) * s1 + float(sc[4 + half16]) * s2 + float(sc[6 + half16]) * s3;
+    }
+    return rdh(b + 208) * acc;
+}
+
+template <int TYPE>
+static void mv1_impl(device const uchar *W, device const float *x, device float *y, constant xj_mv_args &a,
+                     uint3 tg, uint tid, threadgroup float *red) {
+    // 每行 lanes 个线程，一组 128 线程算 128 / lanes 行。lanes 少：每个线程连续多算几段、归约少几轮
+    const uint lanes = a.lanes, rows = (XJ_MV_ROWS * XJ_MV_LANES) / lanes;
+    const uint grp = group_id(tg, a.grid_x);
+    const uint rl = tid / lanes, lane = tid % lanes;
+    const uint row = grp * rows + rl;
+    float acc = 0;
+    if (row < a.N) {
+        device const uchar *r = W + (ulong)row * a.row_bytes;
+        if (TYPE == T_Q4_K) {
+            for (uint p = lane; p < a.K / 64; p += lanes) acc += q4k_pair(r, p, x);
+        } else if (TYPE == T_Q5_K) {
+            for (uint p = lane; p < a.K / 64; p += lanes) acc += q5k_pair(r, p, x);
+        } else if (TYPE == T_Q6_K) {
+            for (uint h = lane; h < a.K / 128; h += lanes) acc += q6k_half(r, h, x);
+        } else {
+            for (uint u = lane; u < a.K / 32; u += lanes) {
+                float w[32];
+                dequant_unit<TYPE>(r, u, w);
+                device const float4 *xp = (device const float4 *)(x + u * 32);
+                for (int i = 0; i < 8; i++) acc += dot(float4(w[4*i], w[4*i+1], w[4*i+2], w[4*i+3]), xp[i]);
+            }
+        }
+    }
+    red[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = lanes / 2; s > 0; s >>= 1) {
+        if (lane < s) red[tid] += red[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0 && row < a.N) {
+        device float *o = y + row;
+        *o = a.add ? *o + red[tid] : red[tid];
+    }
+}
+
+#define MV1_KERNEL(NAME, TYPE)                                                                   \
+kernel void NAME(device const uchar *W [[buffer(0)]], device const float *x [[buffer(1)]],      \
+                 device float *y [[buffer(2)]], constant xj_mv_args &a [[buffer(3)]],           \
+                 uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { \
+    threadgroup float red[XJ_MV_ROWS * XJ_MV_LANES];                                             \
+    mv1_impl<TYPE>(W, x, y, a, tg, tid, red);                                                    \
+}
+MV1_KERNEL(mv1_f32, T_F32)
+MV1_KERNEL(mv1_f16, T_F16)
+MV1_KERNEL(mv1_bf16, T_BF16)
+MV1_KERNEL(mv1_q8_0, T_Q8_0)
+MV1_KERNEL(mv1_q4_K, T_Q4_K)
+MV1_KERNEL(mv1_q5_K, T_Q5_K)
+MV1_KERNEL(mv1_q6_K, T_Q6_K)
+
+// ---------- 新芯片（A14 / Apple7 起）版：同样的算法，归约用 simd_sum ----------
+// 一个线程组 4 个 simdgroup，一个 simdgroup 算一行，不用线程组内存和栅栏。
+// A10 上建不了这些管线（没有 simdgroup 归约），xj_metal.m 只在 supportsFamily(Apple7) 时用。
+template <int TYPE>
+static void mvs_impl(device const uchar *W, device const float *x, device float *y, constant xj_mv_args &a,
+                     uint3 tg, uint tid) {
+    const uint grp = group_id(tg, a.grid_x);
+    const uint rl = tid / XJ_MV_LANES, lane = tid % XJ_MV_LANES;
+    const uint row = grp * XJ_MV_ROWS + rl;
+    if (row >= a.N) return;   // 整个 simdgroup 一起退出，不影响别的行
+    device const uchar *r = W + (ulong)row * a.row_bytes;
+    float acc = 0;
+    if (TYPE == T_Q4_K) {
+        for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q4k_pair(r, p, x);
+    } else if (TYPE == T_Q5_K) {
+        for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q5k_pair(r, p, x);
+    } else {
+        for (uint h = lane; h < a.K / 128; h += XJ_MV_LANES) acc += q6k_half(r, h, x);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        device float *o = y + row;
+        *o = a.add ? *o + acc : acc;
+    }
+}
+
+#define MVS_KERNEL(NAME, TYPE)                                                                   \
+kernel void NAME(device const uchar *W [[buffer(0)]], device const float *x [[buffer(1)]],      \
+                 device float *y [[buffer(2)]], constant xj_mv_args &a [[buffer(3)]],           \
+                 uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { \
+    mvs_impl<TYPE>(W, x, y, a, tg, tid);                                                         \
+}
+MVS_KERNEL(mvs_q4_K, T_Q4_K)
+MVS_KERNEL(mvs_q5_K, T_Q5_K)
+MVS_KERNEL(mvs_q6_K, T_Q6_K)
+
 // 归一化：一个线程组（256 线程）一行。in 和 out 可以是同一个缓冲。
 kernel void xj_norm(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
                     device const float *w [[buffer(2)]], device const float *gate [[buffer(3)]],
