@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define XJ_SPEC_MAXK 4
-#define XJ_SPEC_DRAFT_VOCAB 0   // 猜字默认看前多少个词（0 = 全部；CI 量过再定）
+#define XJ_SPEC_DRAFT_VOCAB 0   // 猜字默认看全部词。只看前 N 个编号对中文不行（中文字编号大多在 13 万以后，CI 实测 N=10 万猜中率 38%→31%）
 
 // 采样：从 logits[n_vocab] 选一个字
 typedef int (*xj_sample_fn)(void *ctx, const float *logits, int n_vocab);

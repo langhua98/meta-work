@@ -90,14 +90,9 @@ jobs:
             [ $mp$cp = 00 ] && grep 均值 /tmp/v.err
             echo "主干过norm=$mp 自己过norm=$cp：$(grep 投机解码 /tmp/v.err | cut -d， -f1-4)；$(grep 各位置 /tmp/v.err)"
           done; done
-          # 猜字时只看前 N 个常用词（BPE 编号按出现频率排）：猜中率掉多少、猜字快多少
+          # 猜字只看前 N 个编号（XJ_MTP_VOCAB）不适合中文：中文字的编号大多在 13 万以后，实测 N=10 万猜中率也明显下降。这里只记一下分布
           ./build/xjpipe-host "$u" "$Q" --n 128 --ids /tmp/ids.txt > /dev/null 2>&1
-          sort -n /tmp/ids.txt | awk '{a[NR]=$1} END{print "生成的字编号：最大 " a[NR] "，95% 分位 " a[int(NR*0.95)] "，超过 32768 的 " c+0 " 个"} $1>32768{c++}'
-          for nv in 0 16384 32768 65536 100000; do for k in 2 3; do
-            XJ_MTP_VOCAB=$nv ./build/xjpipe-host "$u" "$Q" --n 96 --draft $k --mtp /tmp/mtp-only.gguf > /tmp/v.txt 2> /tmp/v.err
-            cmp -s /tmp/plain.txt /tmp/v.txt || { echo "::error::只看 $nv 词时输出变了"; exit 1; }
-            echo "只看前 $nv 词 猜 $k 个：$(grep 投机解码 /tmp/v.err)；$(grep 字/秒 /tmp/v.err | cut -d， -f1-2)"
-          done; done
+          sort -n /tmp/ids.txt | awk '$1>32768{c++} {a[NR]=$1} END{print "生成的字编号：最大 " a[NR] "，95% 分位 " a[int(NR*0.95)] "，超过 32768 的 " c+0 " 个"}'
           # 猜中率太低说明 MTP 接错了
           acc=$(grep -o '猜中 [0-9]* 个（[0-9]*%' /tmp/spec3.err | grep -o '[0-9]*%' | tr -d %)
           [ "${acc:-0}" -ge 30 ] || echo "::warning::MTP 猜中率只有 ${acc}%"
@@ -160,6 +155,13 @@ jobs:
             echo "和普通解码：${same:+前 $same 字节一样}${same:-完全一样}"
             [ -z "$same" ] || [ "$same" -gt 120 ] || { echo "::error::Metal 投机解码太早就和普通解码不一样"; diff /tmp/m0.txt /tmp/m$k.txt; exit 1; }
           done
+          # 7 Plus 那套内核（不用 simd，一批几个字的每行线程数单独调优）
+          XJ_MV_NOSIMD=1 ./build/xjpipe-host "$f" "$Q" --n 96 > /tmp/n0.txt 2> /tmp/n0.err
+          XJ_MV_NOSIMD=1 ./build/xjpipe-host "$f" "$Q" --n 96 --draft 2 --mtp "$p" > /tmp/n2.txt 2> /tmp/n2.err || { cat /tmp/n2.err; exit 1; }
+          grep 调优 /tmp/n2.err || true
+          echo "不用 simd 猜 2 个：$(grep 投机解码 /tmp/n2.err)；$(grep 字/秒 /tmp/n2.err | cut -d， -f1-2)；普通 $(grep 字/秒 /tmp/n0.err | cut -d， -f1-2)"
+          same=$(cmp /tmp/n0.txt /tmp/n2.txt 2>/dev/null | grep -o 'byte [0-9]*' | grep -o '[0-9]*' || true)
+          [ -z "$same" ] || [ "$same" -gt 120 ] || { echo "::error::不用 simd 时投机解码太早分叉"; diff /tmp/n0.txt /tmp/n2.txt; exit 1; }
       - name: Tokenizer vs official tokenizer.json
         run: |
           python3 -m venv /tmp/venv
