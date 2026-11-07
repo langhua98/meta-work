@@ -23,6 +23,8 @@ enum Route: Hashable {
     case assistant
     /// 下载仓库 ZIP
     case zip
+    /// 双机推理（两台手机合跑 Qwen3.5-9B）
+    case pipe
 }
 
 // 首页：推送任务列表。点一个任务 → 看改了什么 → 提交并推送。
@@ -99,6 +101,19 @@ struct HomeView: View {
                     }
                     .buttonStyle(PressStyle())
                     .listRowBackground(Theme.card)
+                    Button { Haptics.tap(); path.append(.pipe) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "iphone.gen2.radiowaves.left.and.right").foregroundStyle(Theme.orangeText).frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("双机推理").font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
+                                Text("两台手机合跑 Qwen3.5-9B，一台装不下的模型").font(.system(size: 13)).foregroundStyle(Theme.muted)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.faint)
+                        }
+                    }
+                    .buttonStyle(PressStyle())
+                    .listRowBackground(Theme.card)
                 } header: {
                     Text("工具").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
                 }
@@ -126,6 +141,7 @@ struct HomeView: View {
                 case .history(let m): HistoryView(mapping: m)
                 case .assistant: ChatView()
                 case .zip: RepoZipView()
+                case .pipe: PipeHomeView()
                 }
             }
             .toolbar {
