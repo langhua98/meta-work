@@ -1,0 +1,34 @@
+name: 小橘双机 MTP 探测（临时）
+on:
+  push:
+    branches: [claude/project-thread-tpwnau]
+    paths: [".github/workflows/xiaoju-mtp-probe.yml"]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/xiaoju-pipe
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -j4 build/gguf-dump
+      - name: 看带 MTP 头的 GGUF 里有哪些张量
+        run: |
+          for repo in prithivMLmods/Qwen3.5-9B-MTP-GGUF prithivMLmods/Qwen3.5-0.8B-MTP-GGUF; do
+            echo "=================== $repo"
+            curl -sSL "https://huggingface.co/api/models/$repo/tree/main" | python3 -c "import json,sys; [print(x['path'], x.get('size'), x.get('lfs',{}).get('size')) for x in json.load(sys.stdin)]"
+            f=$(curl -sSL "https://huggingface.co/api/models/$repo/tree/main" | python3 -c "import json,sys; print([x['path'] for x in json.load(sys.stdin) if 'Q4_K_M' in x['path'] and 'mmproj' not in x['path']][0])")
+            echo "== $f"
+            curl -sSL -r 0-33554431 -o /tmp/h.gguf "https://huggingface.co/$repo/resolve/main/$f"
+            ./build/gguf-dump /tmp/h.gguf > /tmp/dump.txt 2>&1 || true
+            grep -v "^  tokenizer" /tmp/dump.txt | head -60
+            echo "-- 最后几层和 MTP 相关张量"
+            grep -n "nextn\|mtp" /tmp/dump.txt || true
+            n=$(grep -o 'block_count = [0-9]*' /tmp/dump.txt | grep -o '[0-9]*$')
+            grep -E "blk\.($((n-1))|$n|$((n+1)))\.|output|token_embd" /tmp/dump.txt || true
+          done
+      - name: unsloth 9B 对照（看 block_count 有没有变）
+        run: |
+          curl -sSL -r 0-16777215 -o /tmp/u.gguf https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf
+          ./build/gguf-dump /tmp/u.gguf 2>&1 | grep -v "^  tokenizer" | head -45
+          ./build/gguf-dump /tmp/u.gguf 2>&1 | grep -E "blk\.31\.|output|token_embd"
