@@ -76,7 +76,7 @@ final class Downloader: ObservableObject {
             await ui { self.status = "读取模型结构（\(url.host ?? "")）……" }
             var want: UInt64 = 16 << 20
             while true {
-                let (data, _) = try await get(url, 0, want)
+                let (data, _) = try await get(url, 0, want) { [weak self] n in self?.headStatus(url, n, want) }
                 do {
                     let l = try Downloader.plan(data, 0, 1).layout
                     await ui { self.progress = nil; self.status = "" }
@@ -133,7 +133,7 @@ final class Downloader: ObservableObject {
             var want: UInt64 = 16 << 20
             var head = Data(), total: UInt64 = 0, plan: Plan
             while true {
-                (head, total) = try await get(src, 0, want)
+                (head, total) = try await get(src, 0, want) { [weak self] n in self?.headStatus(src, n, want) }
                 do { plan = try Downloader.plan(head, layers?.0 ?? 0, layers?.1 ?? 1); break }
                 catch let e as NeedMore { want = max(e.bytes, want * 2) }
             }
@@ -175,7 +175,13 @@ final class Downloader: ObservableObject {
             defer { try? h.close() }
             for (lo, hi) in todo {
                 if cancelled { throw XJError("已取消") }
-                let (data, _) = try await get(src, lo, hi - lo)
+                let done = got
+                let (data, _) = try await get(src, lo, hi - lo) { [weak self] n in
+                    let now = done + UInt64(n)
+                    let speed = Double(now) / max(Date().timeIntervalSince(started), 0.1) / 1048576
+                    let msg = String(format: "%@ / %@，%.1f MB/s（%@）", (Double(now) / 1048576).mb, (Double(bytes) / 1048576).mb, speed, src.host ?? "")
+                    DispatchQueue.main.async { self?.progress = Double(now) / Double(max(bytes, 1)); self?.status = msg }
+                }
                 guard UInt64(data.count) == hi - lo else { throw XJError("服务器回的字节数不对（\(data.count)）") }
                 try h.seek(toOffset: lo)
                 try h.write(contentsOf: data)
@@ -197,8 +203,13 @@ final class Downloader: ObservableObject {
         }
     }
 
-    /// GET 一段字节，返回数据和文件总大小。失败重试 3 次，界面上显示在重试
-    private func get(_ url: URL, _ lo: UInt64, _ len: UInt64) async throws -> (Data, UInt64) {
+    private func headStatus(_ url: URL, _ n: Int, _ want: UInt64) {
+        let msg = String(format: "读取模型结构（%@）：%.1f / %.0f MB", url.host ?? "", Double(n) / 1048576, Double(want) / 1048576)
+        DispatchQueue.main.async { self.status = msg }
+    }
+
+    /// GET 一段字节，返回数据和文件总大小。边收边报进度；失败重试 3 次，界面上显示在重试
+    private func get(_ url: URL, _ lo: UInt64, _ len: UInt64, onBytes: @escaping (Int) -> Void = { _ in }) async throws -> (Data, UInt64) {
         var req = URLRequest(url: url)
         req.setValue("bytes=\(lo)-\(lo + len - 1)", forHTTPHeaderField: "Range")
         req.timeoutInterval = 30
@@ -207,9 +218,7 @@ final class Downloader: ObservableObject {
         for attempt in 0..<4 {
             if cancelled { throw XJError("已取消") }
             do {
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                guard let r = resp as? HTTPURLResponse else { throw XJError("没有 HTTP 响应") }
-                guard r.statusCode == 206 else { throw XJError("服务器不支持分段下载（\(r.statusCode)）") }
+                let (data, r) = try await RangeFetch(onBytes: onBytes).run(req)
                 var total: UInt64 = 0
                 if let cr = r.value(forHTTPHeaderField: "Content-Range"), let slash = cr.lastIndex(of: "/") {
                     total = UInt64(cr[cr.index(after: slash)...]) ?? 0
@@ -231,5 +240,60 @@ final class Downloader: ObservableObject {
 
     private func ui(_ f: @escaping () -> Void) async {
         await MainActor.run { f() }
+    }
+}
+
+/// 一次分段请求。先看响应头：不是 206 就马上断开（不会把 5.7 GB 整个读进内存）；收数据时报进度。
+private final class RangeFetch: NSObject, URLSessionDataDelegate {
+    private let onBytes: (Int) -> Void
+    private var data = Data()
+    private var response: HTTPURLResponse?
+    private var cont: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var lastReport = Date.distantPast
+
+    init(onBytes: @escaping (Int) -> Void) { self.onBytes = onBytes }
+
+    func run(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        // 回调在这个 session 自己的串行队列上
+        let s = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        defer { s.finishTasksAndInvalidate() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { c in
+                self.cont = c
+                s.dataTask(with: req).resume()
+            }
+        } onCancel: {
+            s.invalidateAndCancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 206, let r = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            finish(.failure(XJError("服务器不支持分段下载（HTTP \(code)）")))
+            return
+        }
+        self.response = r
+        if r.expectedContentLength > 0 { data.reserveCapacity(Int(r.expectedContentLength)) }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive d: Data) {
+        data.append(d)
+        let now = Date()
+        if now.timeIntervalSince(lastReport) > 0.25 { lastReport = now; onBytes(data.count) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { finish(.failure(error)) }
+        else if let r = response { onBytes(data.count); finish(.success((data, r))) }
+        else { finish(.failure(XJError("没有 HTTP 响应"))) }
+    }
+
+    private func finish(_ r: Result<(Data, HTTPURLResponse), Error>) {
+        cont?.resume(with: r)
+        cont = nil
     }
 }
