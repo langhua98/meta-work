@@ -421,9 +421,14 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
         NSError *e = nil;
         id<MTLComputePipelineState> p = f ? [dev newComputePipelineStateWithFunction:f error:&e] : nil;
         if (!p) { snprintf(err, errlen, "内核 %s 建不起来：%s", names[i], e.localizedDescription.UTF8String ?: "找不到"); return NULL; }
-        // A10 上每个线程组最多 512 线程；寄存器用得多的内核上限可能更低
-        if (p.maxTotalThreadsPerThreadgroup < 256 && (strstr(names[i], "mv_") || !strcmp(names[i], "xj_norm") || !strcmp(names[i], "xj_softmax"))) {
-            snprintf(err, errlen, "内核 %s 在这台设备上每组只能 %lu 线程", names[i], (unsigned long)p.maxTotalThreadsPerThreadgroup);
+        // A10 上每个线程组最多 512 线程；寄存器用得多的内核上限会更低（7 Plus 上 mv_q6_K 只有 224）。
+        // 按每个内核实际派发的线程数检查（和下面 enc_* 里 dispatch 的第三个参数一致）；delta_net 单独查
+        NSUInteger need = strstr(names[i], "mv_") ? XJ_MV_ROWS * XJ_MV_LANES
+                        : (!strcmp(names[i], "xj_norm") || !strcmp(names[i], "xj_softmax")) ? 256
+                        : !strcmp(names[i], "xj_delta_net") ? 0 : 64;
+        if (p.maxTotalThreadsPerThreadgroup < need) {
+            snprintf(err, errlen, "内核 %s 在这台设备上每组只能 %lu 线程（要 %lu）", names[i],
+                     (unsigned long)p.maxTotalThreadsPerThreadgroup, (unsigned long)need);
             return NULL;
         }
         o.pso[@(names[i])] = p;
