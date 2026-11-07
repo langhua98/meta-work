@@ -24,6 +24,7 @@ typedef struct { uint64_t file_off; uint32_t buf; uint64_t off; } wmap;
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *kc, *vc, *conv, *ssm;  // 每层一个（没用的放占位）
 @property(nonatomic, strong) id<MTLBuffer> x, h, A, B, C, D, G, SC, logits, dummy;
 @property(nonatomic) BOOL simd;   // 能用 mvs_*（simd_sum 版矩阵乘）
+@property(nonatomic) uint32_t lanes;  // mv1_* 每行几个线程（自动调优选出来的）
 @end
 @implementation XJMetal
 @end
@@ -37,6 +38,8 @@ typedef struct {
 static XJMetal *M(xj_stage *s) { return (__bridge XJMetal *)((metal_impl *)s->impl)->obj; }
 
 static NSString *g_device_name;
+static NSString *g_tune_note;   // 调优结果，界面上显示
+const char *xj_metal_tune_note(void) { return g_tune_note ? g_tune_note.UTF8String : ""; }
 const char *xj_metal_device_name(void) { return g_device_name ? g_device_name.UTF8String : "Metal"; }
 
 // ---------- 内核库 ----------
@@ -165,10 +168,9 @@ static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
                    id<MTLBuffer> x, size_t xoff, uint32_t xs, id<MTLBuffer> y, size_t yoff, uint32_t ys, int T, bool add) {
     XJMetal *o = M(s);
     set_w(enc, s, w, 0);
-    const uint32_t groups = (uint32_t)((w->ne1 + XJ_MV_ROWS - 1) / XJ_MV_ROWS);
     for (int t0 = 0; t0 < T; t0 += XJ_MV_MAXT) {
         xj_mv_args a = { (uint32_t)w->ne0, (uint32_t)w->ne1, (uint32_t)(T - t0 < XJ_MV_MAXT ? T - t0 : XJ_MV_MAXT),
-                         (uint32_t)xj_row_bytes(w->type, w->ne0), xs, ys, add ? 1u : 0u, 0 };
+                         (uint32_t)xj_row_bytes(w->type, w->ne0), xs, ys, add ? 1u : 0u, 0, XJ_MV_LANES };
         // XJ_MV_GENERIC=1：生成阶段也用通用内核（xjpipe-check 对比速度用）
         static int generic = -1;
         if (generic < 0) generic = getenv("XJ_MV_GENERIC") != NULL;
@@ -176,6 +178,10 @@ static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
         // 新芯片上 Q4_K / Q5_K / Q6_K 用 simd_sum 版（XJ_MV_NOSIMD=1 关掉）
         if (a.T == 1 && !generic && o.simd && (w->type == XJ_Q4_K || w->type == XJ_Q5_K || w->type == XJ_Q6_K))
             nm = w->type == XJ_Q4_K ? "mvs_q4_K" : w->type == XJ_Q5_K ? "mvs_q5_K" : "mvs_q6_K";
+        else if (!strncmp(nm, "mv1_", 4) && o.lanes)
+            a.lanes = o.lanes;   // mv1_*：用调优选出的每行线程数
+        const uint32_t rows = XJ_MV_ROWS * XJ_MV_LANES / a.lanes;
+        const uint32_t groups = (uint32_t)((w->ne1 + rows - 1) / rows);
         [enc setComputePipelineState:P(o, nm)];
         a.grid_x = gx_of(groups);
         [enc setBuffer:x offset:(xoff + (size_t)t0 * xs) * 4 atIndex:1];
@@ -183,6 +189,41 @@ static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
         [enc setBytes:&a length:sizeof a atIndex:3];
         dispatch(enc, groups, XJ_MV_ROWS * XJ_MV_LANES);
     }
+}
+
+// 自动调优：mv1_* 每行用几个线程最快。不同 GPU 差别很大（A10 上 32 个线程分一行，每个线程只算两三段就要归约 5 轮），
+// 拿这一段最大的一个矩阵（第一层的 ffn_up）每种跑几遍，挑最快的。XJ_MV_LANES 可以强制指定。
+static uint32_t tune_lanes(xj_stage *s, char *note, size_t nlen) {
+    XJMetal *o = M(s);
+    const char *env = getenv("XJ_MV_LANES");
+    if (env) { int v = atoi(env); if (v == 4 || v == 8 || v == 16 || v == 32) { snprintf(note, nlen, "每行 %d 线程（指定）", v); return (uint32_t)v; } }
+    const xj_w *w = &s->m->layers[s->l0].ffn_up;
+    if (!mv_name(w->type, true)) return XJ_MV_LANES;
+    const uint32_t cand[] = { 32, 16, 8, 4 };
+    double best = 1e30; uint32_t pick = XJ_MV_LANES;
+    char buf[160] = ""; size_t bl = 0;
+    for (int c = 0; c < 4; c++) {
+        o.lanes = cand[c];
+        double t = 1e30;
+        for (int rep = 0; rep < 4; rep++) {
+            @autoreleasepool {
+                id<MTLCommandBuffer> cb = [o.queue commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                for (int k = 0; k < 4; k++) enc_mv(enc, s, w, o.h, 0, (uint32_t)w->ne0, o.G, 0, (uint32_t)w->ne1, 1, false);
+                [enc endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                if (cb.status != MTLCommandBufferStatusCompleted) { o.lanes = XJ_MV_LANES; return XJ_MV_LANES; }
+                double dt = cb.GPUEndTime - cb.GPUStartTime;
+                if (rep > 0 && dt > 0 && dt < t) t = dt;   // 第一遍预热
+            }
+        }
+        if (t < best) { best = t; pick = cand[c]; }
+        bl += (size_t)snprintf(buf + bl, sizeof buf - bl, "%s%u:%.2fms", c ? " " : "", cand[c], t * 1e3 / 4);
+    }
+    o.lanes = pick;
+    snprintf(note, nlen, "每行 %u 线程（%s）", pick, buf);
+    return pick;
 }
 
 typedef struct { id<MTLBuffer> b; size_t off; uint32_t tok, row; } view;  // 缓冲 + 起点 + 每 token 间隔 + 每行间隔（float）
@@ -505,5 +546,13 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
     }
     if (!o.x || !o.h || !o.A || !o.G || !o.SC || (has_head && !o.logits)) { snprintf(err, errlen, "GPU 内存不够"); metal_destroy(s); return NULL; }
     metal_reset(s);
+    o.lanes = XJ_MV_LANES;
+    if (!o.simd && l1 > l0) {
+        char note[200];
+        tune_lanes(s, note, sizeof note);
+        g_tune_note = @(note);
+        g_device_name = [NSString stringWithFormat:@"%@（每行 %u 线程）", g_device_name ?: dev.name, o.lanes];
+        fprintf(stderr, "Metal 调优：%s\n", note);
+    }
     return s;
 }

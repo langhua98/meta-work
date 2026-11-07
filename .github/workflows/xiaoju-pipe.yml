@@ -96,6 +96,10 @@ jobs:
           XJ_MV_GENERIC=1 ./build/xjpipe-check "$f" --layers 0:24
           echo "== 生成阶段专用内核（不用 simd，7 Plus 上用的这套）"
           XJ_MV_NOSIMD=1 ./build/xjpipe-check "$f" --layers 0:24
+          for n in 16 8 4; do
+            echo "== 生成阶段专用内核，每行 $n 线程"
+            XJ_MV_NOSIMD=1 XJ_MV_LANES=$n ./build/xjpipe-check "$f" --layers 0:24
+          done
           echo "== 新芯片的 simd_sum 版（设备支持时）"
           ./build/xjpipe-check "$f" --layers 0:24
       - name: Tokenizer vs official tokenizer.json

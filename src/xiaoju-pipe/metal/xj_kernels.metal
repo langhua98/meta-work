@@ -210,20 +210,22 @@ static inline float q6k_half(device const uchar *r, uint h, device const float *
 template <int TYPE>
 static void mv1_impl(device const uchar *W, device const float *x, device float *y, constant xj_mv_args &a,
                      uint3 tg, uint tid, threadgroup float *red) {
+    // 每行 lanes 个线程，一组 128 线程算 128 / lanes 行。lanes 少：每个线程连续多算几段、归约少几轮
+    const uint lanes = a.lanes, rows = (XJ_MV_ROWS * XJ_MV_LANES) / lanes;
     const uint grp = group_id(tg, a.grid_x);
-    const uint rl = tid / XJ_MV_LANES, lane = tid % XJ_MV_LANES;
-    const uint row = grp * XJ_MV_ROWS + rl;
+    const uint rl = tid / lanes, lane = tid % lanes;
+    const uint row = grp * rows + rl;
     float acc = 0;
     if (row < a.N) {
         device const uchar *r = W + (ulong)row * a.row_bytes;
         if (TYPE == T_Q4_K) {
-            for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q4k_pair(r, p, x);
+            for (uint p = lane; p < a.K / 64; p += lanes) acc += q4k_pair(r, p, x);
         } else if (TYPE == T_Q5_K) {
-            for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q5k_pair(r, p, x);
+            for (uint p = lane; p < a.K / 64; p += lanes) acc += q5k_pair(r, p, x);
         } else if (TYPE == T_Q6_K) {
-            for (uint h = lane; h < a.K / 128; h += XJ_MV_LANES) acc += q6k_half(r, h, x);
+            for (uint h = lane; h < a.K / 128; h += lanes) acc += q6k_half(r, h, x);
         } else {
-            for (uint u = lane; u < a.K / 32; u += XJ_MV_LANES) {
+            for (uint u = lane; u < a.K / 32; u += lanes) {
                 float w[32];
                 dequant_unit<TYPE>(r, u, w);
                 device const float4 *xp = (device const float4 *)(x + u * 32);
@@ -233,7 +235,7 @@ static void mv1_impl(device const uchar *W, device const float *x, device float 
     }
     red[tid] = acc;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint s = XJ_MV_LANES / 2; s > 0; s >>= 1) {
+    for (uint s = lanes / 2; s > 0; s >>= 1) {
         if (lane < s) red[tid] += red[tid + s];
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
