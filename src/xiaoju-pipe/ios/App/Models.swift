@@ -53,6 +53,7 @@ struct ModelLayout {
     var nLayer: Int
     var layerMB: [Double]
     var ioMB: Double
+    var outMB: Double
 
     func mb(_ l0: Int, _ l1: Int) -> Double {
         guard l0 < l1, l1 <= layerMB.count else { return 0 }
@@ -69,6 +70,7 @@ struct ModelLayout {
         nLayer = n
         layerMB = arr
         ioMB = info.io_mb
+        outMB = info.out_mb
     }
 
     static func read(_ url: URL) -> ModelLayout? {

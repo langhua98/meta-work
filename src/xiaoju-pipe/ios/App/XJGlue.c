@@ -25,6 +25,7 @@ static void fill_info(const xj_model *m, xjg_model_info *info) {
     info->n_embd = m->hp.n_embd;
     for (int i = 0; i < m->hp.n_layer && i < 128; i++) info->layer_mb[i] = xj_model_layer_bytes(m, i, i + 1) / 1048576.0;
     info->io_mb = (m->tok_embd.nbytes + m->output_norm.nbytes + (m->output.file_off != m->tok_embd.file_off ? m->output.nbytes : 0)) / 1048576.0;
+    info->out_mb = m->output.nbytes / 1048576.0;
     info->total_bytes = m->gguf->size;
 }
 
