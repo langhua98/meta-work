@@ -25,9 +25,12 @@ import java.util.concurrent.TimeUnit
  * 相机总管：实时画面和移动侦测共用一个相机、一个硬件 H.264 编码器。
  *
  *   相机（NV21）─┬─ 移动侦测（每 200 ms 看一帧）→ 有动静：截图、Telegram 提醒、开始录
- *               ├─ H.264 编码器 ─┬─ 实时画面（有人在看、要 H.264 时）
+ *               ├─ H.264 编码器 ─┬─ 实时画面（有人在看、要 H.264 时）：云盘直播通道 / 同一个 Wi-Fi 直连
  *               │                └─ 事件录像（内存里一直留着最近几秒，有动静才写文件）
  *               └─ JPEG（实时画面的兼容模式、硬件编码用不了时）
+ *
+ * 实时画面卡顿的处理：网络跟不上丢了帧，马上要一个关键帧（4.2 不支持「要关键帧」，就重开编码器，
+ * 重开后第一帧就是关键帧，卡大约 0.1 秒，不用等满 1 秒）；老是丢就把码率降下来，好了再慢慢升回去。
  *
  * 侦测开着时相机一直开着；只看实时画面时，看的人走了相机就关。
  * 直播中看的一端可以换镜头、调参数，直播完恢复侦测自己的设置。
@@ -49,11 +52,25 @@ class CameraHub(
 
     @Volatile private var thread: Thread? = null
 
-    // 实时画面
-    @Volatile private var client: StreamClient? = null
-    @Volatile private var liveAv = false
-    @Volatile private var liveAudio = false
-    @Volatile private var liveUntil = 0L
+    // 实时画面：一次直播 = 云盘直播通道的推流 + 同一个 Wi-Fi 里直连进来的观看端
+    private class Live(val room: String, val av: Boolean, val audio: Boolean, val until: Long) {
+        val started = System.currentTimeMillis()
+        @Volatile var cloud: StreamClient? = null
+        val lan = java.util.concurrent.CopyOnWriteArrayList<LanViewer>()
+        @Volatile var lastWatched = 0L
+        fun sinks(): List<LiveSink> = listOfNotNull<LiveSink>(cloud) + lan
+        fun watched(): List<LiveSink> = sinks().filter { !it.isClosed && it.watchers > 0 }
+    }
+    @Volatile private var live: Live? = null
+    private val lanServer = LanServer(roomOk = { r -> live?.room == r }, onViewer = { v -> lanViewer(v) })
+
+    // 码率自适应：网络跟不上（丢帧）就降，稳了再升
+    @Volatile private var rateScale = 1.0
+    @Volatile private var restartEnc = false
+    @Volatile private var keyAt = 0L
+    private val drops = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+    @Volatile private var lastDrop = 0L
+    @Volatile private var rateChangedAt = 0L
 
     // 编码（相机线程上用；编出来的帧在编码器线程上分发）
     @Volatile private var enc: H264Encoder? = null
@@ -64,7 +81,6 @@ class CameraHub(
     @Volatile private var rot = 0
     @Volatile private var encW = 0
     @Volatile private var encH = 0
-    @Volatile private var askKeyAt = 0L
     private val jpg = ByteArrayOutputStream(64 * 1024)
 
     // 侦测
@@ -100,8 +116,8 @@ class CameraHub(
     val cameraOn get() = thread?.isAlive == true
     /** 侦测正在用麦克风（录音指令要让一让） */
     val micOn get() = mic != null
-    fun liveActive() = client?.closed == false
-    fun watching() = client?.let { !it.closed && it.subs > 0 } == true
+    fun liveActive() = live != null
+    fun watching() = live?.watched()?.isNotEmpty() == true
     private fun wanted() = serviceRunning() && (monitor.on || liveActive())
 
     /** 服务启动时：上次开着侦测就接着侦测。 */
@@ -130,19 +146,35 @@ class CameraHub(
         return describe()
     }
 
-    /** 开始给一个观看端推实时画面（连好了的 StreamClient）。原来的直播会被替换。 */
+    /**
+     * 开始给一个观看端推实时画面（连好了的云盘直播通道）。原来的直播会被替换。
+     * 同时在局域网里开着直连：同一个 Wi-Fi 的 iPhone 可以拿着同一个房间名直接连过来（地址见 lanAddresses）。
+     */
     fun startLive(c: StreamClient, cmd: JSONObject, av: Boolean, audio: Boolean) {
-        client?.close()
+        live?.let { old -> old.sinks().forEach { it.close() } }
         val s = JSONObject(cmd.toString())
         if (!s.has("codec")) s.put("codec", LiveSettings.JPEG)   // 老查看器只认 JPEG
         settings.codecNote = ""
         settings.apply(s)
-        liveAv = av; liveAudio = audio
-        liveUntil = System.currentTimeMillis() + RemoteService.LIVE_MAX_MS
-        client = c
-        enc?.requestKeyframe()
+        val l = Live(cmd.optString("room"), av, audio, System.currentTimeMillis() + RemoteService.LIVE_MAX_MS)
+        l.cloud = c
+        live = l
+        rateScale = 1.0
+        if (!lanServer.start()) Bus.push("局域网直连开不了（端口被占用），只能经云盘看")
+        forceKey()
         ensure()
         status(stateText())
+    }
+
+    /** 局域网直连的地址（ip:端口），放进开始直播的回执里给 iPhone。 */
+    fun lanAddresses(): List<String> = lanServer.addresses()
+
+    private fun lanViewer(v: LanViewer) {
+        val l = live
+        if (l == null) { v.close(); return }
+        l.lan.add(v)
+        Bus.push("同一个 Wi-Fi 的 ${v.remote} 直连来看了")
+        forceKey()
     }
 
     /** 直播中 / 侦测中调相机（video_set、手电）。 */
@@ -186,7 +218,8 @@ class CameraHub(
     }
 
     fun shutdown() {
-        client?.close()
+        live?.sinks()?.forEach { it.close() }
+        lanServer.close()
         thread?.let { runCatching { it.join(5_000) } }
         uploader.close()
         work.shutdown()
@@ -209,7 +242,7 @@ class CameraHub(
                     }) { nv21, w, h, r, ts -> frame(nv21, w, h, r, ts) }
                 } catch (e: Exception) {
                     Bus.push("相机打不开：${e.message}，5 秒后再试")
-                    client?.let { endLive() }
+                    live?.let { endLive() }
                     var waited = 0
                     while (wanted() && waited < 5_000) { try { Thread.sleep(200) } catch (ie: InterruptedException) { return }; waited += 200 }
                 }
@@ -219,7 +252,7 @@ class CameraHub(
             setMic(false)
             recorder.close()
             detector.reset()
-            if (client != null) endLive()
+            if (live != null) endLive()
             status(stateText())
         }
     }
@@ -229,17 +262,33 @@ class CameraHub(
         val now = System.currentTimeMillis()
         if (now - housekeepAt < 300) return
         housekeepAt = now
-        client?.let { c -> if (c.closed || c.nobodyWatching(20_000, 8_000) || now > liveUntil) endLive() }
-        setMic((liveActive() && liveAudio && watching()) || (monitor.on && monitor.audio))
+        live?.let { l ->
+            l.lan.removeAll { it.isClosed }
+            if (l.watched().isNotEmpty()) l.lastWatched = now
+            val cloudGone = l.cloud?.isClosed != false
+            when {
+                now > l.until -> endLive()
+                cloudGone && l.lan.isEmpty() -> endLive()
+                l.lastWatched == 0L && now - l.started > 20_000 -> endLive()   // 一直没人来看
+                l.lastWatched > 0 && now - l.lastWatched > 8_000 -> endLive()  // 看的人都走了
+            }
+        }
+        // 15 秒没丢过帧：码率慢慢升回去
+        if (rateScale < 1.0 && now - lastDrop > 15_000 && now - rateChangedAt > 15_000) {
+            rateScale = minOf(1.0, rateScale * 1.25); rateChangedAt = now
+            Bus.push("网络好了，码率升到 ${(rateScale * 100).toInt()}%")
+        }
+        setMic((watching() && live?.audio == true) || (monitor.on && monitor.audio))
         if (!monitor.on && recorder.recording) recorder.close()
         recorder.tick()
     }
 
     private fun endLive() {
-        val c = client ?: return
-        client = null
-        c.close()
-        Bus.push("直播结束：发出 ${c.sent} 帧，网络跟不上丢了 ${c.dropped} 帧")
+        val l = live ?: return
+        live = null
+        val sinks = l.sinks()
+        sinks.forEach { it.close() }
+        Bus.push("直播结束：发出 ${sinks.sumOf { it.sentFrames }} 帧，网络跟不上丢了 ${sinks.sumOf { it.droppedFrames }} 帧")
         // 恢复侦测自己的相机设置（看的人可能换了镜头、开了手电）
         if (monitor.on) settings.apply(monitor.cameraJson().put("torch", false).put("exposure", 0).put("zoom", 0))
         status(stateText())
@@ -250,26 +299,27 @@ class CameraHub(
         grabLatch?.let { l ->
             if (grabbed == null) { grabbed = nv21.copyOf(); grabW = w; grabH = h; grabRot = r; l.countDown() }
         }
-        val c = client
-        val watch = c != null && !c.closed && c.subs > 0
+        val l = live
+        val sinks = l?.watched().orEmpty()
         val m = monitor
-        val wantH264 = !h264Broken && (m.on || (watch && settings.codec == LiveSettings.H264))
+        val wantH264 = !h264Broken && (m.on || (sinks.isNotEmpty() && settings.codec == LiveSettings.H264))
         if (wantH264) h264(nv21, w, h, ts)
         else if (enc != null) closeEncoder()
-        if (watch && (settings.codec == LiveSettings.JPEG || h264Broken)) jpegLive(c!!, nv21, w, h, r, ts)
+        if (l != null && sinks.isNotEmpty() && (settings.codec == LiveSettings.JPEG || h264Broken)) jpegLive(l, sinks, nv21, w, h, r, ts)
         if (m.on) look(nv21, w, h, r, ts)
     }
 
     private fun h264(nv21: ByteArray, w: Int, h: Int, ts: Long) {
         if (!H264.sizeOk(w, h)) { giveUp("这台手机的相机没有硬件编码合适的尺寸（${w}×$h）"); return }
-        val rate = H264.bitrate(settings.width, settings.fps, settings.quality)
+        val rate = maxOf(150_000, (H264.bitrate(settings.width, settings.fps, settings.quality) * rateScale).toInt())
         val conf = "${w}x$h/${settings.fps}/$rate"
         try {
+            if (restartEnc) { restartEnc = false; closeEncoder() }   // 重开：第一帧就是关键帧
             if (enc == null || conf != encConf) {
                 closeEncoder()
                 encW = w; encH = h
                 val e = H264Encoder(w, h, settings.fps, rate) { data, key, t -> onEncoded(data, key, t) }
-                enc = e; encConf = conf; encSince = System.currentTimeMillis(); fed = 0
+                enc = e; encConf = conf; encSince = System.currentTimeMillis(); fed = 0; encRate = rate
                 Bus.push("H.264 硬件编码：${e.name}，${w}×$h，${rate / 1000} kbps")
             }
             val e = enc ?: return
@@ -280,17 +330,44 @@ class CameraHub(
         }
     }
 
-    /** 编码器线程上：编好的一帧发给直播、交给录像。 */
+    /** 编码器线程上：编好的一帧发给每个在看的（云盘 / 直连），交给录像。 */
     private fun onEncoded(data: ByteArray, key: Boolean, ts: Long) {
-        val c = client
-        if (c != null && !c.closed && settings.codec == LiveSettings.H264) {
-            val limit = maxOf(48L * 1024, H264.bitrate(settings.width, settings.fps, settings.quality) / 8L / 2)
-            if (!c.sendH264(StreamClient.h264(data, rot, ts, key), key, limit) && c.subs > 0) {
-                val now = System.currentTimeMillis()
-                if (now - askKeyAt > 500) { askKeyAt = now; enc?.requestKeyframe() }
+        val l = live
+        if (l != null && settings.codec == LiveSettings.H264) {
+            val sinks = l.watched()
+            if (sinks.isNotEmpty()) {
+                val msg = StreamClient.h264(data, rot, ts, key)
+                // 积压超过大约 0.3 秒的数据就丢（延迟不越拖越长），丢了马上要关键帧
+                val limit = maxOf(24L * 1024, encRate / 8L * 3 / 10)
+                var dropped = false
+                for (s in sinks) if (!s.sendH264(msg, key, limit) && s.watchers > 0) dropped = true
+                if (dropped) onDrop()
             }
         }
         if (monitor.on) recorder.video(data, key, ts, encW, encH, rot)
+    }
+
+    @Volatile private var encRate = 500_000
+
+    /** 丢了帧：要一个关键帧；5 秒里丢了 3 次以上就把码率降到 70%（最低 30%）。 */
+    private fun onDrop() {
+        val now = System.currentTimeMillis()
+        lastDrop = now
+        drops.add(now)
+        while ((drops.peek() ?: now) < now - 5_000) drops.poll()
+        if (drops.size >= 3 && now - rateChangedAt > 3_000 && rateScale > 0.3) {
+            rateScale = maxOf(0.3, rateScale * 0.7); rateChangedAt = now; drops.clear()
+            Bus.push("网络跟不上，码率降到 ${(rateScale * 100).toInt()}%")
+        }
+        forceKey()
+    }
+
+    /** 马上出一个关键帧：4.4+ 直接要，更老的重开编码器（一秒最多一次）。 */
+    private fun forceKey() {
+        val now = System.currentTimeMillis()
+        if (now - keyAt < 1_000) return
+        keyAt = now
+        if (android.os.Build.VERSION.SDK_INT >= 19) enc?.requestKeyframe() else if (enc != null) restartEnc = true
     }
 
     private fun giveUp(why: String) {
@@ -302,12 +379,13 @@ class CameraHub(
 
     private fun closeEncoder() { enc?.close(); enc = null; encConf = "" }
 
-    private fun jpegLive(c: StreamClient, nv21: ByteArray, w: Int, h: Int, r: Int, ts: Long) {
+    private fun jpegLive(l: Live, sinks: List<LiveSink>, nv21: ByteArray, w: Int, h: Int, r: Int, ts: Long) {
         try {
             jpg.reset()
             YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), settings.quality, jpg)
             val b = jpg.toByteArray()
-            c.send(if (liveAv) StreamClient.frameTs(b, r, ts) else StreamClient.frame(b, r))
+            val msg = if (l.av) StreamClient.frameTs(b, r, ts) else StreamClient.frame(b, r)
+            for (s in sinks) s.send(msg)
         } catch (e: Throwable) { /* 丢这一帧 */ }
     }
 
@@ -352,8 +430,11 @@ class CameraHub(
     }
 
     private fun onAudio(data: ByteArray, codec: Int, ts: Long) {
-        val c = client
-        if (c != null && liveAudio && c.subs > 0) c.sendAudio(StreamClient.audio(data, codec, ts))
+        val l = live
+        if (l != null && l.audio) {
+            val sinks = l.watched()
+            if (sinks.isNotEmpty()) { val msg = StreamClient.audio(data, codec, ts); for (s in sinks) s.sendAudio(msg) }
+        }
         if (monitor.on && monitor.audio) recorder.audio(data, if (codec == StreamClient.AUDIO_ULAW_8K) 8000 else 16000, ts)
     }
 

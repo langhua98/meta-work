@@ -58,6 +58,17 @@ class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: St
         const val JPEG = "jpeg"
 
         /**
+         * 选预览帧率范围（相机给的 [最低, 最高]，单位 1/1000 帧/秒）：最高的那档里，
+         * 选最低帧率不低于 15 的、尽量低的（比如 15～30：亮的时候 30 帧，暗的时候最多降到 15，不糊）；
+         * 都低于 15 就选最低帧率最高的。
+         */
+        fun pickFpsRange(ranges: List<IntArray>): IntArray? {
+            val top = ranges.maxOfOrNull { it[1] } ?: return null
+            val c = ranges.filter { it[1] == top }
+            return c.filter { it[0] >= 15_000 }.minByOrNull { it[0] } ?: c.maxByOrNull { it[0] }
+        }
+
+        /**
          * 选预览尺寸（sizes 是相机支持的 宽 to 高）。JPEG：宽度不小于 target 里最小的，没有就最大的。
          * H.264：先在硬件编码器肯定能吃的尺寸里这么选（见 H264.sizeOk），一个都没有再按 JPEG 的选。
          */

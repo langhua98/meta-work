@@ -84,6 +84,9 @@ targets:
         # 工作区在「文件」App 里能看到
         NSLocalNetworkUsageDescription: 双机推理：两台手机在同一个 Wi‑Fi 里互相找到对方、传隐藏向量
         NSBonjourServices: [_xjpipe._tcp]
+        # 实时画面在同一个 Wi-Fi 里直连安卓手机（ws://局域网地址，不加密）
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes: [fetch]

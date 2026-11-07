@@ -78,8 +78,8 @@ object Camera {
                             s.width, s.codec == LiveSettings.H264)
                         sz?.let { p.setPreviewSize(it.first, it.second) }
                         p.previewFormat = ImageFormat.NV21
-                        // 预览帧率开到最高（暗的时候相机自己会降），抽帧才均匀
-                        p.supportedPreviewFpsRange?.maxWithOrNull(compareBy<IntArray>({ it[1] }, { -it[0] }))
+                        // 预览帧率：最高的那档，而且最低不低于 15 帧/秒（再低曝光时间太长，一动就糊、像卡住）
+                        p.supportedPreviewFpsRange?.let { LiveSettings.pickFpsRange(it) }
                             ?.let { p.setPreviewFpsRange(it[0], it[1]) }
                         val modes = p.supportedFocusModes ?: emptyList()
                         if ("continuous-video" in modes) p.focusMode = "continuous-video"

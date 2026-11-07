@@ -230,7 +230,9 @@ class RemoteService : Service() {
             else -> "开始直播"
         }
         h.startLive(client, cmd, av, withAudio)
-        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", okText))
+        // lan：同一个 Wi-Fi 时 iPhone 直接连这些地址（更快），连不上就接着用云盘
+        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", okText)
+            .put("lan", JSONArray(h.lanAddresses())))
         Bus.push("$okText，WebSocket，${h.settings.fps} 帧/秒，${if (h.settings.codec == LiveSettings.H264) "H.264" else "JPEG"}")
     }
 
