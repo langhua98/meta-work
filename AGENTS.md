@@ -27,3 +27,7 @@
 - 协议跟 langhua98/xiaoju-remote（iPhone 被控端）的 AGENTS.md 保持一致：即时信箱 /api/agent/v1/relay 优先，文件信箱兜底。
 - 联网用 Conscrypt 2.5.2（最后一个支持 API 9+ 的版本）+ App 自带根证书 res/raw/roots.pem，因为 4.2 自带的 TLS 和根证书太旧。
 - 它的 workflow 只保留手动触发。
+
+云盘「软件包」（/软件包/，分享页 share.html#XrCiZRZM0WSwMdYiqyV3TA）：
+- 编好的新安装包传到这里（PUT /api/agent/v1/files?path=/软件包/<文件名>）。
+- 同一个软件传完新包后，把这个软件的旧包删掉（DELETE 只进回收站），文件夹里每个软件只留最新一版。
