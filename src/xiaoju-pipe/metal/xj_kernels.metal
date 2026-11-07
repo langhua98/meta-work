@@ -260,6 +260,97 @@ MV1_KERNEL(mv1_q4_K, T_Q4_K)
 MV1_KERNEL(mv1_q5_K, T_Q5_K)
 MV1_KERNEL(mv1_q6_K, T_Q6_K)
 
+// ---------- 多 token（预填充、一次验证几个字）专用：权重读一遍、解码一遍，给 T 个 token 用 ----------
+// 通用版 mv_* 先把 32 个元素解码进 float w[32]，A10 上寄存器不够（实测预填充每个 token 比生成还慢）。
+// 这里和 mv1_* 一样边解码边乘，解码出的 4 个权重马上乘给每个 token，累加器 acc[8] 留在寄存器里。
+
+template <int TYPE>
+static void mvb_impl(device const uchar *W, device const float *x, device float *y, constant xj_mv_args &a,
+                     uint3 tg, uint tid, threadgroup float *red) {
+    const uint grp = group_id(tg, a.grid_x);
+    const uint rl = tid / XJ_MV_LANES, lane = tid % XJ_MV_LANES;
+    const uint row = grp * XJ_MV_ROWS + rl;
+    const uint xs4 = a.x_stride / 4;   // 每个 token 的输入间隔（float4 个数）
+    float acc[XJ_MV_MAXT];
+    for (int t = 0; t < XJ_MV_MAXT; t++) acc[t] = 0;
+    if (row < a.N) {
+        device const uchar *r = W + (ulong)row * a.row_bytes;
+        if (TYPE == T_Q4_K || TYPE == T_Q5_K) {
+            const uint bs = TYPE == T_Q4_K ? 144 : 176;
+            for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) {
+                device const uchar *b = r + (p / 4) * bs;
+                const uint jp = p % 4;
+                float d = rdh(b), dmin = rdh(b + 2), s0, m0, s1, m1;
+                scale_min_k4(2 * jp, b + 4, s0, m0);
+                scale_min_k4(2 * jp + 1, b + 4, s1, m1);
+                const float d0 = d * s0, d1 = d * s1, n0 = dmin * m0, n1 = dmin * m1;
+                device const uchar4 *ql = (device const uchar4 *)(b + (TYPE == T_Q4_K ? 16 : 48) + 32 * jp);
+                device const uchar4 *qh = (device const uchar4 *)(b + 16);
+                device const float4 *xa = (device const float4 *)(x + p * 64), *xb = xa + 8;
+                for (uint i = 0; i < 8; i++) {
+                    uchar4 v = ql[i];
+                    uchar4 lo = v & uchar4(0xF), hi = v >> uchar4(4);
+                    if (TYPE == T_Q5_K) {
+                        uchar4 h = qh[i];
+                        lo += ((h >> uchar4(2 * jp)) & uchar4(1)) << uchar4(4);
+                        hi += ((h >> uchar4(2 * jp + 1)) & uchar4(1)) << uchar4(4);
+                    }
+                    const float4 wl = d0 * float4(lo) - n0, wh = d1 * float4(hi) - n1;
+                    for (uint t = 0; t < XJ_MV_MAXT; t++)
+                        if (t < a.T) acc[t] += dot(wl, xa[t * xs4 + i]) + dot(wh, xb[t * xs4 + i]);
+                }
+            }
+        } else {   // Q6_K：半个块
+            for (uint h = lane; h < a.K / 128; h += XJ_MV_LANES) {
+                device const uchar *b = r + (h / 2) * 210;
+                const uint n = h % 2;
+                device const uchar *ql = b + n * 64, *qh = b + 128 + n * 32;
+                device const char *sc = (device const char *)(b + 192 + n * 8);
+                const float d = rdh(b + 208);
+                device const float *xp = x + h * 128;
+                for (uint l = 0; l < 32; l++) {
+                    const uint hf = l / 16;
+                    const int a0 = ql[l], c0 = ql[l + 32], hb = qh[l];
+                    const float4 w4 = d * float4(float(sc[hf])     * float(int((a0 & 0xF) | ((hb & 3) << 4)) - 32),
+                                                 float(sc[2 + hf]) * float(int((c0 & 0xF) | (((hb >> 2) & 3) << 4)) - 32),
+                                                 float(sc[4 + hf]) * float(int((a0 >> 4) | (((hb >> 4) & 3) << 4)) - 32),
+                                                 float(sc[6 + hf]) * float(int((c0 >> 4) | (((hb >> 6) & 3) << 4)) - 32));
+                    for (uint t = 0; t < XJ_MV_MAXT; t++)
+                        if (t < a.T) {
+                            device const float *xt = xp + t * a.x_stride;
+                            acc[t] += w4.x * xt[l] + w4.y * xt[l + 32] + w4.z * xt[l + 64] + w4.w * xt[l + 96];
+                        }
+                }
+            }
+        }
+    }
+    for (uint t = 0; t < XJ_MV_MAXT; t++) red[(t * XJ_MV_ROWS + rl) * XJ_MV_LANES + lane] = acc[t];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = XJ_MV_LANES / 2; s > 0; s >>= 1) {
+        if (lane < s)
+            for (uint t = 0; t < a.T; t++) red[(t * XJ_MV_ROWS + rl) * XJ_MV_LANES + lane] += red[(t * XJ_MV_ROWS + rl) * XJ_MV_LANES + lane + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0 && row < a.N) {
+        for (uint t = 0; t < a.T; t++) {
+            float v = red[(t * XJ_MV_ROWS + rl) * XJ_MV_LANES];
+            device float *o = y + t * a.y_stride + row;
+            *o = a.add ? *o + v : v;
+        }
+    }
+}
+
+#define MVB_KERNEL(NAME, TYPE)                                                                   \
+kernel void NAME(device const uchar *W [[buffer(0)]], device const float *x [[buffer(1)]],      \
+                 device float *y [[buffer(2)]], constant xj_mv_args &a [[buffer(3)]],           \
+                 uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { \
+    threadgroup float red[XJ_MV_ROWS * XJ_MV_LANES * XJ_MV_MAXT];                                \
+    mvb_impl<TYPE>(W, x, y, a, tg, tid, red);                                                    \
+}
+MVB_KERNEL(mvb_q4_K, T_Q4_K)
+MVB_KERNEL(mvb_q5_K, T_Q5_K)
+MVB_KERNEL(mvb_q6_K, T_Q6_K)
+
 // ---------- 新芯片（A14 / Apple7 起）版：同样的算法，归约用 simd_sum ----------
 // 一个线程组 4 个 simdgroup，一个 simdgroup 算一行，不用线程组内存和栅栏。
 // A10 上建不了这些管线（没有 simdgroup 归约），xj_metal.m 只在 supportsFamily(Apple7) 时用。
