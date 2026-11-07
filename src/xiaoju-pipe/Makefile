@@ -4,7 +4,7 @@
 #   make e2e        用随机权重的小模型跑主机 + 从机、断线重连（要 python3 + numpy）
 CC      ?= cc
 CFLAGS  ?= -O3 -Wall -Wno-maybe-uninitialized
-CORE    := core/gguf.c core/xj_model.c core/xj_cpu.c core/xj_net.c core/xj_tok.c
+CORE    := core/gguf.c core/xj_model.c core/xj_cpu.c core/xj_net.c core/xj_tok.c core/xj_spec.c
 UNAME   := $(shell uname)
 ifeq ($(UNAME),Darwin)
   # macOS：带上 Metal 后端（和 iPhone 同一份内核），没有 OpenMP

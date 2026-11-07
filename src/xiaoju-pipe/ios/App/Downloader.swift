@@ -40,6 +40,25 @@ final class Downloader: ObservableObject {
         return covered(m, 0, plan.dataOff) && plan.ranges.allSatisfy { covered(m, $0.0, $0.1) }
     }
 
+    /// MTP 文件：文件头和 MTP 层都下好了没有
+    static func haveMTP(_ m: ModelSpec) -> Bool {
+        guard FileManager.default.fileExists(atPath: Paths.file(for: m).path),
+              let head = try? readHead(Paths.file(for: m)), let r = try? mtpPlan(head) else { return false }
+        return covered(m, 0, r.dataOff) && covered(m, r.lo, r.hi)
+    }
+
+    /// 带 MTP 的 GGUF 文件头 → MTP 层的字节范围
+    static func mtpPlan(_ head: Data) throws -> (lo: UInt64, hi: UInt64, dataOff: UInt64) {
+        var lo: UInt64 = 0, hi: UInt64 = 0, need: UInt64 = 0, dataOff: UInt64 = 0
+        var err = [CChar](repeating: 0, count: 256)
+        let n: Int32 = head.withUnsafeBytes { raw in
+            xjg_mtp_plan(raw.bindMemory(to: UInt8.self).baseAddress, UInt64(head.count), &lo, &hi, &need, &dataOff, &err, Int32(err.count))
+        }
+        if n == 0 && need > 0 { throw NeedMore(bytes: need) }
+        if n < 0 { throw XJError(cString(err)) }
+        return (lo, hi, dataOff)
+    }
+
     private static func readHead(_ url: URL) throws -> Data {
         let h = try FileHandle(forReadingFrom: url)
         defer { try? h.close() }
@@ -122,8 +141,8 @@ final class Downloader: ObservableObject {
         return (res.1 as? HTTPURLResponse)?.statusCode == 206
     }
 
-    /// 主机：layers = nil 下整个文件；从机：只下 [l0, l1)
-    func download(_ m: ModelSpec, layers: (Int, Int)?) async {
+    /// 主机：layers = nil 下整个文件；从机：只下 [l0, l1)；mtp：只下文件头和 MTP 层
+    func download(_ m: ModelSpec, layers: (Int, Int)?, mtp: Bool = false) async {
         cancelled = false
         await ui { self.progress = 0; self.error = ""; self.status = "读取模型结构……" }
         do {
@@ -131,14 +150,22 @@ final class Downloader: ObservableObject {
             let src = try await pickURL(m)
             await ui { self.status = "读取模型结构（\(src.host ?? "")）……" }
             var want: UInt64 = 16 << 20
-            var head = Data(), total: UInt64 = 0, plan: Plan
+            var head = Data(), total: UInt64 = 0
+            var todo: [(UInt64, UInt64)] = []
+            let zero: UInt64 = 0
             while true {
                 (head, total) = try await get(src, 0, want) { [weak self] n in self?.headStatus(src, n, want) }
-                do { plan = try Downloader.plan(head, layers?.0 ?? 0, layers?.1 ?? 1); break }
-                catch let e as NeedMore { want = max(e.bytes, want * 2) }
+                do {
+                    if mtp {
+                        let r = try Downloader.mtpPlan(head)
+                        todo = [(zero, r.dataOff), (r.lo, r.hi)]
+                    } else {
+                        let plan = try Downloader.plan(head, layers?.0 ?? 0, layers?.1 ?? 1)
+                        todo = layers == nil ? [(zero, total)] : [(zero, plan.dataOff)] + plan.ranges
+                    }
+                    break
+                } catch let e as NeedMore { want = max(e.bytes, want * 2) }
             }
-            let zero: UInt64 = 0
-            var todo: [(UInt64, UInt64)] = layers == nil ? [(zero, total)] : [(zero, plan.dataOff)] + plan.ranges
 
             // 2. 建（或复用）同样大小的文件
             let url = Paths.models.appendingPathComponent(m.file)

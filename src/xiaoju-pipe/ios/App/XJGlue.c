@@ -1,7 +1,7 @@
 // 小橘双机：Swift ↔ 推理核心的胶水（见 XJGlue.h）。
 #include "XJGlue.h"
 
-#include "../../core/xj_net.h"
+#include "../../core/xj_spec.h"
 #include "../../core/xj_tok.h"
 
 #include <arpa/inet.h>
@@ -46,6 +46,21 @@ int xjg_plan(const uint8_t *head, uint64_t len, int l0, int l1, uint64_t (*range
     int n = xj_model_ranges(m, l0, l1, false, ranges, max);
     xj_model_free(m);  // 只释放结构，head 是调用方的
     return n;
+}
+
+int xjg_mtp_plan(const uint8_t *head, uint64_t len, uint64_t *lo, uint64_t *hi, uint64_t *need, uint64_t *data_off,
+                 char *err, int errlen) {
+    *need = 0;
+    uint64_t more = 0;
+    gguf_file *g = gguf_parse_header(head, len, &more, err, (size_t)errlen);
+    if (!g) {
+        if (more) { *need = more; return 0; }
+        return -1;
+    }
+    *data_off = g->data_off;
+    int rc = xj_model_mtp_range(g, lo, hi, err, (size_t)errlen);
+    gguf_close(g);
+    return rc ? -1 : 1;
 }
 
 int xjg_model_info_of(const char *path, xjg_model_info *info, char *err, int errlen) {
@@ -136,8 +151,9 @@ void xjg_worker_free(void *p) {
 typedef struct {
     xj_model *m;
     xj_tok *tok;
-    xj_stage *a, *r, *b;
+    xj_stage *a, *r, *b, *mtp;
     xj_pipeline p;
+    xj_spec sp;
     float *logits;
     int32_t *buf;
     int n_ctx;
@@ -159,6 +175,8 @@ void xjg_host_free(void *p) {
     if (h->r) h->r->destroy(h->r);
     if (h->a) h->a->destroy(h->a);
     if (h->b) h->b->destroy(h->b);
+    if (h->mtp) h->mtp->destroy(h->mtp);
+    xj_spec_free(&h->sp);
     xj_pipeline_free(&h->p);
     xj_tok_free(h->tok);
     xj_model_free(h->m);
@@ -167,7 +185,7 @@ void xjg_host_free(void *p) {
 }
 
 void *xjg_host_new(const char *path, const char *worker_host, int port, uint32_t pin, int s1, int s2,
-                   int n_ctx, char *info, int infolen, char *err, int errlen) {
+                   int n_ctx, const char *mtp_path, int draft, char *info, int infolen, char *err, int errlen) {
     host_box *h = calloc(1, sizeof(*h));
     h->n_ctx = n_ctx;
     h->m = xj_model_load(path, err, (size_t)errlen);
@@ -192,6 +210,16 @@ void *xjg_host_new(const char *path, const char *worker_host, int port, uint32_t
         snprintf(info, infolen, "单机：%s 跑全部 %d 层", xjg_gpu_name(), L);
     }
     xj_pipeline_init(&h->p, h->m, h->a, h->r, h->b);
+    if (draft > 0 && mtp_path && mtp_path[0]) {
+        // MTP 头只在主机上算（一层 + 输出头），挂不上就不投机，照常能用
+        char e2[256];
+        if (xj_model_attach_mtp(h->m, mtp_path, e2, sizeof e2) == 0)
+            h->mtp = local_stage(h->m, L, L + 1, n_ctx, true, e2, sizeof e2);
+        size_t il = strlen(info);
+        if (h->mtp) snprintf(info + il, infolen - il, "\nMTP 投机解码：每步猜 %d 个字", draft);
+        else snprintf(info + il, infolen - il, "\nMTP 没挂上（%s），不投机", e2);
+    }
+    if (xj_spec_init(&h->sp, &h->p, h->mtp, draft)) { snprintf(err, errlen, "内存不够"); xjg_host_free(h); return NULL; }
     h->logits = malloc(sizeof(float) * h->m->hp.n_vocab);
     h->buf = malloc(sizeof(int32_t) * 16384);
     int32_t nl[4];
@@ -213,10 +241,13 @@ double xjg_host_ping(void *p) {
 int xjg_host_reset(void *p, char *err, int errlen) {
     host_box *h = p;
     h->npending = 0;
+    xj_spec_reset(&h->sp);
     return xj_pipeline_reset(&h->p, err, (size_t)errlen);
 }
 
 // top-k + top-p 采样；temperature <= 0 就取最大
+static int sample(const float *lg, int n, float temp);
+static int sample_cb(void *ctx, const float *lg, int n) { return sample(lg, n, *(const float *)ctx); }
 static int sample(const float *lg, int n, float temp) {
     int best = 0;
     for (int i = 1; i < n; i++) if (lg[i] > lg[best]) best = i;
@@ -290,26 +321,37 @@ int xjg_host_chat(void *p, const char *user, float temperature, int max_tokens,
 
     double t0 = now_s();
     h->p.t_local = h->p.t_remote = h->p.t_net = 0;
-    if (xj_pipeline_eval(&h->p, h->buf, n, h->logits, err, (size_t)errlen)) return -1;
+    if (xj_spec_feed(&h->sp, h->buf, n, err, (size_t)errlen)) return -1;
     st->prompt_tokens = n;
     st->prefill_s = now_s() - t0;
     h->p.t_local = h->p.t_remote = h->p.t_net = 0;
+    const long steps0 = h->sp.n_steps, drafted0 = h->sp.n_drafted, acc0 = h->sp.n_accepted;
+    const double draft0 = h->sp.t_draft_ms;
     double t1 = now_s();
     int produced = 0;
     bool stop = false;
     while (produced < max_tokens && !stop) {
-        int id = sample(h->logits, hp->n_vocab, temperature);
-        if ((uint32_t)id == hp->eot || (uint32_t)id == hp->eos) break;
-        char piece[256];
-        int pl = xj_tok_piece(h->tok, id, piece, sizeof piece);
-        if (emit(h, piece, pl, cb, ctx)) stop = true;
-        int32_t one = id;
-        if (xj_pipeline_eval(&h->p, &one, 1, h->logits, err, (size_t)errlen)) return -1;
-        produced++;
+        int32_t out[XJ_SPEC_MAXK + 1];
+        int k = xj_spec_next(&h->sp, sample_cb, &temperature, out, max_tokens - produced, err, (size_t)errlen);
+        if (k < 0) return -1;
+        bool end = false;
+        for (int i = 0; i < k && !stop; i++) {
+            if ((uint32_t)out[i] == hp->eot || (uint32_t)out[i] == hp->eos) { end = true; break; }
+            char piece[256];
+            int pl = xj_tok_piece(h->tok, out[i], piece, sizeof piece);
+            if (emit(h, piece, pl, cb, ctx)) stop = true;
+            produced++;
+        }
+        if (end) break;
     }
     // 回答收尾：把 <|im_end|>\n 也喂进去，下一句接着聊时上下文是完整的
+    // （用户按了停：最后一步多猜对的几个字已经在上下文里，这里不退回，影响不大）
     int32_t tail[2] = { (int32_t)hp->eot, h->nl };
-    if (xj_pipeline_eval(&h->p, tail, h->nl >= 0 ? 2 : 1, h->logits, err, (size_t)errlen)) return -1;
+    if (xj_spec_feed(&h->sp, tail, h->nl >= 0 ? 2 : 1, err, (size_t)errlen)) return -1;
+    st->spec_steps = (int)(h->sp.n_steps - steps0);
+    st->spec_drafted = (int)(h->sp.n_drafted - drafted0);
+    st->spec_accepted = (int)(h->sp.n_accepted - acc0);
+    if (st->spec_steps) st->draft_ms = (h->sp.t_draft_ms - draft0) / st->spec_steps;
     st->gen_tokens = produced;
     st->gen_s = now_s() - t1;
     if (produced) {

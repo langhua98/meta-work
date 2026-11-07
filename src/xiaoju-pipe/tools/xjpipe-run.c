@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
         int T = n - i < batch ? n - i : batch;
         for (int t = 0; t < T; t++) xj_embed(m, toks[i + t], x + (size_t)t * hp->n_embd);
         if (a->forward(a, x, T, err, sizeof err) || (b && b->forward(b, x, T, err, sizeof err))) { fprintf(stderr, "%s\n", err); return 1; }
-        if (i + T == n) head->logits(head, x + (size_t)(T - 1) * hp->n_embd, logits, err, sizeof err);
+        if (i + T == n) head->logits(head, x + (size_t)(T - 1) * hp->n_embd, 1, logits, err, sizeof err);
     }
     double t1 = now();
     { int id = argmax(logits, hp->n_vocab); fprintf(stderr, "预填充 %.2f 秒；第一个词 id=%d 分数=%.5f\n", t1 - t0, id, logits[id]); }
@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
         fwrite(piece, 1, pl, stdout); fflush(stdout);
         xj_embed(m, id, x);
         if (a->forward(a, x, 1, err, sizeof err) || (b && b->forward(b, x, 1, err, sizeof err))) { fprintf(stderr, "%s\n", err); return 1; }
-        head->logits(head, x, logits, err, sizeof err);
+        head->logits(head, x, 1, logits, err, sizeof err);
     }
     double t2 = now();
     printf("\n");

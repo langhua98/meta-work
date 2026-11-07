@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define XJ_PROTO_VERSION 1
+#define XJ_PROTO_VERSION 2   // 2：投机解码（FORWARD 带存档标记，位置往回退 = 回滚）
 #define XJ_DEFAULT_PORT  47321
 #define XJ_MAGIC 0x31504A58u  // "XJP1"
 
@@ -25,8 +25,9 @@ enum {
     XJ_MSG_ERROR, XJ_MSG_PING, XJ_MSG_PONG, XJ_MSG_BYE,
 };
 
-// FORWARD 的 want：从机回传哪些 token 的结果
-enum { XJ_WANT_ALL = 0, XJ_WANT_LAST = 1, XJ_WANT_NONE = 2 };
+// FORWARD 的 want：从机回传哪些 token 的结果。低 8 位是下面三种之一，再或上 XJ_WANT_KEEP：
+// 这批每个 token 之后的状态都留存档。下一条 FORWARD 的起始位置比从机当前位置小时，从机先退回那里（只能退到存档里）。
+enum { XJ_WANT_ALL = 0, XJ_WANT_LAST = 1, XJ_WANT_NONE = 2, XJ_WANT_KEEP = 0x100 };
 
 typedef struct {
     uint32_t version;
@@ -112,8 +113,14 @@ typedef struct {
 // 默认 reconnect_tries = 5；不想自动重连就在 init 之后改成 0
 int  xj_pipeline_init(xj_pipeline *p, const xj_model *m, xj_stage *a, xj_stage *r, xj_stage *b);
 // 喂一串 token（预填充或一个新词），最后一个 token 的 logits 写到 logits。
+// hid 不为空时，每个 token 过完最后一层（未过 output_norm）的隐藏向量写到 hid[n][n_embd]（MTP 要用）。
 // 从机断了会自动重连并重放之前的 token（见上面），重连不上才返回 -1。
-int  xj_pipeline_eval(xj_pipeline *p, const int32_t *tokens, int n, float *logits, char *err, size_t errlen);
+int  xj_pipeline_eval(xj_pipeline *p, const int32_t *tokens, int n, float *logits, float *hid, char *err, size_t errlen);
+// 投机解码的验证：n（≤ max_batch）个 token 一批过完整条流水线，每个 token 的 logits 都要（logits[n][n_vocab]），
+// 隐藏向量写到 hid[n][n_embd]；每段都给每个 token 留状态存档，之后可以用 xj_pipeline_rollback 退回。
+int  xj_pipeline_verify(xj_pipeline *p, const int32_t *tokens, int n, float *logits, float *hid, char *err, size_t errlen);
+// 退回到 n_past（猜错的字作废）。只能退到上一次 verify 的那批里。
+int  xj_pipeline_rollback(xj_pipeline *p, int n_past, char *err, size_t errlen);
 int  xj_pipeline_reset(xj_pipeline *p, char *err, size_t errlen);
 void xj_pipeline_free(xj_pipeline *p);
 
