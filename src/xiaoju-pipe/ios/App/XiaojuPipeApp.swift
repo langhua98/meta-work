@@ -19,10 +19,9 @@ struct RootView: View {
                 else { picker }
             }
             .toolbar {
-                if !role.isEmpty {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("换角色") { role = "" }
-                    }
+                // iOS 15 的 toolbar 里不能直接写 if，判断放到按钮里面
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !role.isEmpty { Button("换角色") { role = "" } }
                 }
             }
         }

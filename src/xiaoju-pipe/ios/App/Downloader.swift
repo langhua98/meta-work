@@ -90,7 +90,8 @@ final class Downloader: ObservableObject {
                 do { plan = try Downloader.plan(head, layers?.0 ?? 0, layers?.1 ?? 1); break }
                 catch let e as NeedMore { want = max(e.bytes, want * 2) }
             }
-            var todo: [(UInt64, UInt64)] = layers == nil ? [(0, total)] : [(0, plan.dataOff)] + plan.ranges
+            let zero: UInt64 = 0
+            var todo: [(UInt64, UInt64)] = layers == nil ? [(zero, total)] : [(zero, plan.dataOff)] + plan.ranges
 
             // 2. 建（或复用）同样大小的文件
             let url = Paths.models.appendingPathComponent(m.file)
