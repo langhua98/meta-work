@@ -51,9 +51,9 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `shell` | `cmd` | 在 App 沙盒里跑一条 shell（非 root，只有 App 自己的权限） |
 | `video` | `transport`=ws、`room`、`codec`=h264/jpeg、`lens`、`width`、`fps`、`quality`、`audio` | 实时画面（走云盘的直播通道） |
 | `video_set` | 同上加 `exposure`、`zoom`、`torch` | 直播 / 侦测中调相机 |
-| `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
-| `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram |
-| `events` | `limit`、`before` | 录好的事件（新的在前，带小图） |
+| `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`people`（只在认出人时提醒，0.12）、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
+| `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram；`objects` 是能认东西时用的模型（空 = 认不了） |
+| `events` | `limit`、`before` | 录好的事件（新的在前，带小图）；`labels` 是认出来在动的东西（「人×2、猫」） |
 | `event_get` | `name` | 取一段录像：备份过的给云盘路径，5 MB 以内直接放回执，大的先传到云盘 |
 | `event_delete` | `name` | 删手机上的一段（云盘备份不动） |
 
@@ -73,6 +73,19 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 - 推理用 ncnn（腾讯开源，BSD），C++ 代码在 `app/src/main/cpp/`。先跑 `scripts/build-ncnn-android.sh` 编好 ncnn
   （要 NDK r23c，最后一个支持 4.2 的），Gradle 自动找到 `/opt/ncnn/armv7`（或 `-Pncnn.dir=`）；找不到就不带 C++，测不了模型，别的照常。
 - 只编 32 位 ARM（armeabi-v7a）。模型权重全用 0，只量速度；认得准不准在电脑上用真权重测。
+
+### 认出动的是什么（0.12，C++）
+
+- 有动静时用 FastestDet（dog-qiuqiu，BSD 3-Clause，352×352，COCO 80 类）认一下，模型在 `assets/models/`（大约 0.5 MB），
+  C++ 在 `cpp/fastestdet.cpp`、`cpp/detector_jni.cpp`，Kotlin 在 `ObjectDetector.kt`。只用 1 个核、后台优先级，S4 上大约 90 毫秒一张。
+- 只在有动静时跑：新事件开始认一次，录的过程中每 1.5 秒再认一次（后进来的人）。
+- 只留会自己动的（人、车、动物），而且框里正好有格子变了；床、椅子、停着的车不算。
+- 认出来的写进提醒（「有动静：人×2」）和事件列表的 `labels`，截图和小图上框出来、写上名字。
+- `people: true` 时只在认出人时发提醒（别的动静照样录）；安装包没带 C++ 或者模型读不了，就照常提醒。
+- 没编 ncnn（找不到 `/opt/ncnn/armv7`）的安装包认不了东西，只有移动侦测，别的照常。
+  GitHub 的 workflow 会先编好 ncnn（缓存起来），编出来的安装包一定带 C++，不带就报错。
+- 认得对不对：`sh tests/detector/run.sh` 在电脑上用同一份 `fastestdet.cpp` 和模型认几张照片（宇航员、两个人、猫、咖啡杯），
+  BGR 和手机相机的 NV21 两条路都要认对，个数也要对（同一个人的全身框和半身框只算一个）。workflow 编安装包前也跑这个。
 
 ### 移动侦测（0.8）
 

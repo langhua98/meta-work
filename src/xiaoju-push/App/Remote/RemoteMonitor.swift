@@ -13,6 +13,7 @@ struct MonitorEvent: Identifiable {
     let video: Bool
     let uploaded: String
     let size: Int
+    let labels: String  // 认出来在动的是什么（「人×2、猫」），安卓 0.12+，认不出来是空
     let thumb: UIImage?
     var id: String { name }
 }
@@ -25,6 +26,7 @@ final class RemoteMonitor: ObservableObject {
     @Published var pre = 5
     @Published var post = 15
     @Published var notify = true
+    @Published var people = false             // 只在认出人时提醒（安卓 0.12+）
     @Published var cooldown = 5
     @Published var audio = true
     @Published var upload = true
@@ -38,6 +40,7 @@ final class RemoteMonitor: ObservableObject {
     @Published private(set) var statusLine = ""
     @Published private(set) var telegram = ""
     @Published private(set) var backup = ""
+    @Published private(set) var objects = ""   // 对方能认东西时是模型名（FastestDet），不能是空
     @Published private(set) var events: [MonitorEvent] = []
     @Published private(set) var moreEvents = false
 
@@ -82,7 +85,7 @@ final class RemoteMonitor: ObservableObject {
     func save(turnOn: Bool? = nil) async {
         inflight += 1; defer { inflight -= 1 }
         var cmd: [String: Any] = [
-            "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "cooldown": cooldown,
+            "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "people": people, "cooldown": cooldown,
             "audio": audio, "upload": upload, "lens": lens, "width": width,
             "regions": regions.map { [$0.minX, $0.minY, $0.width, $0.height] },
         ]
@@ -101,6 +104,7 @@ final class RemoteMonitor: ObservableObject {
             pre = (m["pre"] as? Int) ?? 5
             post = (m["post"] as? Int) ?? 15
             notify = (m["notify"] as? Bool) ?? true
+            people = (m["people"] as? Bool) ?? false
             cooldown = (m["cooldown"] as? Int) ?? 5
             audio = (m["audio"] as? Bool) ?? true
             upload = (m["upload"] as? Bool) ?? true
@@ -119,6 +123,7 @@ final class RemoteMonitor: ObservableObject {
         statusLine = parts.joined(separator: " · ")
         telegram = (st["telegram"] as? String) ?? ""
         backup = (st["backup"] as? String) ?? ""
+        objects = (st["objects"] as? String) ?? ""
         if let n = st["codec_note"] as? String, !n.isEmpty { note += "\n\(n)" }
     }
 
@@ -132,7 +137,8 @@ final class RemoteMonitor: ObservableObject {
             let at = Date(timeIntervalSince1970: ((o["at"] as? NSNumber)?.doubleValue ?? 0) / 1000)
             return MonitorEvent(name: (o["name"] as? String) ?? "", at: at, dur: (o["dur"] as? Int) ?? 0,
                                 motions: (o["motions"] as? Int) ?? 1, video: (o["video"] as? Bool) ?? false,
-                                uploaded: (o["uploaded"] as? String) ?? "", size: (o["size"] as? Int) ?? 0, thumb: thumb)
+                                uploaded: (o["uploaded"] as? String) ?? "", size: (o["size"] as? Int) ?? 0,
+                                labels: (o["labels"] as? String) ?? "", thumb: thumb)
         }
         events = more ? events + got : got
         moreEvents = got.count >= 30
@@ -207,7 +213,7 @@ struct RemoteMonitorView: View {
                 if !m.note.isEmpty { Text(m.note).font(.footnote).foregroundStyle(Theme.orangeText) }
                 if m.busy { ProgressView() }
             } footer: {
-                Text("检测在那台安卓手机上跑：有动静就录（包括动静前几秒），先存在那台手机上，再慢慢备份到云盘，同时发 Telegram 提醒。那台手机要一直插着电。")
+                Text("检测在那台安卓手机上跑：有动静就录（包括动静前几秒），先存在那台手机上，再慢慢备份到云盘，同时发 Telegram 提醒。安卓 0.12 以上还会认出动的是什么（人、猫、狗、车…），写在提醒和列表里，截图上框出来。那台手机要一直插着电。")
             }
             .listRowBackground(Theme.card)
 
@@ -223,7 +229,18 @@ struct RemoteMonitorView: View {
                 Stepper("动静停了再录 \(m.post) 秒", value: $m.post, in: 5...120, step: 5)
                 Toggle("录声音", isOn: $m.audio)
                 Toggle("Telegram 提醒（带截图）", isOn: $m.notify)
-                if m.notify { Stepper("两次提醒至少隔 \(m.cooldown) 分钟", value: $m.cooldown, in: 0...60) }
+                if m.notify {
+                    Toggle(isOn: $m.people) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("只在认出人时提醒")
+                            Text(m.objects.isEmpty
+                                 ? "那台手机的安装包不带识别模型（或版本低于 0.12），开了也照常提醒"
+                                 : "猫、狗、车这些照样录，只是不发提醒")
+                                .font(.footnote).foregroundStyle(Theme.muted)
+                        }
+                    }
+                    Stepper("两次提醒至少隔 \(m.cooldown) 分钟", value: $m.cooldown, in: 0...60)
+                }
                 Toggle("慢慢备份到云盘", isOn: $m.upload)
                 Picker("镜头", selection: $m.lens) {
                     Text("后置").tag("back")
@@ -286,6 +303,9 @@ struct RemoteMonitorView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(Self.time.string(from: e.at)).foregroundStyle(Theme.text)
+                if !e.labels.isEmpty {
+                    Text(e.labels).font(.footnote.weight(.semibold)).foregroundStyle(Theme.orangeText)
+                }
                 Text(e.video ? "\(e.dur / 1000) 秒 · 动了 \(e.motions) 次" : "只有截图")
                     .font(.footnote).foregroundStyle(Theme.muted)
             }

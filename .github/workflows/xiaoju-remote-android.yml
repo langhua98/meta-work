@@ -1,6 +1,9 @@
 name: Build 小橘遥控 apk
 
 # src/xiaoju-remote-android/：在 GitHub 的 Ubuntu 机器上用 Android SDK 编译，
+# 先编好 ncnn（NDK r23c，32 位 ARM），安装包才带 C++：模型测速、认出动的是什么（物体识别）。
+# 编之前在电脑上用同一份 C++ 和模型认几张照片（tests/detector），再跑 Kotlin 单元测试，都过了才编安装包。
+# 编好的 APK 每次都传到小橘云盘「软件包」（AGENTS.md 的约定）。
 # 用 debug 签名的 APK（能直接装，不用签名工具）发布到 Release「xiaoju-remote-android」（每次覆盖）。
 # 安卓已搁置（见 AGENTS.md），只留手动触发，推送不自动编译。
 on:
@@ -29,13 +32,51 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           # 别装已经废弃的 tools 包（v3 默认会装，新 runner 上会报 Failed to find package 'tools'）
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;23.2.8568313"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: CMake 3.28.3 and Ninja
+        # Gradle 里写死了 CMake 3.28.3（和本地一样），SDK 里没有这个版本，用 pip 装到 PATH 上；
+        # numpy、Pillow 是电脑上测物体识别时转照片用的
+        run: |
+          python -m pip install cmake==3.28.3 ninja numpy Pillow
+          cmake --version
+
+      - name: Cache ncnn
+        id: ncnn
+        uses: actions/cache@v4
+        with:
+          path: ~/ncnn
+          key: ncnn-20240820-${{ hashFiles('scripts/build-ncnn-android.sh', 'src/xiaoju-remote-android/tests/detector/run.sh') }}
+
+      - name: Build ncnn for Android (armeabi-v7a)
+        if: steps.ncnn.outputs.cache-hit != 'true'
+        # ANDROID_NDK 一定要指定：机器自带的 ANDROID_NDK 是最新的 NDK，跟 App 用的 r23c 链不到一起
+        run: ANDROID_NDK=$ANDROID_HOME/ndk/23.2.8568313 PREFIX=$HOME/ncnn/armv7 WORK=$RUNNER_TEMP/ncnn sh scripts/build-ncnn-android.sh
+
+      - name: Object detection test (desktop)
+        # 电脑版 ncnn 也放在 ~/ncnn 里一起缓存；源码用上一步下好的（缓存命中时 run.sh 自己下）
+        run: |
+          mkdir -p ~/ncnn/desktop
+          [ -d "$RUNNER_TEMP/ncnn/src" ] && export NCNN_SRC=$RUNNER_TEMP/ncnn/src
+          WORK=$HOME/ncnn/desktop sh src/xiaoju-remote-android/tests/detector/run.sh
+
+      - name: Unit tests
+        working-directory: src/xiaoju-remote-android
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build debug APK
         working-directory: src/xiaoju-remote-android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          NCNN_DIR=$HOME/ncnn/armv7 ./gradlew assembleDebug --no-daemon --stacktrace
+          # 一定要带上 C++（不然认不了东西）
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'lib/armeabi-v7a/libxjbench.so'
 
       - name: Rename APK
         working-directory: src/xiaoju-remote-android
@@ -58,3 +99,18 @@ jobs:
             --title "小橘遥控 APK" \
             --notes "被控端 APK。下载 xiaoju-remote-latest.apk 直接装（安卓设置里先允许「安装未知来源」）。" \
             src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
+
+      - name: Upload to 小橘云盘 /软件包/
+        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 xiaoju-remote-android- 包删掉
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: |
+          if [ -z "$XIAOJU_TOKEN" ]; then
+            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），APK 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑。"
+            exit 1
+          fi
+          ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
+          apk="xiaoju-remote-android-$ver-build${{ github.run_number }}.apk"
+          cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
+          python3 scripts/upload_package.py "$apk" xiaoju-remote-android-
+          echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"

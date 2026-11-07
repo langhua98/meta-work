@@ -20,14 +20,15 @@ class Notifier(private val cloud: Cloud, private val prefs: Prefs, private val d
     private val thread = Thread({ loop() }, "notify").apply { isDaemon = true; start() }
 
     /** 有新的事件。cooldownMin 分钟内发过就先攒着。 */
-    fun event(at: Long, jpg: ByteArray?, cooldownMin: Int) {
+    fun event(at: Long, jpg: ByteArray?, cooldownMin: Int, labels: String = "") {
         val now = System.currentTimeMillis()
         if (now - lastAt < cooldownMin * 60_000L) { skipped++; return }
         lastAt = now
         val t = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(at))
         val more = if (skipped > 0) "（这之前 $cooldownMin 分钟里还有 $skipped 次）" else ""
         skipped = 0
-        q.offer("🍊 小橘遥控 · $device\n$t 有动静$more" to jpg)
+        val what = if (labels.isEmpty()) "有动静" else "有动静：$labels"
+        q.offer("🍊 小橘遥控 · $device\n$t $what$more" to jpg)
     }
 
     /** 随便发一句（打开侦测时确认 Telegram 通不通）。 */

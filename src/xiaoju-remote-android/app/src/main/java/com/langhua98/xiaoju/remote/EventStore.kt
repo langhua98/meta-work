@@ -15,12 +15,15 @@ class EventInfo(
     var video: Boolean = false,   // 有没有视频（硬件编码用不了时只有截图）
     var uploaded: String = "",    // 备份到云盘的路径，空 = 还没备份
 ) {
+    /** 认出来在动的是什么（「人×2、猫」），没认出来是空 */
+    @Volatile var labels: String = ""
+
     fun toJson(): JSONObject = JSONObject().put("name", name).put("at", at).put("dur", durMs)
-        .put("motions", motions).put("video", video).put("uploaded", uploaded)
+        .put("motions", motions).put("video", video).put("uploaded", uploaded).put("labels", labels)
 
     companion object {
         fun fromJson(j: JSONObject) = EventInfo(j.getString("name"), j.optLong("at"), j.optLong("dur"),
-            j.optInt("motions", 1), j.optBoolean("video"), j.optString("uploaded"))
+            j.optInt("motions", 1), j.optBoolean("video"), j.optString("uploaded")).also { it.labels = j.optString("labels") }
     }
 }
 

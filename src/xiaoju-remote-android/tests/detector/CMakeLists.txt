@@ -1,0 +1,10 @@
+# 电脑上测物体识别：cmake -DNCNN_DIR=<装好的 ncnn> ..（ncnn 用电脑的编译器编，见 run.sh）
+cmake_minimum_required(VERSION 3.10)
+project(test_fastestdet CXX)
+set(CMAKE_CXX_STANDARD 11)
+set(ncnn_DIR ${NCNN_DIR}/lib/cmake/ncnn)
+find_package(ncnn REQUIRED)
+set(CPP ${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/cpp)
+add_executable(test_fastestdet test_fastestdet.cpp ${CPP}/fastestdet.cpp)
+target_include_directories(test_fastestdet PRIVATE ${CPP})
+target_link_libraries(test_fastestdet ncnn)
