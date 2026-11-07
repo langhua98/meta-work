@@ -17,6 +17,16 @@ struct RemoteControlView: View {
             }
             .listRowBackground(Theme.card)
 
+            Section("实时画面") {
+                NavigationLink {
+                    RemoteVideoView(target: target)
+                } label: {
+                    Label("看对方的实时画面", systemImage: "video").foregroundStyle(Theme.orangeText)
+                }
+                .disabled(target.isEmpty)
+            }
+            .listRowBackground(Theme.card)
+
             Section("发指令") {
                 btn("拍照（后摄）", "camera") { await control.send("photo", to: target, lens: "back") }
                 btn("拍照（前摄）", "camera.rotate") { await control.send("photo", to: target, lens: "front") }
