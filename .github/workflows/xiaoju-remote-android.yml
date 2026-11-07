@@ -84,21 +84,6 @@ jobs:
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk out/xiaoju-remote-latest.apk
 
-      - name: Upload to 小橘云盘 /软件包/
-        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 XiaojuRemote-Android- 包删掉
-        env:
-          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
-        run: |
-          if [ -z "$XIAOJU_TOKEN" ]; then
-            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），APK 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑。"
-            exit 1
-          fi
-          ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
-          apk="XiaojuRemote-Android-$ver-build${{ github.run_number }}.apk"
-          cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
-          python3 scripts/upload_package.py "$apk" XiaojuRemote-Android-
-          echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"
-
       - uses: actions/upload-artifact@v4
         with:
           name: xiaoju-remote-apk
@@ -114,3 +99,18 @@ jobs:
             --title "小橘遥控 APK" \
             --notes "被控端 APK。下载 xiaoju-remote-latest.apk 直接装（安卓设置里先允许「安装未知来源」）。" \
             src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
+
+      - name: Upload to 小橘云盘 /软件包/
+        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 XiaojuRemote-Android- 包删掉
+        env:
+          XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
+        run: |
+          if [ -z "$XIAOJU_TOKEN" ]; then
+            echo "::error::仓库没有 secret XIAOJU_TOKEN（有写权限的 xa_ 令牌），APK 没传到小橘云盘。到 Settings → Secrets and variables → Actions 里加上再重跑。"
+            exit 1
+          fi
+          ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
+          apk="XiaojuRemote-Android-$ver-build${{ github.run_number }}.apk"
+          cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
+          python3 scripts/upload_package.py "$apk" XiaojuRemote-Android-
+          echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"
