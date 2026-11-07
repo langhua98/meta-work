@@ -19,6 +19,28 @@ class StreamClientTest {
         assertEquals(0, StreamClient.frame(byteArrayOf(), -360)[1].toInt())
     }
 
+    @Test fun ulawRoundTrip() {
+        // μ-law 是有损的：误差大约是样本大小的 1/16（加一点底噪），不能更大
+        for (v in -32768..32767 step 37) {
+            val back = Ulaw.decode(Ulaw.encode(v))
+            val clipped = v.coerceIn(-32635, 32635)
+            val tol = maxOf(Math.abs(clipped) / 16, 8) + 4
+            assertTrue("$v -> $back", Math.abs(back - clipped) <= tol)
+        }
+        assertEquals(0, Ulaw.decode(Ulaw.encode(0)))
+        assertEquals(0xFF.toByte(), Ulaw.encode(0))   // G.711 里静音是 0xFF
+        assertTrue(Ulaw.decode(Ulaw.encode(32767)) > 30000)
+        assertTrue(Ulaw.decode(Ulaw.encode(-32768)) < -30000)
+    }
+
+    @Test fun timestampedFormats() {
+        val ts = 0x0102030405060708L
+        val v = StreamClient.frameTs(byteArrayOf(9), 90, ts)
+        assertEquals(listOf(3, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9), v.map { it.toInt() })
+        val a = StreamClient.audio(byteArrayOf(5, 6), StreamClient.AUDIO_ULAW_16K, ts)
+        assertEquals(listOf(2, 1, 1, 2, 3, 4, 5, 6, 7, 8, 5, 6), a.map { it.toInt() })
+    }
+
     @Test fun pubUrl() {
         assertEquals(
             "wss://x.hf.space/api/agent/v1/stream?role=pub&room=%E9%81%A5%E6%8E%A7%2FB%2F%E8%A7%86%E9%A2%91%2Fab",

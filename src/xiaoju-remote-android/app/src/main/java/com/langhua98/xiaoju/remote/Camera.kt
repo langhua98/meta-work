@@ -41,7 +41,7 @@ object Camera {
      * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
      */
     fun stream(front: Boolean, targetW: Int, quality: Int, fps: Int, durationMs: Long,
-               running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int) -> Unit) {
+               running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int, ts: Long) -> Unit) {
         if (LegacyCamera.getNumberOfCameras() == 0) throw IllegalStateException("这台手机没有摄像头")
         Torch.releaseLegacy()
         val ht = HandlerThread("vid").apply { start() }
@@ -78,11 +78,12 @@ object Camera {
                     val now = System.currentTimeMillis()
                     if (data == null || now - lastAt.get() < minGap || !running()) return@setPreviewCallback
                     lastAt.set(now)
+                    val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
                     try {
                         val out = ByteArrayOutputStream()
                         YuvImage(data, ImageFormat.NV21, fw, fh, null)
                             .compressToJpeg(Rect(0, 0, fw, fh), quality.coerceIn(20, 90), out)
-                        onFrame(out.toByteArray(), rot)
+                        onFrame(out.toByteArray(), rot, ts)
                     } catch (e: Throwable) { /* 丢这一帧 */ }
                 }
                 c.startPreview()

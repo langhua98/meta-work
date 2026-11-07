@@ -204,25 +204,40 @@ class RemoteService : Service() {
         val fps = cmd.optInt("fps", 10).coerceIn(1, 15)
         val width = cmd.optInt("width", 480).coerceIn(240, 960)
         val quality = cmd.optInt("quality", 50).coerceIn(20, 85)
+        // av=true：新查看器，画面带时间戳；audio=true：还要声音（要麦克风权限）
+        val av = cmd.optBoolean("av", false)
+        val wantAudio = av && cmd.optBoolean("audio", false)
+        val micOk = checkPermission(android.Manifest.permission.RECORD_AUDIO, Process.myPid(), Process.myUid()) == PackageManager.PERMISSION_GRANTED
+        val withAudio = wantAudio && micOk
         val client = StreamClient(Net.okHttp(), StreamClient.pubUrl(p.base, room), p.token)
         if (!client.connect()) {
             fail(if (client.error == "HTTP 404") "云盘服务端还没有直播通道（要先更新服务端）" else "连不上直播通道：${client.error}")
             return
         }
-        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", "开始直播"))
-        Bus.push("开始直播（WebSocket，$fps 帧/秒）")
-        notifyText("正在被远程使用：实时画面")
+        val okText = when {
+            withAudio -> "开始直播（画面 + 声音）"
+            wantAudio -> "开始直播（没有麦克风权限，只有画面）"
+            else -> "开始直播"
+        }
+        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", okText))
+        Bus.push("$okText，WebSocket，$fps 帧/秒")
+        notifyText(if (withAudio) "正在被远程使用：实时画面（含声音）" else "正在被远程使用：实时画面")
 
         live = Thread({
+            val mic = if (withAudio) AudioCapture { data, codec, ts ->
+                if (client.subs > 0) client.sendAudio(StreamClient.audio(data, codec, ts))
+            } else null
+            if (mic != null && !mic.start()) Bus.push("声音没开成：${mic.error}")
             try {
                 Camera.stream(front, width, quality, fps, LIVE_MAX_MS, running = {
                     running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000)
-                }) { jpg, rot ->
-                    if (client.subs > 0) client.send(StreamClient.frame(jpg, rot))
+                }) { jpg, rot, ts ->
+                    if (client.subs > 0) client.send(if (av) StreamClient.frameTs(jpg, rot, ts) else StreamClient.frame(jpg, rot))
                 }
             } catch (e: Exception) {
                 Bus.push("直播出错：${e.message}")
             } finally {
+                mic?.stop()
                 client.close()
                 Bus.push("直播结束：发出 ${client.sent} 帧，网络跟不上丢了 ${client.dropped} 帧")
                 notifyText("待命中，等指令")
@@ -245,7 +260,7 @@ class RemoteService : Service() {
         var seq = 0
         Bus.push("开始直播（$seconds 秒）")
         try {
-            Camera.stream(front, width, quality, fps, seconds * 1000L, running = { running }) { jpg, rot ->
+            Camera.stream(front, width, quality, fps, seconds * 1000L, running = { running }) { jpg, rot, _ ->
                 if (jpg.size > RemoteBox.INLINE_LIMIT) return@stream
                 try {
                     cloud.relaySend(box, JSONObject().put("seq", seq++).put("rot", rot)
