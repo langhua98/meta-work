@@ -33,6 +33,25 @@ struct RemoteControlView: View {
             }
             .listRowBackground(Theme.card)
 
+            Section {
+                HStack(spacing: 0) {
+                    gimbalPad("arrow.left", "左转 30°") { ["action": "turn", "yaw": -30] }
+                    gimbalPad("arrow.up", "抬头 15°") { ["action": "turn", "pitch": 15] }
+                    gimbalPad("scope", "回中") { ["action": "center"] }
+                    gimbalPad("arrow.down", "低头 15°") { ["action": "turn", "pitch": -15] }
+                    gimbalPad("arrow.right", "右转 30°") { ["action": "turn", "yaw": 30] }
+                }
+                btn("云台状态", "info.circle") { await control.send("gimbal", to: target, extra: ["action": "status"]) }
+                btn("连接云台", "link") { await control.send("gimbal", to: target, wait: 30, extra: ["action": "connect"]) }
+                btn("停", "stop.circle") { await control.send("gimbal", to: target, extra: ["action": "stop"]) }
+            } header: {
+                Text("云台（大疆 OM）")
+            } footer: {
+                Text("对方是夹在大疆 OM 云台上的 iPhone 小橘遥控（机器人模式那台）。转到角度是看着云台姿态一点点转的，一次要几秒，误差几度。方向以实测为准。")
+            }
+            .listRowBackground(Theme.card)
+            .disabled(target.isEmpty)
+
             Section("发指令") {
                 btn("拍照（后摄）", "camera") { await control.send("photo", to: target, lens: "back") }
                 btn("拍照（前摄）", "camera.rotate") { await control.send("photo", to: target, lens: "front") }
@@ -91,6 +110,22 @@ struct RemoteControlView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
+    }
+
+    /// 云台方向键：一个图标 + 小字，点一下发一条 gimbal 指令（闭环转动要几秒）
+    private func gimbalPad(_ icon: String, _ title: String, _ args: @escaping () -> [String: Any]) -> some View {
+        Button {
+            Haptics.tap()
+            Task { await control.send("gimbal", to: target, wait: 40, extra: args()) }
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 20, weight: .semibold))
+                Text(title).font(.system(size: 11))
+            }
+            .frame(maxWidth: .infinity)
+            .foregroundStyle(Theme.orangeText)
+        }
+        .buttonStyle(.borderless)
     }
 
     private func btn(_ title: String, _ icon: String, _ action: @escaping () async -> Void) -> some View {

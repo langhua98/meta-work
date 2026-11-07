@@ -19,6 +19,11 @@ B 设备装了「小橘遥控」App 并开着「待命」。
   遥控.py 测试机B location
   遥控.py 测试机B ring --seconds 5
   遥控.py 测试机B shell --cmd "ls -la /sdcard"
+  遥控.py 测试机B gimbal                       （大疆云台状态）
+  遥控.py 测试机B gimbal --go turn --yaw 30     （往右转 30°，闭环）
+  遥控.py 测试机B gimbal --go look --yaw -45 --pitch 10   （转到相对归位点的方向）
+  遥控.py 测试机B gimbal --go move --yaw 20 --ms 1000     （按 20°/s 转 1 秒）
+  遥控.py 测试机B gimbal --go center          （回到归位点）
 """
 import argparse, base64, json, os, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
@@ -75,13 +80,18 @@ def download(item_id):
 def main():
     ap = argparse.ArgumentParser(description="小橘遥控发送端")
     ap.add_argument("device", help="B 设备的名字，和 App 里填的一样")
-    ap.add_argument("action", choices=["info", "photo", "audio", "location", "torch", "vibrate", "ring", "shell"])
+    ap.add_argument("action", choices=["info", "photo", "audio", "location", "torch", "vibrate", "ring", "shell", "gimbal"])
     ap.add_argument("--lens", choices=["back", "front"], default="back")
     ap.add_argument("--seconds", type=int, default=5)
     ap.add_argument("--on", action="store_true")
     ap.add_argument("--off", action="store_true")
     ap.add_argument("--ms", type=int, default=800)
     ap.add_argument("--cmd", default="")
+    ap.add_argument("--go", default="status",
+                    choices=["status", "connect", "disconnect", "turn", "look", "move", "stop", "center", "home"],
+                    help="gimbal 的动作")
+    ap.add_argument("--yaw", type=float, help="gimbal：左右（度，或 move 时的度每秒）")
+    ap.add_argument("--pitch", type=float, help="gimbal：上下（度，或 move 时的度每秒）")
     ap.add_argument("--save", default=".", help="回执里的文件下载到哪个目录")
     ap.add_argument("--timeout", type=int, default=90, help="等回执最多多少秒")
     a = ap.parse_args()
@@ -103,6 +113,14 @@ def main():
         if not a.cmd:
             sys.exit("shell 要用 --cmd 给命令")
         cmd["cmd"] = a.cmd
+    elif a.action == "gimbal":
+        cmd["action"] = a.go
+        if a.yaw is not None:
+            cmd["yaw"] = a.yaw
+        if a.pitch is not None:
+            cmd["pitch"] = a.pitch
+        if a.go == "move":
+            cmd["ms"] = a.ms
 
     sent = time.time()
     via_relay = relay_send(f"遥控/{a.device}/收件", cmd)
