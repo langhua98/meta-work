@@ -139,7 +139,8 @@ kernel void xj_norm(device const float *in [[buffer(0)]], device float *out [[bu
                     device const float *w [[buffer(2)]], device const float *gate [[buffer(3)]],
                     constant xj_norm_args &a [[buffer(4)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                    uint ntg [[threads_per_threadgroup]]) {
+                    uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     threadgroup float red[256];
     const uint row = group_id(tg, a.grid_x);
     if (row >= a.rows) return;  // 整个线程组一起返回，不会卡在栅栏上
@@ -168,7 +169,8 @@ kernel void xj_norm(device const float *in [[buffer(0)]], device float *out [[bu
 // neox 旋转（原地）：每个线程转一对 (i, i + n_rot/2)
 kernel void xj_rope(device float *x [[buffer(0)]], constant xj_rope_args &a [[buffer(1)]],
                     uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                    uint ntg [[threads_per_threadgroup]]) {
+                    uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint gid = group_id(tg, a.grid_x) * ntg + tid;
     const uint half_rot = a.n_rot / 2;
     if (gid >= a.T * a.n_heads * half_rot) return;
@@ -186,7 +188,8 @@ kernel void xj_kv_store(device const float *k [[buffer(0)]], device const float 
                         device half *kc [[buffer(2)]], device half *vc [[buffer(3)]],
                         constant xj_kv_args &a [[buffer(4)]],
                         uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                        uint ntg [[threads_per_threadgroup]]) {
+                        uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint gid = group_id(tg, a.grid_x) * ntg + tid;
     const uint per = a.n_kv_heads * a.D;
     if (gid >= a.T * per) return;
@@ -199,7 +202,8 @@ kernel void xj_kv_store(device const float *k [[buffer(0)]], device const float 
 kernel void xj_attn_scores(device const float *q [[buffer(0)]], device const half *kc [[buffer(1)]],
                            device float *sc [[buffer(2)]], constant xj_attn_args &a [[buffer(3)]],
                            uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                           uint ntg [[threads_per_threadgroup]]) {
+                           uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint gid = group_id(tg, a.grid_x) * ntg + tid;
     const uint n_kv = a.pos0 + a.T;
     if (gid >= a.T * a.H * n_kv) return;
@@ -217,7 +221,8 @@ kernel void xj_attn_scores(device const float *q [[buffer(0)]], device const hal
 // softmax：一个线程组一行（长度 pos0+T）
 kernel void xj_softmax(device float *sc [[buffer(0)]], constant xj_attn_args &a [[buffer(1)]],
                        uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                       uint ntg [[threads_per_threadgroup]]) {
+                       uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     threadgroup float red[256];
     const uint row = group_id(tg, a.grid_x);
     if (row >= a.T * a.H) return;
@@ -250,7 +255,8 @@ kernel void xj_attn_out(device const float *sc [[buffer(0)]], device const half 
                         device const float *gate [[buffer(2)]], device float *out [[buffer(3)]],
                         constant xj_attn_args &a [[buffer(4)]],
                         uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                        uint ntg [[threads_per_threadgroup]]) {
+                        uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint gid = group_id(tg, a.grid_x) * ntg + tid;
     if (gid >= a.T * a.H * a.D) return;
     const uint d = gid % a.D, h = (gid / a.D) % a.H, t = gid / (a.D * a.H);
@@ -267,7 +273,8 @@ kernel void xj_attn_out(device const float *sc [[buffer(0)]], device const half 
 kernel void xj_conv_silu(device float *x [[buffer(0)]], device float *state [[buffer(1)]],
                          device const float *w [[buffer(2)]], constant xj_conv_args &a [[buffer(3)]],
                          uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                         uint ntg [[threads_per_threadgroup]]) {
+                         uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint c = group_id(tg, a.grid_x) * ntg + tid;
     if (c >= a.C) return;
     float st[8], wc[8];
@@ -325,7 +332,8 @@ kernel void xj_delta_net(device const float *qkv [[buffer(0)]], device const flo
 kernel void xj_swiglu(device float *g [[buffer(0)]], device const float *u [[buffer(1)]],
                       constant xj_ew_args &a [[buffer(2)]],
                       uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                      uint ntg [[threads_per_threadgroup]]) {
+                      uint3 ntg3 [[threads_per_threadgroup]]) {
+    const uint ntg = ntg3.x;
     const uint i = group_id(tg, a.grid_x) * ntg + tid;
     if (i >= a.n) return;
     g[i] = silu_f(g[i]) * u[i];
