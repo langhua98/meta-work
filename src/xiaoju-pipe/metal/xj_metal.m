@@ -477,7 +477,9 @@ static int metal_forward(xj_stage *s, float *x, int T, char *err, size_t errlen)
 static int metal_logits(xj_stage *s, const float *x, int T, float *logits, char *err, size_t errlen) {
     XJMetal *o = M(s);
     const xj_hparams *hp = &s->m->hp;
-    const uint32_t E = hp->n_embd, V = (uint32_t)s->m->output.ne1;
+    xj_w out = s->m->output;   // 同一块数据，只是行数可以少（按数据指针找缓冲）
+    if (s->head_rows > 0 && s->head_rows < out.ne1) out.ne1 = s->head_rows;
+    const uint32_t E = hp->n_embd, V = (uint32_t)out.ne1;
     if (!s->has_head) { snprintf(err, errlen, "这一段没有输出头"); return -1; }
     if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "输出头一次 %d 个 token 超过上限", T); return -1; }
     memcpy(o.x.contents, x, (size_t)T * E * 4);
@@ -486,7 +488,7 @@ static int metal_logits(xj_stage *s, const float *x, int T, float *logits, char 
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         view xv = { o.x, 0, E, 0 }, hv = { o.h, 0, E, 0 };
         enc_norm(enc, s, xv, hv, s->mtp ? &s->m->mtp_head_norm : &s->m->output_norm, NULL, E, (uint32_t)T, 1, 0);
-        enc_mv(enc, s, &s->m->output, o.h, 0, E, o.logits, 0, V, T, false);
+        enc_mv(enc, s, &out, o.h, 0, E, o.logits, 0, V, T, false);
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];

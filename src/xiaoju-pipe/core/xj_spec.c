@@ -76,6 +76,11 @@ int xj_spec_init(xj_spec *sp, xj_pipeline *p, xj_stage *mtp, int k) {
     sp->forced = -1;
     sp->main_post = env_flag("XJ_MTP_MAIN_POST", true);    // 和 vLLM 的 Qwen3-Next MTP 一样都过 norm，CI 上 0.8B 实测这样最准
     sp->chain_post = env_flag("XJ_MTP_CHAIN_POST", true);
+    // 猜字只看前多少个词（XJ_MTP_VOCAB，0 = 全部）
+    if (mtp) {
+        const char *v = getenv("XJ_MTP_VOCAB");
+        mtp->head_rows = v ? atoi(v) : XJ_SPEC_DRAFT_VOCAB;
+    }
     if (grow_hid(sp, p->max_batch)) return -1;
     return sp->last_logits && sp->logits && sp->mlog && sp->mx ? 0 : -1;
 }
@@ -159,7 +164,7 @@ int xj_spec_next(xj_spec *sp, xj_sample_fn sample, void *sctx, int32_t *out, int
     const int mtp_pos = sp->mtp->n_past + sp->n_ph;   // MTP 真实位置到这里为止，后面的是猜的
     if (mtp_flush(sp, sp->n_ph, true, err, errlen)) return -1;
     for (int j = 1; j <= k; j++) {
-        toks[j] = argmax(sp->mlog, V);
+        toks[j] = argmax(sp->mlog, sp->mtp->head_rows > 0 && sp->mtp->head_rows < V ? sp->mtp->head_rows : V);
         if (j == k) break;
         // sp->mx 第 0 行是上一次 MTP 的输出：拼成 [embedding(猜的字) ‖ 输出]
         memmove(sp->mx + E, sp->mx, sizeof(float) * E);

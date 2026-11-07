@@ -24,6 +24,9 @@ struct xj_stage {
     // 之后 rollback 能退回到这批里任意一个 token 之后（猜错的字作废）。forward 完自动清零。
     int keep;
     int ck_start, ck_T;  // 存档那一批的起点和长度
+    // 输出头只算前 head_rows 个词（0 = 全部）。MTP 猜字用：词表按 BPE 合并顺序排，越靠前越常用，
+    // 只看前几万个词，猜字时读的输出头少一大半（猜不到生僻词也没关系，主干验证时会纠正）
+    int head_rows;
 
     // x：T 个 token 的隐藏向量 [T][n_embd]，原地改成过完这些层之后的值。位置 n_past .. n_past+T-1。
     // MTP 段：输入 [T][2*n_embd]（embedding ‖ 隐藏向量），输出写在前 [T][n_embd]（未过 norm）。

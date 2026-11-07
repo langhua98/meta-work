@@ -286,7 +286,9 @@ static int cpu_logits(xj_stage *s, const float *x, int T, float *logits, char *e
     if (T < 1 || T > s->max_batch) { snprintf(err, errlen, "输出头一次 %d 个 token 超过上限", T); return -1; }
     const xj_w *nw = s->mtp ? &s->m->mtp_head_norm : &s->m->output_norm;
     for (int t = 0; t < T; t++) rmsnorm(im->h + (size_t)t * E, x + (size_t)t * E, F(nw), E, s->m->hp.eps);
-    matmul(im, &s->m->output, im->h, logits, T);
+    xj_w out = s->m->output;
+    if (s->head_rows > 0 && s->head_rows < out.ne1) out.ne1 = s->head_rows;
+    matmul(im, &out, im->h, logits, T);
     return 0;
 }
 

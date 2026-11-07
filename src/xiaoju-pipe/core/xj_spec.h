@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #define XJ_SPEC_MAXK 4
+#define XJ_SPEC_DRAFT_VOCAB 0   // 猜字默认看前多少个词（0 = 全部；CI 量过再定）
 
 // 采样：从 logits[n_vocab] 选一个字
 typedef int (*xj_sample_fn)(void *ctx, const float *logits, int n_vocab);
