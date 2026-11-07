@@ -8,7 +8,6 @@ import android.graphics.SurfaceTexture
 import android.graphics.YuvImage
 import android.hardware.Camera as LegacyCamera
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.atomic.AtomicLong
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
@@ -35,20 +34,27 @@ object Camera {
         return 0
     }
 
-    /** 旧接口（即时信箱的旧直播用）：参数固定、有时长。 */
+    /** 旧接口（即时信箱的旧直播用）：参数固定、有时长，一帧一张 JPEG。 */
     fun stream(front: Boolean, targetW: Int, quality: Int, fps: Int, durationMs: Long,
                running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int, ts: Long) -> Unit) {
         val end = System.currentTimeMillis() + durationMs
-        live(LiveSettings(front, targetW, quality, fps), { running() && System.currentTimeMillis() < end }, onFrame)
+        val out = ByteArrayOutputStream(64 * 1024)
+        live(LiveSettings(front, targetW, quality, fps), { running() && System.currentTimeMillis() < end }) { data, w, h, rot, ts ->
+            out.reset()
+            YuvImage(data, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), quality, out)
+            onFrame(out.toByteArray(), rot, ts)
+        }
     }
 
     /**
-     * 实时画面：连续从预览里抓帧，每帧压成小 JPEG 交给 onFrame。阻塞调用，直到 running 变 false。
-     * 用老相机的预览回调（NV21）+ YuvImage 压 JPEG，比反复 takePicture 快得多，4.2 也能跑。
+     * 实时画面：连续从预览里取帧（NV21），按 settings 的帧率交给 onFrame。阻塞调用，直到 running 变 false。
+     * 用老相机的预览回调，4.2 也能跑。预览缓冲区是固定的几块轮着用（不每帧新分配内存，老手机上不会因为回收内存一顿一顿）；
+     * onFrame 返回后这块缓冲区就还给相机了，要留数据得自己拷。
      * rot 是画面要顺时针旋转多少度才是正的，交给看的一端去转（省这台老手机的 CPU）。
-     * 直播中改 settings：镜头/清晰度会关掉相机重开，其他的当场生效。
+     * 直播中改 settings：镜头/清晰度/编码会关掉相机重开，其他的当场生效。
      */
-    fun live(s: LiveSettings, running: () -> Boolean, onFrame: (jpg: ByteArray, rot: Int, ts: Long) -> Unit) {
+    fun live(s: LiveSettings, running: () -> Boolean,
+             onFrame: (nv21: ByteArray, w: Int, h: Int, rot: Int, ts: Long) -> Unit) {
         if (LegacyCamera.getNumberOfCameras() == 0) throw IllegalStateException("这台手机没有摄像头")
         Torch.releaseLegacy()
         val ht = HandlerThread("vid").apply { start() }
@@ -61,7 +67,6 @@ object Camera {
                 var startErr: Throwable? = null
                 var cam: LegacyCamera? = null
                 var tex: SurfaceTexture? = null
-                val lastAt = AtomicLong(0L)
                 h.post {
                     try {
                         val id = findCamera(front)
@@ -69,31 +74,42 @@ object Camera {
                         cam = c
                         val rot = LegacyCamera.CameraInfo().also { LegacyCamera.getCameraInfo(id, it) }.orientation
                         val p = c.parameters
-                        val sz = p.supportedPreviewSizes
-                            .filter { it.width >= s.width }.minByOrNull { it.width }
-                            ?: p.supportedPreviewSizes.maxByOrNull { it.width }
-                        sz?.let { p.setPreviewSize(it.width, it.height) }
+                        val sz = LiveSettings.pickSize(p.supportedPreviewSizes.map { it.width to it.height },
+                            s.width, s.codec == LiveSettings.H264)
+                        sz?.let { p.setPreviewSize(it.first, it.second) }
                         p.previewFormat = ImageFormat.NV21
+                        // 预览帧率开到最高（暗的时候相机自己会降），抽帧才均匀
+                        p.supportedPreviewFpsRange?.maxWithOrNull(compareBy<IntArray>({ it[1] }, { -it[0] }))
+                            ?.let { p.setPreviewFpsRange(it[0], it[1]) }
                         val modes = p.supportedFocusModes ?: emptyList()
                         if ("continuous-video" in modes) p.focusMode = "continuous-video"
                         else if ("continuous-picture" in modes) p.focusMode = "continuous-picture"
-                        c.parameters = p
+                        try { c.parameters = p } catch (e: RuntimeException) {
+                            // 有的手机不接受这个帧率范围：去掉再试
+                            val q = c.parameters
+                            sz?.let { q.setPreviewSize(it.first, it.second) }
+                            q.previewFormat = ImageFormat.NV21
+                            c.parameters = q
+                        }
                         tweak(c, s, front)
                         val fw = c.parameters.previewSize.width
                         val fh = c.parameters.previewSize.height
                         val t = SurfaceTexture(20); tex = t
                         c.setPreviewTexture(t)
-                        c.setPreviewCallback { data, _ ->
+                        val size = fw * fh * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8
+                        repeat(3) { c.addCallbackBuffer(ByteArray(size)) }
+                        var nextAt = 0L
+                        c.setPreviewCallbackWithBuffer { data, camera ->
+                            if (data == null) return@setPreviewCallbackWithBuffer
                             val now = System.currentTimeMillis()
-                            if (data == null || now - lastAt.get() < 1000L / s.fps || !running()) return@setPreviewCallback
-                            lastAt.set(now)
-                            val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
-                            try {
-                                val out = ByteArrayOutputStream()
-                                YuvImage(data, ImageFormat.NV21, fw, fh, null)
-                                    .compressToJpeg(Rect(0, 0, fw, fh), s.quality, out)
-                                onFrame(out.toByteArray(), rot, ts)
-                            } catch (e: Throwable) { /* 丢这一帧 */ }
+                            val gap = 1000L / s.fps
+                            if (now >= nextAt && running()) {
+                                // 按节拍抽帧：平均下来正好是设的帧率（不会因为相机 30 帧/秒的间隔凑不齐而变少）
+                                nextAt = if (now - nextAt > gap) now + gap else nextAt + gap
+                                val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
+                                try { onFrame(data, fw, fh, rot, ts) } catch (e: Throwable) { /* 丢这一帧 */ }
+                            }
+                            camera.addCallbackBuffer(data)
                         }
                         c.startPreview()
                     } catch (e: Throwable) { startErr = e } finally { ready.countDown() }
@@ -112,7 +128,7 @@ object Camera {
                 }
                 // 关掉这台相机（换镜头/清晰度时接着开新的）
                 val closed = CountDownLatch(1)
-                h.post { runCatching { cam?.setPreviewCallback(null) }; cleanup(cam, tex); closed.countDown() }
+                h.post { runCatching { cam?.setPreviewCallbackWithBuffer(null) }; cleanup(cam, tex); closed.countDown() }
                 closed.await(3, TimeUnit.SECONDS)
             }
         } finally {

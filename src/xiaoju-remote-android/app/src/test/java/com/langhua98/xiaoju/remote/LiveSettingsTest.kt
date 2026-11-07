@@ -35,3 +35,37 @@ class LiveSettingsTest {
         assertEquals(-2, LiveSettings.exposureIndex(-1f, -2, 3))
     }
 }
+
+class LiveSettingsCodecTest {
+    private val s4 = listOf(1920 to 1080, 1440 to 1080, 1280 to 720, 1056 to 864, 960 to 720, 800 to 480,
+        720 to 480, 640 to 480, 352 to 288, 320 to 240, 176 to 144)
+
+    @Test fun pickSizeJpeg() {
+        org.junit.Assert.assertEquals(320 to 240, LiveSettings.pickSize(s4, 320, false))
+        org.junit.Assert.assertEquals(640 to 480, LiveSettings.pickSize(s4, 480, false))
+        org.junit.Assert.assertEquals(1920 to 1080, LiveSettings.pickSize(s4, 4000, false))
+    }
+
+    @Test fun pickSizeH264OnlyEncoderSafeSizes() {
+        org.junit.Assert.assertEquals(640 to 480, LiveSettings.pickSize(s4, 320, true))
+        org.junit.Assert.assertEquals(640 to 480, LiveSettings.pickSize(s4, 640, true))
+        org.junit.Assert.assertEquals(1280 to 720, LiveSettings.pickSize(s4, 960, true))
+        // 一个合适的都没有：按 JPEG 的选（之后 LiveVideo 会退回 JPEG）
+        org.junit.Assert.assertEquals(352 to 288, LiveSettings.pickSize(listOf(352 to 288, 176 to 144), 320, true))
+    }
+
+    @Test fun codecSwitchReopensCamera() {
+        val s = LiveSettings(false, 480, 50, 10)
+        org.junit.Assert.assertEquals(LiveSettings.JPEG, s.codec)
+        val v = s.version
+        s.apply(org.json.JSONObject().put("codec", "h264"))
+        org.junit.Assert.assertEquals(LiveSettings.H264, s.codec)
+        org.junit.Assert.assertEquals(v + 1, s.version)
+        s.apply(org.json.JSONObject().put("codec", "h264"))
+        org.junit.Assert.assertEquals(v + 1, s.version)          // 没变就不重开
+        s.fallbackToJpeg()
+        org.junit.Assert.assertEquals(LiveSettings.JPEG, s.codec)
+        org.junit.Assert.assertEquals(LiveSettings.H264, LiveSettings(false, 480, 50, 10, "h264").codec)
+        org.junit.Assert.assertEquals(LiveSettings.JPEG, LiveSettings(false, 480, 50, 10, "vp9").codec)
+    }
+}

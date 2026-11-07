@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit
  *   1 = 画面（旧查看器）：[1][角度/90][JPEG]
  *   3 = 画面带时间戳：   [3][角度/90][采集时间 8 字节，毫秒，大端][JPEG]
  *   2 = 声音：           [2][格式][采集时间 8 字节][数据]，格式 1 = μ-law 16 kHz 单声道，2 = μ-law 8 kHz
+ *   4 = H.264 画面：     [4][角度/90][采集时间 8 字节][标志，第 0 位 = 关键帧][Annex-B 数据，关键帧前面带 SPS/PPS]
  * 时间戳是被控端自己的单调时钟（System.nanoTime），只用来让看的一端把声音和画面排在同一条时间线上。
  */
 class StreamClient(private val client: OkHttpClient, private val url: String, private val token: String) {
@@ -33,6 +34,7 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
     @Volatile var dropped = 0        // 网络跟不上丢掉的帧
         private set
 
+    @Volatile private var needKey = true   // H.264：丢过帧，等关键帧
     @Volatile private var everWatched = false
     @Volatile private var zeroSince = 0L
     private var ws: WebSocket? = null
@@ -81,6 +83,23 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
         return ok
     }
 
+    /**
+     * 发一帧 H.264。普通帧要靠前面的帧才能解，不能随便丢：一旦丢了（积压超过 limit 字节、没人看），
+     * 后面的普通帧都不发，等下一个关键帧。返回 false = 没发（该要一个关键帧了）。
+     */
+    fun sendH264(msg: ByteArray, key: Boolean, limit: Long): Boolean {
+        val w = ws ?: return false
+        if (closed) return false
+        if (subs <= 0) { needKey = true; return false }
+        if (!key && needKey) { dropped++; return false }
+        if (w.queueSize() > (if (key) limit * 2 else limit) || !w.send(ByteString.of(msg, 0, msg.size))) {
+            needKey = true; dropped++; return false
+        }
+        needKey = false
+        sent++
+        return true
+    }
+
     /** 发一包声音。声音不能随便丢（会咔哒响），积压到 1 MB（网络很差了）才丢。 */
     fun sendAudio(msg: ByteArray): Boolean {
         val w = ws ?: return false
@@ -101,8 +120,8 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
     }
 
     companion object {
-        /** 发送队列最多积压多少字节，再多就丢帧（大约几帧的量） */
-        const val MAX_QUEUE = 256L * 1024
+        /** JPEG：发送队列最多积压多少字节，再多就丢帧（大约三四帧的量） */
+        const val MAX_QUEUE = 128L * 1024
         const val MAX_AUDIO_QUEUE = 1024L * 1024
         const val AUDIO_ULAW_16K = 1
         const val AUDIO_ULAW_8K = 2
@@ -117,6 +136,17 @@ class StreamClient(private val client: OkHttpClient, private val url: String, pr
             out[1] = (((rotation % 360 + 360) % 360) / 90).toByte()
             putLong(out, 2, ts)
             System.arraycopy(jpeg, 0, out, 10, jpeg.size)
+            return out
+        }
+
+        /** H.264：[4][角度/90][时间 8 字节][标志][Annex-B] */
+        fun h264(data: ByteArray, rotation: Int, ts: Long, key: Boolean): ByteArray {
+            val out = ByteArray(data.size + 11)
+            out[0] = 4
+            out[1] = (((rotation % 360 + 360) % 360) / 90).toByte()
+            putLong(out, 2, ts)
+            out[10] = if (key) 1 else 0
+            System.arraycopy(data, 0, out, 11, data.size)
             return out
         }
 

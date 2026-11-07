@@ -4,7 +4,7 @@ import Foundation
 // 实时画面的声音和音画同步。
 // 被控端给每帧画面、每包声音都打上它自己的采集时间（单调时钟，毫秒）。这边：
 //   1. 对表：offset ≈ 本机到达时间 − 对方采集时间，取最快到的那些包（网络偶尔变慢不算进去）；
-//   2. 播放时间 = 采集时间 + offset + 缓冲（300 ms，挡住网络抖动）；
+//   2. 播放时间 = 采集时间 + offset + 缓冲（挡住网络抖动；按最近的抖动自动调，网络稳时 0.1 秒上下）；
 //   3. 声音按播放时间排进播放器（正常时一包接一包无缝播，对不上了才重新对齐），画面到了播放时间才显示。
 // 两边用同一条时间线，所以声音和画面是对齐的。
 
@@ -14,18 +14,32 @@ enum LiveClock {
     static func hostTime(ms: Double) -> UInt64 { AVAudioTime.hostTime(forSeconds: ms / 1000) }
 }
 
-/// 两台手机的时间线。
+/// 两台手机的时间线。缓冲按最近 150 个包「比最快的晚了多少」的 95% 分位数来定：
+/// 网络抖得厉害马上加大（不然声音断断续续），稳下来再每秒减一点（减的时候声音丢一小包追上）。
 struct LiveTimeline {
-    let delay: Double                      // 缓冲，毫秒
+    private(set) var delay: Double         // 缓冲，毫秒
     private(set) var offset: Double?
+    private var late: [Double] = []
+    private var tunedAt = 0.0
+    static let minDelay = 80.0
+    static let maxDelay = 600.0
 
     init(delay: Double) { self.delay = delay }
 
     mutating func observe(senderMs: Double, arrivedMs: Double) {
         let v = arrivedMs - senderMs
-        guard let o = offset else { offset = v; return }
+        guard let o = offset else { offset = v; tunedAt = arrivedMs; return }
         // 更快到的包：立刻按它对表；更慢的：慢慢跟上（网络整体变慢、两边时钟有一点点漂移时用）
-        offset = v < o ? v : o + (v - o) * 0.01
+        let n = v < o ? v : o + (v - o) * 0.01
+        offset = n
+        late.append(max(0, v - n))
+        if late.count > 150 { late.removeFirst(late.count - 150) }
+        guard arrivedMs - tunedAt >= 1000, late.count >= 20 else { return }
+        tunedAt = arrivedMs
+        let sorted = late.sorted()
+        let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
+        let want = min(max(p95 + 40, Self.minDelay), Self.maxDelay)
+        delay = want > delay ? want : max(want, delay - 20)
     }
 
     func playout(_ senderMs: Double) -> Double? { offset.map { senderMs + $0 + delay } }
@@ -77,15 +91,20 @@ final class LiveAudio {
         let dur = Double(ulaw.count) / rate * 1000
         let now = LiveClock.nowMs()
         if at + dur < now - 50 { return }  // 早就过了播放时间，丢掉，免得越拖越晚
-        if let e = endMs, e > now, abs(e - at) <= 80 {
-            player.scheduleBuffer(buf, completionHandler: nil)  // 接着上一包无缝播
-            endMs = e + dur
-        } else {
-            // 第一包，或者断过、对不上了：按时间线重新对齐
-            let start = max(at, now + 5)
-            player.scheduleBuffer(buf, at: AVAudioTime(hostTime: LiveClock.hostTime(ms: start)), options: [], completionHandler: nil)
-            endMs = start + dur
+        if let e = endMs, e > now + 5 {
+            // 排着的声音还没播完：差不多接得上就无缝接着播；
+            // 排得比时间线晚太多（缓冲刚变小）就丢这一包追上——排进去的声音只会按顺序播，不能插队
+            if at < e - 60 { return }
+            if at <= e + 60 {
+                player.scheduleBuffer(buf, completionHandler: nil)
+                endMs = e + dur
+                return
+            }
         }
+        // 第一包、断过、或者缓冲刚变大：按时间线对齐（中间空出来的就是一小段静音）
+        let start = max(at, now + 5)
+        player.scheduleBuffer(buf, at: AVAudioTime(hostTime: LiveClock.hostTime(ms: start)), options: [], completionHandler: nil)
+        endMs = start + dur
     }
 
     func stop() {
