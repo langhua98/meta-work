@@ -1,87 +1,83 @@
 package com.langhua98.xiaoju.remote
 
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
+import java.net.URLEncoder
 
-class CloudError(msg: String) : Exception(msg)
-
-data class CloudItem(val id: String, val name: String, val type: String, val size: Long, val sha256: String?) {
+data class CloudItem(val id: String, val name: String, val type: String) {
     val isFolder get() = type == "folder"
 }
 
-/** 小橘云盘 agent 接口客户端（/api/agent/v1，Bearer xa_…）。 */
-class Cloud(private val base: String, private val token: String) {
+/**
+ * 小橘云盘 agent 接口（都在 /api/agent/v1 下，Bearer xa_…）。协议和 xiaoju-remote 仓库的 AGENTS.md 一致：
+ * 快路是即时信箱 /relay（长轮询），服务端太旧没有时退回文件信箱。
+ */
+class Cloud(base: String, private val token: String) {
+    private val api = base.trimEnd('/') + "/api/agent/v1"
 
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .build()
-
-    private fun bytes(req: Request): ByteArray {
-        http.newCall(req).execute().use { r ->
-            val body = r.body?.bytes() ?: ByteArray(0)
-            if (!r.isSuccessful) {
-                val msg = runCatching { JSONObject(String(body)).optString("message") }.getOrNull()
-                throw CloudError("云盘 ${r.code}${if (msg.isNullOrBlank()) "" else "：$msg"}")
-            }
-            return body
-        }
-    }
-
-    private fun get(path: String, query: Map<String, String> = emptyMap()): ByteArray {
-        val url = (base + path).toHttpUrl().newBuilder()
-            .apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }
-            .build()
-        return bytes(Request.Builder().url(url).header("Authorization", "Bearer $token").get().build())
-    }
+    private fun q(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
     fun me(): String {
-        val j = JSONObject(String(get("/api/agent/v1/me")))
-        return j.optJSONObject("agent")?.optString("name") ?: "已连接"
+        val j = JSONObject(String(Net.request("GET", "$api/me", token), Charsets.UTF_8))
+        return j.optString("name").ifBlank { j.optJSONObject("agent")?.optString("name").orEmpty() }.ifBlank { "已连接" }
     }
 
+    /** 列目录；目录不存在或出错时返回空。 */
     fun list(path: String): List<CloudItem> {
         val out = ArrayList<CloudItem>()
         var cursor: String? = null
-        do {
-            val q = hashMapOf("path" to path, "limit" to "1000")
-            cursor?.let { q["cursor"] = it }
-            val j = JSONObject(String(get("/api/agent/v1/items", q)))
-            // 路径不存在时云盘会报错，调用方当作空处理
-            val arr = j.optJSONArray("children")
-            if (arr != null) for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                out.add(CloudItem(o.optString("id"), o.optString("name"), o.optString("type"),
-                    o.optLong("size"), o.optString("sha256").ifBlank { null }))
-            }
-            // 最后一页云盘回 next_cursor: null；optString 会把 null 读成字符串 "null"，导致死循环，所以要先判 isNull
-            cursor = if (j.isNull("next_cursor")) null else j.optString("next_cursor").ifBlank { null }
-        } while (cursor != null)
+        try {
+            do {
+                var url = "$api/items?path=${q(path)}&limit=1000"
+                cursor?.let { url += "&cursor=${q(it)}" }
+                val j = JSONObject(String(Net.request("GET", url, token), Charsets.UTF_8))
+                val arr = j.optJSONArray("children")
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    out.add(CloudItem(o.optString("id"), o.optString("name"), o.optString("type")))
+                }
+                cursor = j.optString("next_cursor").ifBlank { null }.takeIf { it != "null" }
+            } while (cursor != null)
+        } catch (e: Exception) { /* 当空 */ }
         return out
     }
 
-    /** 列目录，目录不存在时返回空而不是抛错。 */
-    fun listOrEmpty(path: String): List<CloudItem> = runCatching { list(path) }.getOrDefault(emptyList())
+    fun download(id: String): ByteArray = Net.request("GET", "$api/items/$id/content", token)
 
-    fun download(id: String): ByteArray = get("/api/agent/v1/items/$id/content")
-
-    /** 上传。PUT /api/agent/v1/files?path=/… ，原始字节（同名不覆盖，云盘会改名“名字 (2)”）。 */
+    /** 上传。PUT /api/agent/v1/files?path=（不是根路径的 /files）。 */
     fun upload(path: String, data: ByteArray, contentType: String = "application/octet-stream") {
-        val url = (base + "/api/agent/v1/files").toHttpUrl().newBuilder()
-            .addQueryParameter("path", path).build()
-        val req = Request.Builder().url(url)
-            .header("Authorization", "Bearer $token")
-            .put(data.toRequestBody(contentType.toMediaTypeOrNull()))
-            .build()
-        bytes(req)
+        Net.request("PUT", "$api/files?path=${q(path)}", token, data, contentType)
     }
 
-    fun uploadText(path: String, text: String) =
-        upload(path, text.toByteArray(Charsets.UTF_8), "application/json; charset=utf-8")
+    // ---- 即时信箱 ----
+
+    /** 取走信箱里所有消息；没有就最多等 seconds 秒。 */
+    fun relayWait(box: String, seconds: Int = 25): List<JSONObject> {
+        val data = Net.request("GET", "$api/relay?box=${q(box)}&wait=$seconds", token,
+            readTimeoutMs = (seconds + 20) * 1000)
+        val arr = JSONObject(String(data, Charsets.UTF_8)).optJSONArray("messages") ?: JSONArray()
+        val out = ArrayList<JSONObject>()
+        for (i in 0 until arr.length()) arr.optJSONObject(i)?.optJSONObject("body")?.let { out.add(it) }
+        return out
+    }
+
+    fun relaySend(box: String, obj: JSONObject) {
+        Net.request("POST", "$api/relay?box=${q(box)}", token,
+            obj.toString().toByteArray(Charsets.UTF_8), "application/json")
+    }
+
+    companion object {
+        /** 服务端还没有即时信箱时是 404 / 405 / 501 */
+        fun relayMissing(e: Exception) = e is HttpError && e.code in setOf(404, 405, 501)
+    }
+}
+
+/** 信箱名，要和控制端、scripts/遥控.py 一致。 */
+object RemoteBox {
+    fun inbox(dev: String) = "遥控/$dev/收件"
+    fun receipt(dev: String, id: String) = "遥控/$dev/回执/$id"
+    /** 实时画面：被控端把一帧帧 JPEG 推到这里，控制端长轮询取最新一帧显示 */
+    fun video(dev: String) = "遥控/$dev/视频"
+    /** 回执里直接带的文件上限（base64 后要小于服务端单条 8 MB） */
+    const val INLINE_LIMIT = 5 shl 20
 }
