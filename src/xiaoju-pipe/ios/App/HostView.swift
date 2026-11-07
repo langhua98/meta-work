@@ -81,6 +81,28 @@ final class HostController: ObservableObject {
 
     var model: ModelSpec { ModelSpec.by(modelID) }
 
+    /// 连接前估一下本机要扛多少权重：全部层减去从机那几层（从 Bonjour 里读，读不到按默认 12–21），
+    /// 加输出头。embedding 只按需读用到的行，不算。
+    var memoryNote: String? {
+        guard let l = ModelLayout.read(Paths.file(for: model)) else { return nil }
+        let avail = Double(xjg_free_memory()) / 1048576
+        var need = l.mb(0, l.nLayer) + l.outMB
+        var how = "单机"
+        if !solo {
+            var a = 12, b = min(22, l.nLayer)
+            if let f = finder.found.first(where: { $0.host == workerIP }) {
+                let p = f.layers.split(separator: "-").compactMap { Int($0) }
+                if p.count == 2 { a = p[0]; b = p[1] + 1 }
+            }
+            need -= l.mb(a, b)
+            how = "从机算第 \(a)–\(b - 1) 层时"
+        }
+        var s = "\(how)本机大约要 \(need.mb) 权重"
+        if avail > 0 { s += "，现在可用 \(avail.mb)" }
+        if avail > 0 && need > avail * 0.9 { s += "。可能不够，让从机多分几层" }
+        return s
+    }
+
     func refresh() {
         let f = Paths.file(for: model)
         guard let l = ModelLayout.read(f) else { haveModel = false; return }
@@ -245,6 +267,7 @@ struct HostView: View {
                         .keyboardType(.URL).autocapitalization(.none).disableAutocorrection(true)
                     TextField("配对码（从机屏幕上）", text: $c.pin).keyboardType(.numberPad)
                 }
+                if let m = c.memoryNote { Text(m).font(.footnote).foregroundColor(.secondary) }
             }
 
             Section(header: Text("设置")) {

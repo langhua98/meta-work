@@ -15,6 +15,7 @@ typedef struct {
     int n_layer, n_embd;
     double layer_mb[128];       // 每层权重多少 MB
     double io_mb;               // embedding + 输出头
+    double out_mb;              // 输出头（和 embedding 共用时就是 embedding），主机算每个字都要整个读一遍
     uint64_t total_bytes;
 } xjg_model_info;
 

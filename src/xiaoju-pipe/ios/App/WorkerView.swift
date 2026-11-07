@@ -27,7 +27,7 @@ final class WorkerController: NSObject, ObservableObject, NetServiceDelegate {
         let d = UserDefaults.standard
         modelID = d.string(forKey: "w.model") ?? ModelSpec.q9b.id
         start = d.object(forKey: "w.start") as? Int ?? 12
-        count = d.object(forKey: "w.count") as? Int ?? 8
+        count = d.object(forKey: "w.count") as? Int ?? 10
         if d.object(forKey: "w.pin") == nil { d.set(Int.random(in: 1000...9999), forKey: "w.pin") }
         pin = UInt32(d.integer(forKey: "w.pin"))
         super.init()
@@ -162,7 +162,7 @@ struct WorkerView: View {
             }
 
             Section(header: Text("这台手机负责哪几层"),
-                    footer: Text("7 Plus 内存 3 GB，App 大约能用 1.5–2 GB。9B 建议 6–8 层（约 0.8–1 GB）；层数越多越省主机内存，但整体会慢一点。")) {
+                    footer: Text("7 Plus 内存 3 GB，App 大约能用 1.5–2 GB。9B 默认 10 层（第 12–21 层，约 1.3 GB），15 Pro Max 只剩约 3.4 GB；7 Plus 崩了就减到 8 层，主机崩了就再加 1–2 层。")) {
                 if let l = c.layout {
                     Stepper("从第 \(c.start) 层开始", value: $c.start, in: 0...max(0, l.nLayer - c.count))
                     Stepper("一共 \(c.count) 层（到第 \(c.l1 - 1) 层）", value: $c.count, in: 1...max(1, l.nLayer - c.start))
