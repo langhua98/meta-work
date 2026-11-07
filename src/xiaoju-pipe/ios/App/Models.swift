@@ -60,12 +60,13 @@ struct ModelLayout {
     }
 
     init(_ info: xjg_model_info) {
-        nLayer = Int(info.n_layer)
+        let n = Int(info.n_layer)
         var arr: [Double] = []
         withUnsafeBytes(of: info.layer_mb) { raw in
             let p = raw.bindMemory(to: Double.self)
-            for i in 0..<min(nLayer, 128) { arr.append(p[i]) }
+            for i in 0..<min(n, 128) { arr.append(p[i]) }
         }
+        nLayer = n
         layerMB = arr
         ioMB = info.io_mb
     }
