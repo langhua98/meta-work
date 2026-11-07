@@ -23,6 +23,7 @@ typedef struct { uint64_t file_off; uint32_t buf; uint64_t off; } wmap;
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *wbufs;
 @property(nonatomic, strong) NSMutableArray<id<MTLBuffer>> *kc, *vc, *conv, *ssm;  // 每层一个（没用的放占位）
 @property(nonatomic, strong) id<MTLBuffer> x, h, A, B, C, D, G, SC, logits, dummy;
+@property(nonatomic) BOOL simd;   // 能用 mvs_*（simd_sum 版矩阵乘）
 @end
 @implementation XJMetal
 @end
@@ -171,7 +172,11 @@ static void enc_mv(id<MTLComputeCommandEncoder> enc, xj_stage *s, const xj_w *w,
         // XJ_MV_GENERIC=1：生成阶段也用通用内核（xjpipe-check 对比速度用）
         static int generic = -1;
         if (generic < 0) generic = getenv("XJ_MV_GENERIC") != NULL;
-        [enc setComputePipelineState:P(o, mv_name(w->type, a.T == 1 && !generic))];
+        const char *nm = mv_name(w->type, a.T == 1 && !generic);
+        // 新芯片上 Q4_K / Q5_K / Q6_K 用 simd_sum 版（XJ_MV_NOSIMD=1 关掉）
+        if (a.T == 1 && !generic && o.simd && (w->type == XJ_Q4_K || w->type == XJ_Q5_K || w->type == XJ_Q6_K))
+            nm = w->type == XJ_Q4_K ? "mvs_q4_K" : w->type == XJ_Q5_K ? "mvs_q5_K" : "mvs_q6_K";
+        [enc setComputePipelineState:P(o, nm)];
         a.grid_x = gx_of(groups);
         [enc setBuffer:x offset:(xoff + (size_t)t0 * xs) * 4 atIndex:1];
         [enc setBuffer:y offset:(yoff + (size_t)t0 * ys) * 4 atIndex:2];
@@ -441,6 +446,18 @@ xj_stage *xj_metal_stage_new(const xj_model *m, int l0, int l1, int n_ctx, int m
         o.pso[@(names[i])] = p;
     }
     if (o.pso[@"xj_delta_net"].maxTotalThreadsPerThreadgroup < (NSUInteger)hp->s_k) { snprintf(err, errlen, "delta_net 线程组太小"); return NULL; }
+    // 新芯片：simd_sum 版矩阵乘。A10（7 Plus）不支持，建不起来就照旧用 mv1_*
+    if (!getenv("XJ_MV_NOSIMD") && ([dev supportsFamily:MTLGPUFamilyApple7] || [dev supportsFamily:MTLGPUFamilyMac2])) {
+        BOOL ok = YES;
+        for (NSString *nm in @[ @"mvs_q4_K", @"mvs_q5_K", @"mvs_q6_K" ]) {
+            id<MTLFunction> f = [lib newFunctionWithName:nm];
+            id<MTLComputePipelineState> p = f ? [dev newComputePipelineStateWithFunction:f error:nil] : nil;
+            if (!p || p.threadExecutionWidth != XJ_MV_LANES || p.maxTotalThreadsPerThreadgroup < XJ_MV_ROWS * XJ_MV_LANES) { ok = NO; break; }
+            o.pso[nm] = p;
+        }
+        o.simd = ok;
+        if (ok) g_device_name = [dev.name stringByAppendingString:@"（simd 内核）"];
+    }
 
     xj_stage *s = calloc(1, sizeof(*s));
     metal_impl *im = calloc(1, sizeof(*im));

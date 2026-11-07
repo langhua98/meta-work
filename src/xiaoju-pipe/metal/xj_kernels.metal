@@ -258,6 +258,42 @@ MV1_KERNEL(mv1_q4_K, T_Q4_K)
 MV1_KERNEL(mv1_q5_K, T_Q5_K)
 MV1_KERNEL(mv1_q6_K, T_Q6_K)
 
+// ---------- 新芯片（A14 / Apple7 起）版：同样的算法，归约用 simd_sum ----------
+// 一个线程组 4 个 simdgroup，一个 simdgroup 算一行，不用线程组内存和栅栏。
+// A10 上建不了这些管线（没有 simdgroup 归约），xj_metal.m 只在 supportsFamily(Apple7) 时用。
+template <int TYPE>
+static void mvs_impl(device const uchar *W, device const float *x, device float *y, constant xj_mv_args &a,
+                     uint3 tg, uint tid) {
+    const uint grp = group_id(tg, a.grid_x);
+    const uint rl = tid / XJ_MV_LANES, lane = tid % XJ_MV_LANES;
+    const uint row = grp * XJ_MV_ROWS + rl;
+    if (row >= a.N) return;   // 整个 simdgroup 一起退出，不影响别的行
+    device const uchar *r = W + (ulong)row * a.row_bytes;
+    float acc = 0;
+    if (TYPE == T_Q4_K) {
+        for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q4k_pair(r, p, x);
+    } else if (TYPE == T_Q5_K) {
+        for (uint p = lane; p < a.K / 64; p += XJ_MV_LANES) acc += q5k_pair(r, p, x);
+    } else {
+        for (uint h = lane; h < a.K / 128; h += XJ_MV_LANES) acc += q6k_half(r, h, x);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        device float *o = y + row;
+        *o = a.add ? *o + acc : acc;
+    }
+}
+
+#define MVS_KERNEL(NAME, TYPE)                                                                   \
+kernel void NAME(device const uchar *W [[buffer(0)]], device const float *x [[buffer(1)]],      \
+                 device float *y [[buffer(2)]], constant xj_mv_args &a [[buffer(3)]],           \
+                 uint3 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { \
+    mvs_impl<TYPE>(W, x, y, a, tg, tid);                                                         \
+}
+MVS_KERNEL(mvs_q4_K, T_Q4_K)
+MVS_KERNEL(mvs_q5_K, T_Q5_K)
+MVS_KERNEL(mvs_q6_K, T_Q6_K)
+
 // 归一化：一个线程组（256 线程）一行。in 和 out 可以是同一个缓冲。
 kernel void xj_norm(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
                     device const float *w [[buffer(2)]], device const float *gate [[buffer(3)]],
