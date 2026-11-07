@@ -35,6 +35,10 @@ class RemoteService : Service() {
     private var worker: Thread? = null
     private var wake: PowerManager.WakeLock? = null
 
+    // 直播在单独的线程里跑，指令循环照常收指令。新的直播指令会先停掉旧的直播。
+    @Volatile private var live: Thread? = null
+    private val liveStop = java.util.concurrent.atomic.AtomicBoolean(false)
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -54,6 +58,7 @@ class RemoteService : Service() {
     private fun stopAll() {
         running = false
         Bus.running = false
+        liveStop.set(true)
         worker?.interrupt(); worker = null
         runCatching { wake?.release() }; wake = null
         Torch.releaseLegacy()
@@ -142,7 +147,16 @@ class RemoteService : Service() {
         Bus.push("执行：$action")
         notifyText("正在被远程使用：${label(action)}")
 
-        if (action == "video") { streamVideo(cloud, cmd, device, viaRelay, id, ::reply); return }
+        if (action == "video") {
+            if (cmd.optString("transport") == "ws") startLive(cmd, device, id, ::reply)
+            else streamVideo(cloud, cmd, device, viaRelay, id, ::reply)
+            return
+        }
+        if (live?.isAlive == true && action in setOf("photo", "torch")) {
+            reply(JSONObject().put("id", id).put("ok", false).put("text", "正在直播，相机被占用了，先停止看画面"))
+            notifyText("正在被远程使用：实时画面")
+            return
+        }
 
         val result = Commands.run(this, cmd)
 
@@ -164,6 +178,56 @@ class RemoteService : Service() {
             .put("text", result.text).put("files", files).put("at", at))
         Bus.push("完成：$action — ${result.text.lineSequence().firstOrNull().orEmpty()}")
         notifyText("待命中，等指令")
+    }
+
+    /**
+     * 实时画面（新）：WebSocket 长连接推流到服务端的直播通道，不限时长，看的人都走了就停。
+     * 相机回调里只管把帧交给 OkHttp 的发送队列，队列积压就丢帧，相机不会被网络卡住。
+     * 回执马上回：连上了回「开始直播」，连不上回原因（看的一端据此提示）。
+     */
+    private fun startLive(cmd: JSONObject, device: String, id: String, reply: (JSONObject) -> Unit) {
+        fun fail(text: String) {
+            reply(JSONObject().put("id", id).put("do", "video").put("ok", false).put("text", text))
+            notifyText("待命中，等指令")
+        }
+        val room = cmd.optString("room")
+        if (room.isBlank() || room.toByteArray(Charsets.UTF_8).size > 200) { fail("直播指令缺少房间名"); return }
+        if (checkPermission(android.Manifest.permission.CAMERA, Process.myPid(), Process.myUid()) != PackageManager.PERMISSION_GRANTED) {
+            fail("没有相机权限"); return
+        }
+        // 先停掉正在进行的直播（比如看的一端刚关又开）
+        live?.let { old -> liveStop.set(true); runCatching { old.join(5000) } }
+        liveStop.set(false)
+
+        val p = Prefs(this)
+        val front = cmd.optString("lens") == "front"
+        val fps = cmd.optInt("fps", 10).coerceIn(1, 15)
+        val width = cmd.optInt("width", 480).coerceIn(240, 960)
+        val quality = cmd.optInt("quality", 50).coerceIn(20, 85)
+        val client = StreamClient(Net.okHttp(), StreamClient.pubUrl(p.base, room), p.token)
+        if (!client.connect()) {
+            fail(if (client.error == "HTTP 404") "云盘服务端还没有直播通道（要先更新服务端）" else "连不上直播通道：${client.error}")
+            return
+        }
+        reply(JSONObject().put("id", id).put("do", "video").put("ok", true).put("text", "开始直播"))
+        Bus.push("开始直播（WebSocket，$fps 帧/秒）")
+        notifyText("正在被远程使用：实时画面")
+
+        live = Thread({
+            try {
+                Camera.stream(front, width, quality, fps, LIVE_MAX_MS, running = {
+                    running && !liveStop.get() && !client.closed && !client.nobodyWatching(20_000, 8_000)
+                }) { jpg, rot ->
+                    if (client.subs > 0) client.send(StreamClient.frame(jpg, rot))
+                }
+            } catch (e: Exception) {
+                Bus.push("直播出错：${e.message}")
+            } finally {
+                client.close()
+                Bus.push("直播结束：发出 ${client.sent} 帧，网络跟不上丢了 ${client.dropped} 帧")
+                notifyText("待命中，等指令")
+            }
+        }, "live").apply { start() }
     }
 
     /** 实时画面：连续抓帧推到视频信箱。只走即时信箱（文件信箱太慢，撑不起视频）。 */
@@ -232,6 +296,8 @@ class RemoteService : Service() {
 
     companion object {
         const val NOTIF_ID = 42
+        /** 一次直播最长多久（服务端也会在 4 小时断开） */
+        const val LIVE_MAX_MS = 4L * 60 * 60 * 1000
         const val ACTION_STOP = "stop"
         const val CHANNEL = "xiaoju-remote"
         private const val FLAG_IMMUTABLE = 0x04000000

@@ -8,7 +8,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
-import java.security.cert.X509Certificate
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
@@ -23,6 +22,8 @@ class HttpError(val code: Int, msg: String) : Exception(msg)
  */
 object Net {
     @Volatile private var factory: SSLSocketFactory? = null
+    @Volatile private var trust: X509TrustManager? = null
+    @Volatile private var ok: okhttp3.OkHttpClient? = null
 
     fun init(ctx: Context) {
         if (factory != null) return
@@ -42,7 +43,26 @@ object Net {
         val tm = tmf.trustManagers.first { it is X509TrustManager } as X509TrustManager
         val ssl = SSLContext.getInstance("TLS", provider)
         ssl.init(null, arrayOf(tm), null)
+        trust = tm
         factory = ssl.socketFactory
+    }
+
+    /**
+     * 直播用的 WebSocket 客户端（OkHttp 3.12，支持 Android 2.3+），TLS 同样走 Conscrypt + 自带根证书。
+     * 读超时关掉（长连接可能很久没消息），靠每 20 秒一次心跳发现断线。
+     */
+    @Synchronized fun okHttp(): okhttp3.OkHttpClient {
+        ok?.let { return it }
+        val f = factory ?: throw IllegalStateException("Net 还没初始化")
+        val c = okhttp3.OkHttpClient.Builder()
+            .sslSocketFactory(f, trust!!)
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .pingInterval(20, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        ok = c
+        return c
     }
 
     /** 发一个请求，返回响应体。非 2xx 抛 HttpError。 */

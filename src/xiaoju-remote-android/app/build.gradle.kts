@@ -12,8 +12,8 @@ android {
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
         multiDexEnabled = true
     }
 
@@ -46,4 +46,8 @@ dependencies {
     implementation("org.conscrypt:conscrypt-android:2.5.2")
     // API 21 以下方法数超 64K 时要用
     implementation("androidx.multidex:multidex:2.0.1")
+    // 直播用的 WebSocket：OkHttp 3.12 是官方留给老安卓的分支（支持 Android 2.3+）
+    implementation("com.squareup.okhttp3:okhttp:3.12.13")
+
+    testImplementation("junit:junit:4.13.2")
 }

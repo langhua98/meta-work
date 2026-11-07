@@ -51,7 +51,7 @@ object Camera {
         var cam: LegacyCamera? = null
         var tex: SurfaceTexture? = null
         var fw = 0; var fh = 0; var rot = 0
-        val minGap = 1000L / fps.coerceIn(1, 10)
+        val minGap = 1000L / fps.coerceIn(1, 15)
         val lastAt = AtomicLong(0L)
 
         h.post {
