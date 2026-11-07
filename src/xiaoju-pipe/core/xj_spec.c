@@ -74,8 +74,8 @@ int xj_spec_init(xj_spec *sp, xj_pipeline *p, xj_stage *mtp, int k) {
     const int mb = mtp && mtp->max_batch > p->max_batch ? mtp->max_batch : p->max_batch;
     sp->mx = malloc(sizeof(float) * 2 * E * mb);
     sp->forced = -1;
-    sp->main_post = env_flag("XJ_MTP_MAIN_POST", false);
-    sp->chain_post = env_flag("XJ_MTP_CHAIN_POST", false);
+    sp->main_post = env_flag("XJ_MTP_MAIN_POST", true);    // 和 vLLM 的 Qwen3-Next MTP 一样都过 norm，CI 上 0.8B 实测这样最准
+    sp->chain_post = env_flag("XJ_MTP_CHAIN_POST", true);
     if (grow_hid(sp, p->max_batch)) return -1;
     return sp->last_logits && sp->logits && sp->mlog && sp->mx ? 0 : -1;
 }

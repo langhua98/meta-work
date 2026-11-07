@@ -80,7 +80,7 @@ final class HostController: ObservableObject {
         workerIP = d.string(forKey: "h.ip") ?? ""
         pin = d.string(forKey: "h.pin") ?? ""
         useMTP = d.object(forKey: "h.mtp") as? Bool ?? true
-        draft = d.object(forKey: "h.draft") as? Int ?? 3
+        draft = d.object(forKey: "h.draft") as? Int ?? 2
         bags.append(downloader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
         bags.append(mtpDownloader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
         bags.append(finder.objectWillChange.sink { [weak self] in self?.objectWillChange.send() })
