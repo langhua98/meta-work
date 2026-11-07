@@ -161,6 +161,14 @@ class RemoteService : Service() {
             adjustLive(cmd, action, id, ::reply)
             return
         }
+        if (action == "bench") {
+            // 模型测速：大约一分钟，跑完回一段报告
+            val text = ModelBench(this, h).run { Bus.push(it) }
+            Bus.push(text.lineSequence().firstOrNull().orEmpty())
+            reply(JSONObject().put("id", id).put("do", action).put("ok", true).put("text", text))
+            restoreText()
+            return
+        }
         if (action in setOf("monitor", "monitor_status", "events", "event_get", "event_delete")) {
             monitorCommand(cloud, cmd, action, id, viaRelay, ::reply)
             return
@@ -357,7 +365,7 @@ class RemoteService : Service() {
 
     private fun label(a: String) = mapOf("photo" to "拍照", "audio" to "录音", "location" to "定位",
         "torch" to "手电筒", "vibrate" to "震动", "ring" to "响铃", "info" to "设备信息", "shell" to "命令", "video" to "实时画面", "video_set" to "调实时画面",
-        "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像")[a] ?: a
+        "monitor" to "移动侦测设置", "monitor_status" to "移动侦测状态", "events" to "看录像列表", "event_get" to "取录像", "event_delete" to "删录像", "bench" to "模型测速")[a] ?: a
 
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (e: InterruptedException) { } }
     private fun post(r: () -> Unit) { Handler(Looper.getMainLooper()).post(r) }

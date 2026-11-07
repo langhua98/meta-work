@@ -341,6 +341,7 @@ class CameraHub(
                 val limit = maxOf(24L * 1024, encRate / 8L * 3 / 10)
                 var dropped = false
                 for (s in sinks) if (!s.sendH264(msg, key, limit) && s.watchers > 0) dropped = true
+                if (!dropped) framesOut.incrementAndGet()
                 if (dropped) onDrop()
             }
         }
@@ -348,6 +349,16 @@ class CameraHub(
     }
 
     @Volatile private var encRate = 500_000
+
+    /** 实时画面发出去的帧数（测速时看跑模型会不会拖慢直播） */
+    private val framesOut = java.util.concurrent.atomic.AtomicInteger()
+
+    /** 量 windowMs 毫秒里实时画面每秒发出几帧（阻塞）。 */
+    fun framesPerSecond(windowMs: Long): Double {
+        val a = framesOut.get()
+        Thread.sleep(windowMs)
+        return (framesOut.get() - a) * 1000.0 / windowMs
+    }
 
     /** 丢了帧：要一个关键帧；5 秒里丢了 3 次以上就把码率降到 70%（最低 30%）。 */
     private fun onDrop() {
@@ -386,6 +397,7 @@ class CameraHub(
             val b = jpg.toByteArray()
             val msg = if (l.av) StreamClient.frameTs(b, r, ts) else StreamClient.frame(b, r)
             for (s in sinks) s.send(msg)
+            framesOut.incrementAndGet()
         } catch (e: Throwable) { /* 丢这一帧 */ }
     }
 

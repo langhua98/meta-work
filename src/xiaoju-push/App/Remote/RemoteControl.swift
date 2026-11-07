@@ -21,7 +21,7 @@ final class RemoteControl: ObservableObject {
     }
 
     func send(_ action: String, to target: String,
-              lens: String? = nil, seconds: Int? = nil, on: Bool? = nil) async {
+              lens: String? = nil, seconds: Int? = nil, on: Bool? = nil, wait: TimeInterval = 90) async {
         let s = Store.shared
         let dev = target.trimmingCharacters(in: .whitespaces)
         guard !dev.isEmpty else { log("先填要控制的设备名"); return }
@@ -63,8 +63,8 @@ final class RemoteControl: ObservableObject {
         }
         let sentAt = Date()
 
-        // 等回执（最多 90 秒）
-        let deadline = Date().addingTimeInterval(90)
+        // 等回执（一般最多 90 秒；模型测速要一分多钟）
+        let deadline = Date().addingTimeInterval(wait)
         while Date() < deadline {
             var r: [String: Any]?
             if viaRelay {

@@ -3,18 +3,41 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// 模型推理库 ncnn（C++，先用 scripts/build-ncnn-android.sh 编好）。找不到就不编 C++ 部分，App 照常能用，只是测不了模型。
+val ncnnDir = (findProperty("ncnn.dir") as String?) ?: System.getenv("NCNN_DIR") ?: "/opt/ncnn/armv7"
+val withNcnn = file("$ncnnDir/lib/cmake/ncnn/ncnnConfig.cmake").exists()
+
 android {
     namespace = "com.langhua98.xiaoju.remote"
     compileSdk = 35
+    // r23 是最后一个还能编给 Android 4.1～4.3 的 NDK
+    ndkVersion = "23.2.8568313"
 
     defaultConfig {
         applicationId = "com.langhua98.xiaoju.remote"
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.9"
+        versionCode = 10
+        versionName = "0.10"
         multiDexEnabled = true
+        if (withNcnn) {
+            // S4 是 32 位 ARM；只编这一种，安装包小一点
+            ndk { abiFilters += "armeabi-v7a" }
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf("-DNCNN_DIR=$ncnnDir", "-DANDROID_STL=c++_static", "-DANDROID_ARM_NEON=ON")
+                }
+            }
+        }
+    }
+    if (withNcnn) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.28.3"
+            }
+        }
     }
 
     buildTypes {

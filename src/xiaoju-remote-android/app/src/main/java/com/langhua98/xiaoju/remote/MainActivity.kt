@@ -40,6 +40,15 @@ class MainActivity : Activity() {
 
         findViewById<Button>(R.id.perms).setOnClickListener { requestPerms() }
         toggle.setOnClickListener { onToggle() }
+        findViewById<Button>(R.id.bench).setOnClickListener { b ->
+            b.isEnabled = false
+            Bus.push("开始测模型速度，大约 1 分钟，测的时候手机会有点热…")
+            Thread({
+                val text = ModelBench(applicationContext, null).run { Bus.push(it) }
+                text.lineSequence().last().let { Bus.push(it) }
+                runOnUiThread { b.isEnabled = true }
+            }, "bench").start()
+        }
 
         Bus.onLog = { lines -> log.text = lines.takeLast(80).joinToString("\n"); refresh() }
         log.text = Bus.snapshot().takeLast(80).joinToString("\n")
