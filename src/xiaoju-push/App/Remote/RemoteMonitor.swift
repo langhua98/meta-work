@@ -32,6 +32,7 @@ final class RemoteMonitor: ObservableObject {
     @Published var upload = true
     @Published var lens = "back"
     @Published var width = 640
+    @Published var eco = true                 // 省电侦测（安卓 0.14+）
 
     @Published private(set) var loaded = false
     @Published private(set) var inflight = 0   // 几条指令在等回执（可以同时好几条）
@@ -86,7 +87,7 @@ final class RemoteMonitor: ObservableObject {
         inflight += 1; defer { inflight -= 1 }
         var cmd: [String: Any] = [
             "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "people": people, "cooldown": cooldown,
-            "audio": audio, "upload": upload, "lens": lens, "width": width,
+            "audio": audio, "upload": upload, "lens": lens, "width": width, "eco": eco,
             "regions": regions.map { [$0.minX, $0.minY, $0.width, $0.height] },
         ]
         cmd["on"] = turnOn ?? on
@@ -110,12 +111,18 @@ final class RemoteMonitor: ObservableObject {
             upload = (m["upload"] as? Bool) ?? true
             lens = (m["lens"] as? String) ?? "back"
             width = (m["width"] as? Int) ?? 640
+            eco = (m["eco"] as? Bool) ?? true
             regions = ((m["regions"] as? [[Double]]) ?? []).compactMap { a in
                 a.count == 4 ? CGRect(x: a[0], y: a[1], width: a[2], height: a[3]) : nil
             }
         }
         var parts: [String] = []
-        if (st["recording"] as? Bool) == true { parts.append("正在录") }
+        switch (st["stage"] as? String) ?? "" {
+        case "watch": parts.append("省电守望中")
+        case "record": parts.append((st["recording"] as? Bool) == true ? "正在录" : "开着编码器（不省电）")
+        default: if (st["recording"] as? Bool) == true { parts.append("正在录") }
+        }
+        if let ma = st["current_ma"] as? Int, ma > 0 { parts.append("电流约 \(ma) mA") }
         parts.append("今天 \((st["today"] as? Int) ?? 0) 段")
         parts.append("手机上共 \((st["events"] as? Int) ?? 0) 段（\((st["storage_mb"] as? Int) ?? 0) MB，还剩 \((st["free_mb"] as? Int) ?? 0) MB）")
         if let p = st["pending"] as? Int, p > 0 { parts.append("\(p) 段等着备份") }
@@ -225,7 +232,16 @@ struct RemoteMonitorView: View {
                 Button { editingRegions = true } label: {
                     Label(m.regions.isEmpty ? "只看画面的一部分…（现在看整个画面）" : "只看 \(m.regions.count) 个区域…", systemImage: "viewfinder")
                 }
-                Stepper("动静前录 \(m.pre) 秒", value: $m.pre, in: 0...10)
+                Toggle(isOn: $m.eco) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("省电侦测")
+                        Text(m.eco
+                             ? "没动静时相机每秒只看 4 帧、不录像，有动静才开始录（动静前只留几张画面，最多 3 秒）。安卓 0.14 以上。"
+                             : "编码器一直开着，能录到动静前 \(m.pre) 秒，但费电得多，要一直插着电。")
+                            .font(.footnote).foregroundStyle(Theme.muted)
+                    }
+                }
+                Stepper(m.eco ? "动静前留 \(min(m.pre, 3)) 秒画面" : "动静前录 \(m.pre) 秒", value: $m.pre, in: 0...10)
                 Stepper("动静停了再录 \(m.post) 秒", value: $m.post, in: 5...120, step: 5)
                 Toggle("录声音", isOn: $m.audio)
                 Toggle("Telegram 提醒（带截图）", isOn: $m.notify)

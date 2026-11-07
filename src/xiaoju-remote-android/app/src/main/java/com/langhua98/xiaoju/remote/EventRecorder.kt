@@ -78,7 +78,8 @@ class EventRecorder(
         if (active) { seg?.let { it.motions++ }; return false }
         active = true
         // 从动静前 preMs 之前最近的关键帧开始；内存里留的不够就从最早的关键帧开始
-        val keys = ring.indices.filter { ring[it].video && ring[it].key }
+        // 太旧的不要（省电侦测时编码器停过，内存里可能还剩上一次的画面）
+        val keys = ring.indices.filter { ring[it].video && ring[it].key && ring[it].ts >= ts - preMs - 3_000 }
         val from = keys.lastOrNull { ring[it].ts <= ts - preMs } ?: keys.firstOrNull()
         val p = from?.let { MovWriter.params(ring[it].data) }
         if (from != null && p != null) startSeg(ring.subList(from, ring.size).toList(), p)
@@ -87,6 +88,12 @@ class EventRecorder(
             waitKey = true
         }
         return true
+    }
+
+    /** 省电侦测回到守望（编码器关了）：内存里留的旧画面、声音都不要了。 */
+    @Synchronized fun dropBuffered() {
+        if (active) return
+        ring.clear(); ringBytes = 0
     }
 
     /** 定时调：画面停了（相机关了、编码器坏了）也要按时结束。 */

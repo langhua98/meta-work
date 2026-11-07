@@ -105,6 +105,43 @@ class EventRecorderTest {
         assertEquals(closed.size, closed.map { it.name }.toSet().size)
     }
 
+    /**
+     * 省电侦测（0.14）：录完一段后编码器关掉（守望），过一阵又有动静：内存里上一段的旧画面不能拿来当「动静前」，
+     * 要等编码器重新开、先喂进来的那几帧（时间比动静早）开始录。
+     */
+    @Test fun ecoRestartsFromPreRollFramesNotStaleOnes() {
+        assumeTrue(hasFfmpeg())
+        val dir = Files.createTempDirectory("ev").toFile()
+        val au = gop(dir)
+        val store = EventStore(File(dir, "events"))
+        val c = Clock()
+        val r = EventRecorder(store, clock = { c.t }, wall = { 1_700_000_000_000L + c.t })
+        r.preMs = 2_000; r.postMs = 2_000
+        val closed = ArrayList<EventInfo>()
+        r.onClosed = { closed += it }
+        // 第一次：3 秒有动静，录到 5 秒
+        feed(r, c, au, 0, 6_000, setOf(3_000L))
+        assertEquals(1, closed.size)
+        // 守望：编码器关了，6 到 20 秒没有画面（这里故意不调 dropBuffered，看「太旧的不要」能不能挡住）
+        c.t = 20_000
+        assertTrue(r.motion(20_000))
+        assertFalse("内存里只有 6 秒以前的旧画面，不能拿来用", r.current!!.video)
+        // 编码器重开：先喂守望时留的 18～20 秒的帧（第一帧是关键帧），再接着录
+        feed(r, c, au, 18_000, 26_000)
+        assertEquals(2, closed.size)
+        val e = closed[1]
+        assertTrue(e.video)
+        val n = frames(store.mov(e.name))
+        // 18 秒到 22 秒（动静后 2 秒）：大约 40 帧
+        assertTrue("frames $n", n in 38..42)
+        assertEquals("", run("ffmpeg", "-hide_banner", "-v", "error", "-i", store.mov(e.name).path, "-f", "null", "-").trim())
+        // 回到守望时清掉内存
+        r.dropBuffered()
+        c.t = 40_000
+        assertTrue(r.motion(40_000))
+        assertFalse(r.current!!.video)
+    }
+
     @Test fun withoutVideoOnlySnapshotEvent() {
         val dir = Files.createTempDirectory("ev").toFile()
         val store = EventStore(File(dir, "events"))

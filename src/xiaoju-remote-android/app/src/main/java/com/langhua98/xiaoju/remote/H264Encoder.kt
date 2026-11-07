@@ -56,10 +56,10 @@ class H264Encoder(
         drain = Thread({ drainLoop() }, "h264-out").apply { start() }
     }
 
-    /** 塞一帧 NV21。编码器忙（没有空的输入缓冲区）就丢这一帧，返回 false。 */
-    fun feed(nv21: ByteArray, tsMs: Long): Boolean {
+    /** 塞一帧 NV21。编码器忙（等 waitUs 微秒还没有空的输入缓冲区）就丢这一帧，返回 false。 */
+    fun feed(nv21: ByteArray, tsMs: Long, waitUs: Long = 0): Boolean {
         if (!running) return false
-        val i = codec.dequeueInputBuffer(0)
+        val i = codec.dequeueInputBuffer(waitUs)
         if (i < 0) return false
         if (semiPlanar) H264.nv21ToNv12(nv21, yuv, width, height) else H264.nv21ToI420(nv21, yuv, width, height)
         val b = inputs[i]

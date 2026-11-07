@@ -6,7 +6,8 @@ import org.json.JSONObject
  * 直播中可以随时调的设置（观看端发 video_set 指令改）。
  * - 前后镜头、清晰度、编码（h264 / jpeg）：要关掉相机重开（version 加 1），直播连接不断；
  * - 画质、帧率：每一帧都重新读；
- * - 亮度（曝光补偿）、变焦、手电：在正开着的相机上设一下（tweak 加 1）。
+ * - 亮度（曝光补偿）、变焦、手电：在正开着的相机上设一下（tweak 加 1）；
+ * - 守望（省电侦测、没动静时）：传感器换到最低帧率档、每秒只要 WATCH_FPS 帧（profile 加 1，不重开相机）。
  */
 class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: String = JPEG) {
     @Volatile var front = front; private set
@@ -20,6 +21,11 @@ class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: St
     @Volatile var torch = false
     @Volatile var version = 0; private set
     @Volatile var tweak = 0; private set
+    /** 省电侦测「守望」中（没动静）：相机能多慢就多慢 */
+    @Volatile var watch = false; private set
+    @Volatile var profile = 0; private set
+    /** 现在每秒要几帧（守望时只要 WATCH_FPS 帧，相机驱动里多出来的帧不拷给我们） */
+    val frameFps: Int get() = if (watch) WATCH_FPS else fps
     /** 最近一次在相机上设参数时，这台手机不支持的项（给回执用） */
     @Volatile var unsupported = ""
     /** 硬件 H.264 用不了、退回 JPEG 的原因（给回执用） */
@@ -50,22 +56,39 @@ class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: St
         return changed
     }
 
+    /** 进 / 出「守望」（变了才加 profile，相机在开着的时候换帧率档）。 */
+    fun setWatch(on: Boolean) { if (on != watch) { watch = on; profile++ } }
+
     /** 硬件 H.264 不行（没有编码器、出错、不出数据）时退回 JPEG，不重开相机。 */
     fun fallbackToJpeg() { codec = JPEG }
 
     companion object {
         const val H264 = "h264"
         const val JPEG = "jpeg"
+        /** 守望时每秒看几帧（移动侦测连着两次看到变化才算，4 帧/秒时大约半秒就能发现） */
+        const val WATCH_FPS = 4
 
         /**
-         * 选预览帧率范围（相机给的 [最低, 最高]，单位 1/1000 帧/秒）：最高的那档里，
-         * 选最低帧率不低于 15 的、尽量低的（比如 15～30：亮的时候 30 帧，暗的时候最多降到 15，不糊）；
-         * 都低于 15 就选最低帧率最高的。
+         * 选预览帧率范围（相机给的 [最低, 最高]，单位 1/1000 帧/秒）。相机传感器跑得越快越费电，
+         * 所以只选「够用」的最低一档：
+         * - 平时（录像、直播，最多 15 帧/秒）：最高帧率够 max(15, fps) 的档里最高帧率最低的；
+         *   其中选最低帧率不低于 15 的（暗的时候也不掉到 15 以下，一动就糊），没有就选最低帧率最高的。
+         *   以前选的是最高那档（常常是 30 帧/秒），一半的帧根本用不上。
+         * - 守望（watch）：最高帧率够 fps 的档里最高、最低帧率都尽量低（暗的时候曝光长一点也不要紧，只是看有没有动静）。
+         * 没有够用的档就选最高的。
          */
-        fun pickFpsRange(ranges: List<IntArray>): IntArray? {
-            val top = ranges.maxOfOrNull { it[1] } ?: return null
-            val c = ranges.filter { it[1] == top }
-            return c.filter { it[0] >= 15_000 }.minByOrNull { it[0] } ?: c.maxByOrNull { it[0] }
+        fun pickFpsRange(ranges: List<IntArray>, fps: Int = 15, watch: Boolean = false): IntArray? {
+            if (ranges.isEmpty()) return null
+            val need = (if (watch) fps.coerceAtLeast(1) else maxOf(15, fps)) * 1000
+            val ok = ranges.filter { it[1] >= need }
+            if (ok.isEmpty()) {
+                val top = ranges.maxOf { it[1] }
+                return ranges.filter { it[1] == top }.maxByOrNull { it[0] }
+            }
+            val low = ok.minOf { it[1] }
+            val c = ok.filter { it[1] == low }
+            return if (watch) c.minByOrNull { it[0] }
+            else c.filter { it[0] >= 15_000 }.minByOrNull { it[0] } ?: c.maxByOrNull { it[0] }
         }
 
         /**

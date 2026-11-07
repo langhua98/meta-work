@@ -51,7 +51,7 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `shell` | `cmd` | 在 App 沙盒里跑一条 shell（非 root，只有 App 自己的权限） |
 | `video` | `transport`=ws、`room`、`codec`=h264/jpeg、`lens`、`width`、`fps`、`quality`、`audio` | 实时画面（走云盘的直播通道） |
 | `video_set` | 同上加 `exposure`、`zoom`、`torch` | 直播 / 侦测中调相机 |
-| `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`people`（只在认出人时提醒，0.12）、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
+| `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`people`（只在认出人时提醒，0.12）、`eco`（省电侦测，0.14，默认开）、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
 | `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram；`objects` 是能认东西时用的模型（空 = 认不了） |
 | `events` | `limit`、`before` | 录好的事件（新的在前，带小图）；`labels` 是认出来在动的东西（「人×2、猫」） |
 | `event_get` | `name` | 取一段录像：备份过的给云盘路径，5 MB 以内直接放回执，大的先传到云盘 |
@@ -73,6 +73,33 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 - 推理用 ncnn（腾讯开源，BSD），C++ 代码在 `app/src/main/cpp/`。先跑 `scripts/build-ncnn-android.sh` 编好 ncnn
   （要 NDK r23c，最后一个支持 4.2 的），Gradle 自动找到 `/opt/ncnn/armv7`（或 `-Pncnn.dir=`）；找不到就不带 C++，测不了模型，别的照常。
 - 只编 32 位 ARM（armeabi-v7a）。模型权重全用 0，只量速度；认得准不准在电脑上用真权重测。
+
+### 省电（0.13、0.14）：电源管家
+
+从底层管电：谁要用电谁去申请，用完放掉；相机传感器、帧拷贝、编码器、麦克风、CPU、网络都按需开。
+
+**相机（Camera.kt、FramePacer）**
+- 传感器帧率只选够用的最低一档（`LiveSettings.pickFpsRange`）：录像、直播最多 15 帧，就不让传感器跑 30 帧。
+- 预览帧只拷我们要用的：相机手里最多一块缓冲区，只在下一帧快该用时才给（提前 30 毫秒），
+  中间的帧在驱动里就丢了，不拷贝、不叫醒 Java。以前相机 30 帧全拷进来（640×480 一帧 460 KB），只用 10 帧。
+
+**省电侦测（`monitor` 的 `eco`，默认开）**
+- 守望（没动静）：传感器换到最低帧率档（不重开相机）、每秒只看 4 帧；编码器、麦克风关着；顺便留最近几帧（最多 3 秒、8 MB）。
+- 录像（有动静 → 最后一次动静后 `post` 秒）：传感器回到正常档，编码器打开，先喂守望时留的几帧（录像从动静前一两秒开始，那一段每秒 4 帧），
+  再接着录，麦克风也打开。录完回守望，内存里的旧录像清掉。
+- 关掉 `eco` 就和以前一样：编码器一直开着，能录到动静前 `pre` 秒，最费电。
+
+**CPU 和网络（Power、RemoteService）**
+- `Power` 是计数的 WakeLock：相机开着、执行指令、备份录像、发提醒、认东西时才拿着；收指令的长轮询在等服务器回话时放掉，
+  CPU 可以睡（数据一到 Wi-Fi 会把它叫醒）。只在 Android 6 以下这么做（6 以上有 Doze，照旧一直拿着）。
+- 看门狗：2 分钟一次的闹钟。长轮询等了 70 秒还没回来（睡着时连接断了），就把连接断掉重来。
+- WifiLock：锁屏后 Wi-Fi 不断（有的老系统默认休眠时断 Wi-Fi）。
+- 网络请求成功后不断开连接，下一个接着用，不用每 25 秒重新做 TLS 握手；用即时信箱时文件信箱 10 分钟才看一次。
+
+**看电耗在哪（PowerMeter）**
+- 从 `/sys/class/power_supply/battery/current_now` 读实时电流（三星等很多手机普通 App 能读）。
+- `info` 回执写：电流、屏幕亮不亮、侦测在哪一档；`monitor_status` 多了 `current_ma`、`stage`（off / watch / record）、`eco`。
+  小橘推送的侦测页状态行会显示「省电守望中 · 电流约 xxx mA」。
 
 ### 认出动的是什么（0.12，C++）
 

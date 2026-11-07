@@ -38,7 +38,7 @@ class Notifier(private val cloud: Cloud, private val prefs: Prefs, private val d
         while (true) {
             val (text, jpg) = try { q.take() } catch (e: InterruptedException) { return }
             try {
-                val chat = cloud.notify(text, jpg, prefs.tgChat)
+                val chat = Power.hold { cloud.notify(text, jpg, prefs.tgChat) }
                 if (chat != 0L && chat != prefs.tgChat) prefs.tgChat = chat
                 status = "已发到 Telegram（${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())}）"
             } catch (e: HttpError) {
@@ -103,7 +103,7 @@ class Uploader(
             if (!f.exists()) continue
             try {
                 val p = pathFor(e)
-                cloud.uploadSlow(p, f.readBytes(), SLOW_BPS)
+                Power.hold { cloud.uploadSlow(p, f.readBytes(), SLOW_BPS) }
                 store.markUploaded(e.name, p)
                 count++
                 val left = store.pendingUpload().size

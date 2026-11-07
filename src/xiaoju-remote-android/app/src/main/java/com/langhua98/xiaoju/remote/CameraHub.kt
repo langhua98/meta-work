@@ -76,6 +76,7 @@ class CameraHub(
     @Volatile private var enc: H264Encoder? = null
     private var encConf = ""
     private var encSince = 0L
+    private var encLogged = ""
     private var fed = 0
     @Volatile private var h264Broken = false
     @Volatile private var rot = 0
@@ -84,6 +85,8 @@ class CameraHub(
     private val jpg = ByteArrayOutputStream(64 * 1024)
 
     // 侦测
+    private val preroll = PreRoll()               // 省电侦测守望时留的最近几帧
+    private var prerollPending = false            // 编码器一开就先喂 preroll（相机线程上用）
     private var lastLook = 0L
     private var detVersion = -1
     private var detTweak = -1
@@ -203,6 +206,8 @@ class CameraHub(
             .put("storage_mb", store.usedBytes() / (1 shl 20)).put("free_mb", store.dir.usableSpace / (1 shl 20))
             .put("telegram", notifier.status).put("backup", uploader.status).put("codec_note", settings.codecNote)
             .put("objects", if (objectsOn()) "FastestDet" else "")
+            .put("eco", monitor.eco).put("stage", stage())
+            .put("current_ma", PowerMeter.currentMa(3, 100) ?: -1)
     }
 
     /** 事件列表（events 指令）：新的在前，带小图（base64）。 */
@@ -234,7 +239,9 @@ class CameraHub(
         thread = Thread({ cameraLoop() }, "camera-hub").apply { start() }
     }
 
-    private fun cameraLoop() {
+    private fun cameraLoop() = Power.hold { cameraLoopInner() }   // 相机开着时 CPU 一直醒着
+
+    private fun cameraLoopInner() {
         try {
             while (wanted()) {
                 try {
@@ -280,7 +287,8 @@ class CameraHub(
             rateScale = minOf(1.0, rateScale * 1.25); rateChangedAt = now
             Bus.push("网络好了，码率升到 ${(rateScale * 100).toInt()}%")
         }
-        setMic((watching() && live?.audio == true) || (monitor.on && monitor.audio))
+        // 侦测录声音：省电侦测时只在录像时开麦克风（守望时关着）
+        setMic((watching() && live?.audio == true) || (monitor.on && monitor.audio && (!monitor.eco || recorder.recording)))
         if (!monitor.on && recorder.recording) recorder.close()
         recorder.tick()
     }
@@ -296,6 +304,13 @@ class CameraHub(
         status(stateText())
     }
 
+    /**
+     * 相机来的每一帧。省电侦测（monitor.eco）分两档：
+     * - 守望（没动静、没人看直播）：相机降到最低帧率档、每秒只给 4 帧（LiveSettings.watch），编码器、麦克风关着，
+     *   只做移动侦测，顺便留最近几帧（preroll）；
+     * - 录像（有动静到最后一次动静后 post 秒）：编码器打开，先把留的几帧喂进去（录像从动静前一两秒开始），再接着录。
+     * 不省电时编码器一直开着（录像能从动静前 pre 秒开始）。
+     */
     private fun frame(nv21: ByteArray, w: Int, h: Int, r: Int, ts: Long) {
         rot = r
         grabLatch?.let { l ->
@@ -304,11 +319,23 @@ class CameraHub(
         val l = live
         val sinks = l?.watched().orEmpty()
         val m = monitor
-        val wantH264 = !h264Broken && (m.on || (sinks.isNotEmpty() && settings.codec == LiveSettings.H264))
-        if (wantH264) h264(nv21, w, h, ts)
-        else if (enc != null) closeEncoder()
-        if (l != null && sinks.isNotEmpty() && (settings.codec == LiveSettings.JPEG || h264Broken)) jpegLive(l, sinks, nv21, w, h, r, ts)
+        // 先看有没有动静：省电侦测时，发现动静的这一帧就开始录
         if (m.on) look(nv21, w, h, r, ts)
+        val eco = m.on && m.eco
+        val rec = m.on && (!eco || recorder.recording)
+        val liveH264 = sinks.isNotEmpty() && settings.codec == LiveSettings.H264
+        settings.setWatch(eco && !rec && l == null)
+        val wantH264 = !h264Broken && (rec || liveH264)
+        if (wantH264) {
+            if (enc == null && eco && rec) prerollPending = true
+            h264(nv21, w, h, ts)
+        } else if (enc != null) {
+            closeEncoder()
+            if (eco) recorder.dropBuffered()   // 回到守望：内存里的旧录像不要了（下次从新留的几帧开始）
+        }
+        if (eco && !rec && enc == null) preroll.add(nv21, w, h, ts)
+        else if (preroll.size > 0) preroll.clear()
+        if (l != null && sinks.isNotEmpty() && (settings.codec == LiveSettings.JPEG || h264Broken)) jpegLive(l, sinks, nv21, w, h, r, ts)
     }
 
     private fun h264(nv21: ByteArray, w: Int, h: Int, ts: Long) {
@@ -322,7 +349,12 @@ class CameraHub(
                 encW = w; encH = h
                 val e = H264Encoder(w, h, settings.fps, rate) { data, key, t -> onEncoded(data, key, t) }
                 enc = e; encConf = conf; encSince = System.currentTimeMillis(); fed = 0; encRate = rate
-                Bus.push("H.264 硬件编码：${e.name}，${w}×$h，${rate / 1000} kbps")
+                if (conf != encLogged) { encLogged = conf; Bus.push("H.264 硬件编码：${e.name}，${w}×$h，${rate / 1000} kbps") }
+                // 省电侦测刚开始录：先喂守望时留的几帧（动静前一两秒），录像从那里开始
+                if (prerollPending) {
+                    prerollPending = false
+                    preroll.drain(w, h) { f -> if (f.ts < ts && e.feed(f.data, f.ts, 30_000)) fed++ }
+                }
             }
             val e = enc ?: return
             if (e.feed(nv21, ts)) fed++
@@ -426,7 +458,7 @@ class CameraHub(
             lastDetect = now
             detBusy = true
             val copy = nv21.copyOf()
-            detect.execute { try { later(copy, w, h, r) } finally { detBusy = false } }
+            detect.execute { Power.hold { try { later(copy, w, h, r) } finally { detBusy = false } } }
         }
     }
 
@@ -461,7 +493,7 @@ class CameraHub(
         lastDetect = System.currentTimeMillis()
         detBusy = true
         val m = monitor
-        detect.execute {
+        detect.execute { Power.hold {
             try {
                 val ds = if (objectsOn()) recognize(nv21, w, h) else emptyList()
                 val labels = merge(ds)
@@ -478,7 +510,7 @@ class CameraHub(
             } catch (ex: Exception) {
                 Bus.push("存截图出错：${ex.message}")
             } finally { detBusy = false }
-        }
+        } }
     }
 
     /** 事件进行中又认了一次：补上标签；「只在有人时提醒」又还没发过时，认出人就发。 */
@@ -520,13 +552,22 @@ class CameraHub(
     private fun applyMonitor() {
         val m = monitor
         recorder.preMs = m.preSec * 1000L
+        preroll.windowMs = if (m.eco) m.ecoPreMs else 0
         recorder.postMs = m.postSec * 1000L
         detector.sensitivity = m.sensitivity
         regionsDirty = true
     }
 
+    /** 侦测现在在哪一档：off / watch（省电守望）/ record（在录，或不省电时一直开着编码器） */
+    fun stage(): String = when {
+        !monitor.on -> "off"
+        monitor.eco && !recorder.recording && live == null -> "watch"
+        else -> "record"
+    }
+
     private fun stateText(): String = when {
         monitor.on && liveActive() -> "正在被远程使用：移动侦测 + 实时画面"
+        monitor.on && monitor.eco -> "正在被远程使用：移动侦测中（省电）"
         monitor.on -> "正在被远程使用：移动侦测中"
         liveActive() -> "正在被远程使用：实时画面"
         else -> "待命中，等指令"
@@ -537,7 +578,8 @@ class CameraHub(
         val m = monitor
         if (!m.on) return "移动侦测已关闭（录好的 ${store.list().size} 段还在手机上）"
         val area = if (m.regions.isEmpty()) "整个画面" else "${m.regions.size} 个区域"
-        return "移动侦测已打开：$area，灵敏度 ${m.sensitivity}，动静前 ${m.preSec} 秒、后 ${m.postSec} 秒" +
+        val pre = if (m.eco) "省电（动静前留 ${m.ecoPreMs / 1000} 秒画面）" else "动静前 ${m.preSec} 秒"
+        return "移动侦测已打开：$area，灵敏度 ${m.sensitivity}，$pre、后 ${m.postSec} 秒" +
             (if (m.notify) "，Telegram 提醒（隔 ${m.cooldownMin} 分钟）" else "，不提醒") +
             (if (m.upload) "，慢慢备份到云盘" else "，只存手机") +
             (if (h264Broken) "（${settings.codecNote}）" else "")
