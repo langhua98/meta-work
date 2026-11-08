@@ -18,8 +18,8 @@ android {
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.15"
+        versionCode = 16
+        versionName = "0.16"
         multiDexEnabled = true
         if (withNcnn) {
             // S4 是 32 位 ARM；只编这一种，安装包小一点

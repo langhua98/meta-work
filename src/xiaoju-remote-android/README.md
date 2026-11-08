@@ -12,7 +12,9 @@
 
 1. 推送 `src/xiaoju-remote-android/` 的改动，`.github/workflows/xiaoju-remote-android.yml` 会在 GitHub 的 Ubuntu 机器上编译。
 2. 编好的 APK 发布到 Release「xiaoju-remote-android」，下载 `xiaoju-remote-latest.apk`。
-3. B 手机：设置里允许「安装未知来源」，装上。这是 debug 签名，直接能装，不用别的签名工具。
+3. B 手机：设置里允许「安装未知来源」，装上。App 名字叫「法莉娅」（0.16 起，图标是她的头像）。
+   签名：0.16 起用固定密钥（在小橘云盘私有文件夹 `/小橘推送/签名/android-signing.json`，GitHub 编译时用 `XIAOJU_TOKEN` 取来签）。
+   0.12～0.15 是在 GitHub 上编的临时签名，每个包都不一样，所以从这些版本升到 0.16 要先卸载一次；以后就能直接覆盖安装。
 
 ## 用
 
