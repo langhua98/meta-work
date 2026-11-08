@@ -69,25 +69,27 @@ object Net {
      * 发一个请求，返回响应体。非 2xx 抛 HttpError。
      * throttleBps > 0：上传时限速（字节/秒），慢慢传，不占满老手机的上行。
      *
-     * 省电：成功时不断开连接（读完响应、关掉流，连接回到系统的连接池），下一个请求接着用，
-     * 不用每次都重新连、重新做 TLS 握手（待命时每 25 秒一次长轮询，老手机上握手又费电又费流量）。
-     * 连接池里的旧连接可能已经被服务器关了，GET 遇到这种网络错误时马上用新连接再试一次。
+     * 省电：reuse = true 的请求（收指令的长轮询，一轮接一轮、中间几乎不停）成功后不断开连接，
+     * 下一轮接着用，不用每 25 秒重新连、重新做 TLS 握手。
+     * 其他请求（回执、上传…）每次都用新连接（Connection: close）：0.13、0.14 让它们也复用，结果连接闲了
+     * 几十秒后被运营商的 NAT 悄悄掐掉，再拿来发回执就一直等到超时（拍照回执要等一分钟），0.15 改回来。
+     * 复用的旧连接坏了时，GET 马上用新连接再试一次。
      */
     fun request(method: String, url: String, token: String, body: ByteArray? = null,
                 contentType: String? = null, readTimeoutMs: Int = 60_000, throttleBps: Int = 0,
-                onConn: ((HttpURLConnection?) -> Unit)? = null): ByteArray =
+                onConn: ((HttpURLConnection?) -> Unit)? = null, reuse: Boolean = false): ByteArray =
         try {
-            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn)
+            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn, reuse)
         } catch (e: java.io.IOException) {
             // 只重试 GET；等太久（读超时）不算连接坏了，不重试
             if (method != "GET" || e is java.net.SocketTimeoutException) throw e
-            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn)
+            requestOnce(method, url, token, body, contentType, readTimeoutMs, throttleBps, onConn, false)
         }
 
     /** onConn：连接建好时交出来（别的线程可以 disconnect() 把卡住的请求断掉），结束时交 null。 */
     private fun requestOnce(method: String, url: String, token: String, body: ByteArray?,
                             contentType: String?, readTimeoutMs: Int, throttleBps: Int,
-                            onConn: ((HttpURLConnection?) -> Unit)?): ByteArray {
+                            onConn: ((HttpURLConnection?) -> Unit)?, reuse: Boolean): ByteArray {
         val conn = URL(url).openConnection() as HttpURLConnection
         onConn?.invoke(conn)
         var keep = false
@@ -99,6 +101,7 @@ object Net {
             conn.useCaches = false
             conn.setRequestProperty("Authorization", "Bearer $token")
             conn.setRequestProperty("Accept", "application/json")
+            if (!reuse) conn.setRequestProperty("Connection", "close")
             if (body != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", contentType ?: "application/octet-stream")
@@ -129,7 +132,7 @@ object Net {
                         j.optString("hint").let { if (it.isBlank()) "" else "（$it）" } }.orEmpty()
                 throw HttpError(code, "云盘 $code" + if (msg.isBlank()) "" else "：$msg")
             }
-            keep = true
+            keep = reuse
             return data
         } finally {
             onConn?.invoke(null)

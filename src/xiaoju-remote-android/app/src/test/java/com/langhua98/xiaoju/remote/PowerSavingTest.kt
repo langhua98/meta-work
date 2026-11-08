@@ -108,6 +108,18 @@ class PowerSavingTest {
         assertNull(PowerMeter.toMa("abc"))
     }
 
+    @Test fun fixedCurrentReadingIsRejected() {
+        // S4：一直是 1900（充电电流设定值，不是实测）
+        assertTrue(PowerMeter.looksFixed(listOf(1900, 1900, 1900, 1900, 1900), -1, 0))
+        // 真的电流会跳
+        assertFalse(PowerMeter.looksFixed(listOf(412, 398, 455, 401, 420), -1, 0))
+        // 一次读数刚好一样、又不是整百：先不下结论；隔 10 秒以上还是这个数才算
+        assertFalse(PowerMeter.looksFixed(listOf(417, 417, 417), -1, 0))
+        assertFalse(PowerMeter.looksFixed(listOf(417, 417, 417), 417, 3_000))
+        assertTrue(PowerMeter.looksFixed(listOf(417, 417, 417), 417, 15_000))
+        assertFalse("太少不判", PowerMeter.looksFixed(listOf(1900, 1900), -1, 0))
+    }
+
     @Test fun ecoIsOnByDefaultAndPreRollCapped() {
         val m = MonitorConfig()
         assertTrue(m.eco)

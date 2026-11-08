@@ -164,7 +164,9 @@ class RemoteService : Service() {
         if (h?.liveActive() == true) on.add("实时画面")
         else if (h?.cameraOn == true && h.monitor.on != true) on.add("相机")
         val lines = ArrayList<String>()
-        PowerMeter.currentMa()?.let { lines.add("电流：约 $it mA（越小越省电）") }
+        val ma = PowerMeter.currentMa()
+        if (ma != null) lines.add("电流：约 $ma mA（越小越省电）")
+        else if (PowerMeter.fixed) lines.add("电流：这台手机读不到实时电流（系统给的是固定值），只能看电量掉得快不快")
         @Suppress("DEPRECATION")
         val screen = runCatching { (getSystemService(Context.POWER_SERVICE) as PowerManager).isScreenOn }.getOrDefault(false)
         if (screen) lines.add("屏幕：亮着（很费电，不用时关掉屏幕）")
