@@ -19,6 +19,10 @@ class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: St
     @Volatile var exposure = 0f    // -1…1，0 = 自动
     @Volatile var zoom = 0f        // 0…1
     @Volatile var torch = false
+    /** 上下翻转（画面转 180°，手机倒着装时用）：直播、录像、截图都跟着转，记在手机上 */
+    @Volatile var flip = false
+    /** 画面左上角印日期时间（直播、录像、截图都带上） */
+    @Volatile var stamp = true
     @Volatile var version = 0; private set
     @Volatile var tweak = 0; private set
     /** 省电侦测「守望」中（没动静）：相机能多慢就多慢 */
@@ -48,6 +52,14 @@ class LiveSettings(front: Boolean, width: Int, quality: Int, fps: Int, codec: St
         }
         if (cmd.has("quality")) { quality = cmd.optInt("quality", quality).coerceIn(20, 90); changed += "画质 $quality" }
         if (cmd.has("fps")) { fps = cmd.optInt("fps", fps).coerceIn(1, 15); changed += "帧率 $fps" }
+        if (cmd.has("flip")) {
+            val f = cmd.optBoolean("flip", flip)
+            if (f != flip) { flip = f; changed += if (f) "画面上下翻转" else "画面不翻转" }
+        }
+        if (cmd.has("stamp")) {
+            val st = cmd.optBoolean("stamp", stamp)
+            if (st != stamp) { stamp = st; changed += if (st) "印日期时间" else "不印日期时间" }
+        }
         var t = false
         if (cmd.has("exposure")) { exposure = cmd.optDouble("exposure", 0.0).toFloat().coerceIn(-1f, 1f); t = true; changed += "亮度" }
         if (cmd.has("zoom")) { zoom = cmd.optDouble("zoom", 0.0).toFloat().coerceIn(0f, 1f); t = true; changed += "变焦" }

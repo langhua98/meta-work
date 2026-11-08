@@ -52,7 +52,7 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `ring` | `seconds` | 响铃（找手机） |
 | `shell` | `cmd` | 在 App 沙盒里跑一条 shell（非 root，只有 App 自己的权限） |
 | `video` | `transport`=ws、`room`、`codec`=h264/jpeg、`lens`、`width`、`fps`、`quality`、`audio` | 实时画面（走云盘的直播通道） |
-| `video_set` | 同上加 `exposure`、`zoom`、`torch` | 直播 / 侦测中调相机 |
+| `video_set` | 同上加 `exposure`、`zoom`、`torch`、`flip`、`stamp` | 直播 / 侦测中调相机；`flip` 上下翻转（转 180°，手机倒装时用）、`stamp` 印日期时间（默认开），这两个记在手机上（0.17） |
 | `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`people`（只在认出人时提醒，0.12）、`eco`（省电侦测，0.14，默认开）、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
 | `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram；`objects` 是能认东西时用的模型（空 = 认不了） |
 | `events` | `limit`、`before` | 录好的事件（新的在前，带小图）；`labels` 是认出来在动的东西（「人×2、猫」） |
@@ -75,6 +75,13 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 - 推理用 ncnn（腾讯开源，BSD），C++ 代码在 `app/src/main/cpp/`。先跑 `scripts/build-ncnn-android.sh` 编好 ncnn
   （要 NDK r23c，最后一个支持 4.2 的），Gradle 自动找到 `/opt/ncnn/armv7`（或 `-Pncnn.dir=`）；找不到就不带 C++，测不了模型，别的照常。
 - 只编 32 位 ARM（armeabi-v7a）。模型权重全用 0，只量速度；认得准不准在电脑上用真权重测。
+
+### 上下翻转、日期时间戳（0.17）
+
+- `flip`：画面转 180°。在相机这一层多转 180°，直播、录像（mov 的旋转）、侦测截图、拍照（`photo`）都跟着转；侦测区域也是按转正后的画面算的。
+- `stamp`：左上角印 `yyyy-MM-dd HH:mm:ss`（白字黑边），直接改 NV21 的亮度，直播、录像、截图都带上（`TimeStamp.kt`）。
+  每秒用安卓画一次字、算好像素位置，每帧只改几千个字节；先做移动侦测再印字，跳动的秒数不会被当成动静。
+- 两个设置记在手机上（Prefs），小橘推送开始直播时会带上它们（`video` 指令里的 `flip`、`stamp`）。
 
 ### 省电（0.13、0.14）：电源管家
 
