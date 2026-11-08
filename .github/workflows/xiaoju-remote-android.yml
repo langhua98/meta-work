@@ -1,10 +1,11 @@
-name: Build 小橘遥控 apk
+name: Build Vania apk
 
 # src/xiaoju-remote-android/：在 GitHub 的 Ubuntu 机器上用 Android SDK 编译，
 # 先编好 ncnn（NDK r23c，32 位 ARM），安装包才带 C++：模型测速、认出动的是什么（物体识别）。
 # 编之前在电脑上用同一份 C++ 和模型认几张照片（tests/detector），再跑 Kotlin 单元测试，都过了才编安装包。
 # 编好的 APK 每次都传到小橘云盘「软件包」（AGENTS.md 的约定）。
-# 用 debug 签名的 APK（能直接装，不用签名工具）发布到 Release「xiaoju-remote-android」（每次覆盖）。
+# 用固定的钥匙签名（仓库 secret VANIA_KEYSTORE_B64 / VANIA_KEYSTORE_PASSWORD，钥匙不进仓库），每次构建签名都一样，能直接覆盖升级；
+# 编完用 apksigner 按 Android 4.2（API 17）验一遍签名。发布到 Release「xiaoju-remote-android」（每次覆盖）。
 # 安卓已搁置（见 AGENTS.md），只留手动触发，推送不自动编译。
 on:
   workflow_dispatch:
@@ -70,24 +71,48 @@ jobs:
           chmod +x gradlew
           ./gradlew testDebugUnitTest --no-daemon
 
+      - name: Restore signing key
+        env:
+          VANIA_KEYSTORE_B64: ${{ secrets.VANIA_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$VANIA_KEYSTORE_B64" ]; then
+            echo "::error::仓库没有 secret VANIA_KEYSTORE_B64（固定签名钥匙）。没有它每次签名都不一样，手机没法覆盖升级。到 Settings → Secrets and variables → Actions 里加上再重跑。"
+            exit 1
+          fi
+          echo "$VANIA_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/vania.jks"
+          echo "VANIA_KEYSTORE=$RUNNER_TEMP/vania.jks" >> "$GITHUB_ENV"
+
       - name: Build debug APK
         working-directory: src/xiaoju-remote-android
+        env:
+          VANIA_KEYSTORE_PASSWORD: ${{ secrets.VANIA_KEYSTORE_PASSWORD }}
         run: |
           chmod +x gradlew
           NCNN_DIR=$HOME/ncnn/armv7 ./gradlew assembleDebug --no-daemon --stacktrace
           # 一定要带上 C++（不然认不了东西）
           unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'lib/armeabi-v7a/libxjbench.so'
 
+      - name: Verify signature for Android 4.2 (API 17)
+        working-directory: src/xiaoju-remote-android
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          signer=$ANDROID_HOME/build-tools/35.0.0/apksigner
+          # 4.2 只认 v1 签名，而且摘要要是 SHA-1；apksigner 按 min-sdk 17 验过才算数
+          $signer verify --min-sdk-version 17 --verbose --print-certs "$apk" | tee verify.txt
+          grep -q 'Verified using v1 scheme (JAR signing): true' verify.txt
+          # 一定要是那把固定的钥匙（不是机器临时生成的 debug 证书），不然手机上没法覆盖升级
+          grep -q 'CN=Vania' verify.txt
+
       - name: Rename APK
         working-directory: src/xiaoju-remote-android
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk out/xiaoju-remote-latest.apk
+          cp app/build/outputs/apk/debug/app-debug.apk out/Vania-latest.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: xiaoju-remote-apk
-          path: src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
+          name: vania-apk
+          path: src/xiaoju-remote-android/out/Vania-latest.apk
 
       - name: Publish to the xiaoju-remote-android release
         env:
@@ -96,12 +121,12 @@ jobs:
           gh release delete xiaoju-remote-android --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
           gh release create xiaoju-remote-android \
             -R "$GITHUB_REPOSITORY" \
-            --title "小橘遥控 APK" \
-            --notes "被控端 APK。下载 xiaoju-remote-latest.apk 直接装（安卓设置里先允许「安装未知来源」）。" \
-            src/xiaoju-remote-android/out/xiaoju-remote-latest.apk
+            --title "Vania APK" \
+            --notes "被控端 APK，支持 Android 4.2 及以上。下载 Vania-latest.apk 直接装（安卓设置里先允许「安装未知来源」）。从旧的「小橘遥控」升级要先卸载一次（签名换成了固定的钥匙），以后就能直接覆盖升级。" \
+            src/xiaoju-remote-android/out/Vania-latest.apk
 
       - name: Upload to 小橘云盘 /软件包/
-        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 xiaoju-remote-android- 包删掉
+        # 每次编出新的 APK 都传到小橘云盘「软件包」（文件名带版本号和构建号），旧的 Vania-android- 包和改名前的 xiaoju-remote-android- 包删掉
         env:
           XIAOJU_TOKEN: ${{ secrets.XIAOJU_TOKEN }}
         run: |
@@ -110,7 +135,7 @@ jobs:
             exit 1
           fi
           ver=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' src/xiaoju-remote-android/app/build.gradle.kts | head -1)
-          apk="xiaoju-remote-android-$ver-build${{ github.run_number }}.apk"
-          cp src/xiaoju-remote-android/out/xiaoju-remote-latest.apk "$apk"
-          python3 scripts/upload_package.py "$apk" xiaoju-remote-android-
+          apk="Vania-android-$ver-build${{ github.run_number }}.apk"
+          cp src/xiaoju-remote-android/out/Vania-latest.apk "$apk"
+          OLD_PREFIXES=xiaoju-remote-android- python3 scripts/upload_package.py "$apk" Vania-android-
           echo "云盘：/软件包/$apk" >> "$GITHUB_STEP_SUMMARY"

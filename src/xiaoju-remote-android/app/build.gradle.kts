@@ -18,8 +18,8 @@ android {
         // 最低 Android 4.2（API 17）
         minSdk = 17
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.14"
+        versionCode = 15
+        versionName = "0.15"
         multiDexEnabled = true
         if (withNcnn) {
             // S4 是 32 位 ARM；只编这一种，安装包小一点
@@ -40,14 +40,34 @@ android {
         }
     }
 
+    // 固定签名：以前用的是 CI 机器每次新生成的 debug 证书，每个 APK 的签名都不一样，
+    // 装过旧版的手机（比如 4.2.2 那台）升级时会报签名不一致、装不上。
+    // 现在 CI 从仓库 secret 还原同一把钥匙（见 workflow），每次签名都一样。钥匙不进仓库（仓库是公开的）。
+    // 本地没设 VANIA_KEYSTORE 时退回 debug 签名，方便自己编着试。
+    val vaniaKeystore = System.getenv("VANIA_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (vaniaKeystore != null) {
+            create("vania") {
+                storeFile = vaniaKeystore
+                storePassword = System.getenv("VANIA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("VANIA_KEY_ALIAS") ?: "vania"
+                keyPassword = System.getenv("VANIA_KEY_PASSWORD") ?: System.getenv("VANIA_KEYSTORE_PASSWORD")
+                // 4.2（API 17）只认 v1（JAR）签名，v2 给 7.0 以上用
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+    val apkSigning = if (vaniaKeystore != null) signingConfigs.getByName("vania") else signingConfigs.getByName("debug")
+
     buildTypes {
         getByName("debug") {
             isMinifyEnabled = false
+            signingConfig = apkSigning
         }
         getByName("release") {
             isMinifyEnabled = false
-            // 用 debug 签名，出来的 release APK 也能直接装
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = apkSigning
         }
     }
 

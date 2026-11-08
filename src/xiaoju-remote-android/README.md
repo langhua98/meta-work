@@ -1,4 +1,4 @@
-# 小橘遥控（Android 被控端）
+# Vania（安卓被控端，原名「小橘遥控」）
 
 在一台安卓手机（B）上装这个 App，开「待命」后，另一台设备（A，手机或电脑都行）就能发指令，用 B 的硬件：拍照、录音、定位、手电筒、震动、响铃、跑一条 shell。
 
@@ -11,7 +11,8 @@
 ## 装
 
 1. 推送 `src/xiaoju-remote-android/` 的改动，`.github/workflows/xiaoju-remote-android.yml` 会在 GitHub 的 Ubuntu 机器上编译。
-2. 编好的 APK 发布到 Release「xiaoju-remote-android」，下载 `xiaoju-remote-latest.apk`。
+2. 编好的 APK 发布到 Release「xiaoju-remote-android」，下载 `Vania-latest.apk`；同时传到小橘云盘 `/软件包/Vania-android-<版本>-build<N>.apk`。
+   签名用固定的钥匙（仓库 secret `VANIA_KEYSTORE_B64` 和 `VANIA_KEYSTORE_PASSWORD`，钥匙本身不进仓库），每次构建签名都一样，可以直接覆盖升级。从改名前的「小橘遥控」升级要先卸载一次。
 3. B 手机：设置里允许「安装未知来源」，装上。这是 debug 签名，直接能装，不用别的签名工具。
 
 ## 用

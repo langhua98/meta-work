@@ -525,7 +525,7 @@ class RemoteService : Service() {
         val stop = PendingIntent.getService(this, 1,
             Intent(this, RemoteService::class.java).setAction(ACTION_STOP), piFlags())
         val b = if (Build.VERSION.SDK_INT >= 26) Api26.builder(this) else Notification.Builder(this)
-        b.setContentTitle("小橘遥控")
+        b.setContentTitle("Vania")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat)
             .setOngoing(true)
@@ -575,7 +575,7 @@ class RemoteService : Service() {
 private object Api26 {
     fun builder(ctx: Context): Notification.Builder {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(RemoteService.CHANNEL, "小橘遥控", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(RemoteService.CHANNEL, "Vania", NotificationManager.IMPORTANCE_LOW))
         return Notification.Builder(ctx, RemoteService.CHANNEL)
     }
     fun startForegroundService(ctx: Context, i: Intent) { ctx.startForegroundService(i) }
