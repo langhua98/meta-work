@@ -31,6 +31,8 @@
   提醒走云盘服务端的 /api/agent/v1/notify（Telegram 机器人）。指令见 src/xiaoju-remote-android/README.md。
 - 联网用 Conscrypt 2.5.2（最后一个支持 API 9+ 的版本）+ App 自带根证书 res/raw/roots.pem；WebSocket 用 OkHttp 3.12。
 - 它的 workflow 只保留手动触发；本地用 Android SDK 编译，APK 传到云盘「软件包」。
+- 安卓包一律用固定密钥签名（小橘云盘私有文件夹 `/小橘推送/签名/android-signing.json`，别分享、别放进仓库），换了密钥手机上就不能覆盖安装。
+  workflow 有 `XIAOJU_TOKEN` 时自己用 apksigner 签；没有时编出来是临时签名，上传前用 `scripts/resign_apk.py` 重签（只有 v1，够 Android 4.2～10）。
 - iOS 15 被控端已经拆到单独的仓库 langhua98/xiaoju-remote。
 
 云盘「软件包」（/软件包/，分享页 share.html#XrCiZRZM0WSwMdYiqyV3TA）：
