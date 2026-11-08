@@ -27,6 +27,16 @@ class Prefs(ctx: Context) {
         get() = MonitorConfig.fromJson(sp.getString("monitor", ""))
         set(v) { sp.edit().putString("monitor", v.toJson().toString()).apply() }
 
+    /** 画面上下翻转（手机倒着装） */
+    var flip: Boolean
+        get() = sp.getBoolean("flip", false)
+        set(v) { sp.edit().putBoolean("flip", v).apply() }
+
+    /** 画面上印日期时间 */
+    var stamp: Boolean
+        get() = sp.getBoolean("stamp", true)
+        set(v) { sp.edit().putBoolean("stamp", v).apply() }
+
     /** Telegram 提醒发给哪个聊天（服务端第一次找到后告诉我们） */
     var tgChat: Long
         get() = sp.getLong("tgChat", 0L)

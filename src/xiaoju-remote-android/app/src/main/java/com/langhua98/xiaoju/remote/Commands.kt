@@ -65,7 +65,7 @@ object Commands {
 
     private fun photo(ctx: Context, front: Boolean): CmdResult {
         if (!has(ctx, Manifest.permission.CAMERA)) return CmdResult("没有相机权限，去 App 里点「授权硬件」")
-        val data = Camera.capture(front)
+        val data = Camera.capture(front, Prefs(ctx).flip)
         return CmdResult("拍了一张（${if (front) "前" else "后"}摄，${data.size / 1024} KB）", listOf("photo.jpg" to data))
     }
 

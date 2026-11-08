@@ -1,4 +1,4 @@
-# Vania（安卓被控端，原名「小橘遥控」）
+# 小橘遥控（Android 被控端）
 
 在一台安卓手机（B）上装这个 App，开「待命」后，另一台设备（A，手机或电脑都行）就能发指令，用 B 的硬件：拍照、录音、定位、手电筒、震动、响铃、跑一条 shell。
 
@@ -11,9 +11,10 @@
 ## 装
 
 1. 推送 `src/xiaoju-remote-android/` 的改动，`.github/workflows/xiaoju-remote-android.yml` 会在 GitHub 的 Ubuntu 机器上编译。
-2. 编好的 APK 发布到 Release「xiaoju-remote-android」，下载 `Vania-latest.apk`；同时传到小橘云盘 `/软件包/Vania-android-<版本>-build<N>.apk`。
-   签名用固定的钥匙（仓库 secret `VANIA_KEYSTORE_B64` 和 `VANIA_KEYSTORE_PASSWORD`，钥匙本身不进仓库），每次构建签名都一样，可以直接覆盖升级。从改名前的「小橘遥控」升级要先卸载一次。
-3. B 手机：设置里允许「安装未知来源」，装上。这是 debug 签名，直接能装，不用别的签名工具。
+2. 编好的 APK 发布到 Release「xiaoju-remote-android」，下载 `xiaoju-remote-latest.apk`。
+3. B 手机：设置里允许「安装未知来源」，装上。App 名字叫「法莉娅」（0.16 起，图标是她的头像）。
+   签名：0.16 起用固定密钥（在小橘云盘私有文件夹 `/小橘推送/签名/android-signing.json`，GitHub 编译时用 `XIAOJU_TOKEN` 取来签）。
+   0.12～0.15 是在 GitHub 上编的临时签名，每个包都不一样，所以从这些版本升到 0.16 要先卸载一次；以后就能直接覆盖安装。
 
 ## 用
 
@@ -51,7 +52,7 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
 | `ring` | `seconds` | 响铃（找手机） |
 | `shell` | `cmd` | 在 App 沙盒里跑一条 shell（非 root，只有 App 自己的权限） |
 | `video` | `transport`=ws、`room`、`codec`=h264/jpeg、`lens`、`width`、`fps`、`quality`、`audio` | 实时画面（走云盘的直播通道） |
-| `video_set` | 同上加 `exposure`、`zoom`、`torch` | 直播 / 侦测中调相机 |
+| `video_set` | 同上加 `exposure`、`zoom`、`torch`、`flip`、`stamp` | 直播 / 侦测中调相机；`flip` 上下翻转（转 180°，手机倒装时用）、`stamp` 印日期时间（默认开），这两个记在手机上（0.17） |
 | `monitor` | `on`、`sensitivity` 1–100、`regions` [[x,y,w,h]…]、`pre`、`post`、`notify`、`people`（只在认出人时提醒，0.12）、`eco`（省电侦测，0.14，默认开）、`cooldown`、`audio`、`upload`、`lens`、`width`、`fps`、`quality` | 移动侦测设置（只改给了的字段），回执带状态 |
 | `monitor_status` | — | 侦测状态：今天几段、占多少空间、待备份、Telegram；`objects` 是能认东西时用的模型（空 = 认不了） |
 | `events` | `limit`、`before` | 录好的事件（新的在前，带小图）；`labels` 是认出来在动的东西（「人×2、猫」） |
@@ -75,6 +76,13 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
   （要 NDK r23c，最后一个支持 4.2 的），Gradle 自动找到 `/opt/ncnn/armv7`（或 `-Pncnn.dir=`）；找不到就不带 C++，测不了模型，别的照常。
 - 只编 32 位 ARM（armeabi-v7a）。模型权重全用 0，只量速度；认得准不准在电脑上用真权重测。
 
+### 上下翻转、日期时间戳（0.17）
+
+- `flip`：画面转 180°。在相机这一层多转 180°，直播、录像（mov 的旋转）、侦测截图、拍照（`photo`）都跟着转；侦测区域也是按转正后的画面算的。
+- `stamp`：左上角印 `yyyy-MM-dd HH:mm:ss`（白字黑边），直接改 NV21 的亮度，直播、录像、截图都带上（`TimeStamp.kt`）。
+  每秒用安卓画一次字、算好像素位置，每帧只改几千个字节；先做移动侦测再印字，跳动的秒数不会被当成动静。
+- 两个设置记在手机上（Prefs），小橘推送开始直播时会带上它们（`video` 指令里的 `flip`、`stamp`）。
+
 ### 省电（0.13、0.14）：电源管家
 
 从底层管电：谁要用电谁去申请，用完放掉；相机传感器、帧拷贝、编码器、麦克风、CPU、网络都按需开。
@@ -95,7 +103,10 @@ python3 scripts/遥控/遥控.py 测试机B shell --cmd "ls /sdcard"
   CPU 可以睡（数据一到 Wi-Fi 会把它叫醒）。只在 Android 6 以下这么做（6 以上有 Doze，照旧一直拿着）。
 - 看门狗：2 分钟一次的闹钟。长轮询等了 70 秒还没回来（睡着时连接断了），就把连接断掉重来。
 - WifiLock：锁屏后 Wi-Fi 不断（有的老系统默认休眠时断 Wi-Fi）。
-- 网络请求成功后不断开连接，下一个接着用，不用每 25 秒重新做 TLS 握手；用即时信箱时文件信箱 10 分钟才看一次。
+- 只有收指令的长轮询复用连接（一轮接一轮，不用每 25 秒重新做 TLS 握手）；回执、上传每次都用新连接——
+  0.13、0.14 让它们也复用，闲了几十秒的连接被运营商 NAT 悄悄掐掉，再拿来发回执要等到超时（拍照回执一分钟），0.15 改回来。
+- 回执遇到 429、502～504 或网络断一下，隔 1.5 秒、3 秒再试，最多 3 次。用即时信箱时文件信箱 10 分钟才看一次。
+- 电流读数是固定值（S4 一直报 1900 mA：电量芯片不测电流）时不显示，`info` 写「读不到实时电流」。
 
 **看电耗在哪（PowerMeter）**
 - 从 `/sys/class/power_supply/battery/current_now` 读实时电流（三星等很多手机普通 App 能读）。

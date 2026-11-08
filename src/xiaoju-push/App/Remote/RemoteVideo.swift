@@ -41,7 +41,7 @@ final class RemoteVideo: ObservableObject {
     private static let viaServer = "经服务器"
 
     func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false,
-               lens: String = "back", compat: Bool = false) {
+               lens: String = "back", compat: Bool = false, flip: Bool = false, stamp: Bool = true) {
         guard !running else { return }
         let s = Store.shared
         let dev = target.trimmingCharacters(in: .whitespaces)
@@ -67,7 +67,9 @@ final class RemoteVideo: ObservableObject {
         let id = idString()
         var base: [String: Any] = ["id": id, "do": "video", "lens": lens,
                                    "fps": wantFps, "width": width, "quality": quality,
-                                   "av": true, "audio": sound]
+                                   "av": true, "audio": sound,
+                                   // 上下翻转、日期时间戳（安卓 0.17+，那边会记住，侦测录像也照这个来）
+                                   "flip": flip, "stamp": stamp]
         if !s.remotePair.isEmpty { base["pair"] = s.remotePair }
         let firstCmd = base
 
@@ -363,6 +365,8 @@ struct RemoteVideoView: View {
     @State private var zoom = 0.0
     @State private var torch = false
     @AppStorage("remoteVideoCompat") private var compat = false
+    @AppStorage("remoteVideoFlip") private var flip = false
+    @AppStorage("remoteVideoStamp") private var stamp = true
 
     private let widths = [320, 480, 640, 960]
     private func widthName(_ w: Int) -> String { [320: "流畅", 480: "标准", 640: "高清", 960: "超清"][w] ?? "\(w)" }
@@ -408,7 +412,7 @@ struct RemoteVideoView: View {
                     if video.running { video.stop() }
                     else {
                         video.start(target: target, seconds: 0, fps: fps, width: width, quality: Int(quality),
-                                    sound: sound, lens: lens, compat: compat)
+                                    sound: sound, lens: lens, compat: compat, flip: flip, stamp: stamp)
                     }
                 } label: {
                     Label(video.running ? "停止" : "开始看画面", systemImage: video.running ? "stop.circle" : "play.circle")
@@ -441,6 +445,21 @@ struct RemoteVideoView: View {
             .onChange(of: lens) {
                 if lens == "front" { torch = false }
                 video.adjust(["lens": lens])
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Haptics.tap()
+                    flip.toggle()
+                    video.adjust(["flip": flip])
+                } label: {
+                    Label(flip ? "已上下翻转" : "上下翻转", systemImage: "arrow.up.arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(flip ? Theme.orangeText : nil)
+                Toggle("印日期时间", isOn: $stamp)
+                    .onChange(of: stamp) { video.adjust(["stamp": stamp]) }
             }
 
             Picker("清晰度", selection: $width) {

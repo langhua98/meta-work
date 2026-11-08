@@ -34,8 +34,10 @@ final class RemoteControl: ObservableObject {
         var image: UIImage?
     }
 
+    /// extra：别的字段原样放进指令（比如云台的 action、yaw、pitch）
     func send(_ action: String, to target: String,
-              lens: String? = nil, seconds: Int? = nil, on: Bool? = nil, wait: TimeInterval = 90) async {
+              lens: String? = nil, seconds: Int? = nil, on: Bool? = nil, wait: TimeInterval = 90,
+              extra: [String: Any] = [:]) async {
         let s = Store.shared
         let dev = target.trimmingCharacters(in: .whitespaces)
         guard !dev.isEmpty else { log("先填要控制的设备名"); return }
@@ -48,6 +50,7 @@ final class RemoteControl: ObservableObject {
         let id = f.string(from: Date()) + String(UUID().uuidString.prefix(6))
 
         var cmd: [String: Any] = ["id": id, "do": action, "ack": true]
+        for (k, v) in extra { cmd[k] = v }
         if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
         if let lens { cmd["lens"] = lens }
         if let seconds { cmd["seconds"] = seconds }
@@ -121,7 +124,7 @@ final class RemoteControl: ObservableObject {
 
     func label(_ action: String) -> String {
         ["photo": "拍照", "audio": "录音", "location": "定位", "torch": "手电筒", "ring": "响铃",
-         "info": "设备信息", "bench": "模型测速", "vibrate": "震动"][action] ?? action
+         "info": "设备信息", "bench": "模型测速", "vibrate": "震动", "gimbal": "云台"][action] ?? action
     }
 
     private func present(action: String, receipt: [String: Any], cf: CloudFiles,

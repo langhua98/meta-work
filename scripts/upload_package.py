@@ -44,6 +44,7 @@ def main():
     if code >= 300:
         sys.exit(f"上传失败 {code}: {b[:300]!r}")
     print(f"已上传 {dest}（{len(data) / 1048576:.1f} MB）")
+    file_id = (json.loads(b or b"{}").get("item") or json.loads(b or b"{}")).get("id") if b else None
 
     code, b = call("GET", "/items?" + urllib.parse.urlencode({"path": FOLDER, "limit": "1000"}))
     if code != 200:
@@ -55,6 +56,21 @@ def main():
         h = {"If-Match": c["etag"]} if c.get("etag") else {}
         code, b = call("DELETE", f"/items/{c['id']}", headers=h)
         print(f"{'已删旧包' if code < 300 else '删旧包失败'} {c['name']}" + ("" if code < 300 else f" {code}: {b[:200]!r}"))
+
+    # 直链：给新包建一个 10 年的单文件分享，/d/<token>/<文件名> 点开就下载（William 要每次都发直链）
+    if file_id:
+        code, b = call("POST", "/shares", json.dumps({"id": file_id, "expires_days": 3650}).encode(),
+                       {"Content-Type": "application/json"})
+        web = (json.loads(b or b"{}").get("web_path") or "") if code < 300 else ""
+        token = web.split("#", 1)[1] if "#" in web else ""
+        if token:
+            link = BASE[: -len("/api/agent/v1")] + f"/d/{token}/{urllib.parse.quote(name)}"
+            print(f"直链：{link}")
+            if os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                    f.write(f"直链：{link}\n")
+        else:
+            print(f"建分享失败 {code}: {b[:200]!r}")
 
 
 main()

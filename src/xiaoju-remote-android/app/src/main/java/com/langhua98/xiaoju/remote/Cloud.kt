@@ -77,16 +77,29 @@ class Cloud(base: String, private val token: String) {
 
     fun relayWait(box: String, seconds: Int = 25): List<JSONObject> {
         val data = Net.request("GET", "$api/relay?box=${q(box)}&wait=$seconds", token,
-            readTimeoutMs = (seconds + 20) * 1000, onConn = { pollConn = it })
+            readTimeoutMs = (seconds + 20) * 1000, onConn = { pollConn = it }, reuse = true)
         val arr = JSONObject(String(data, Charsets.UTF_8)).optJSONArray("messages") ?: JSONArray()
         val out = ArrayList<JSONObject>()
         for (i in 0 until arr.length()) arr.optJSONObject(i)?.optJSONObject("body")?.let { out.add(it) }
         return out
     }
 
+    /** 发一条到即时信箱（回执就是这么发的）。云盘一时忙不过来（429、502、503、504）或网络断了一下，隔一会儿再试，最多 3 次：
+     *  回执丢了的话，看的一端只能干等到超时。 */
     fun relaySend(box: String, obj: JSONObject) {
-        Net.request("POST", "$api/relay?box=${q(box)}", token,
-            obj.toString().toByteArray(Charsets.UTF_8), "application/json")
+        val body = obj.toString().toByteArray(Charsets.UTF_8)
+        var wait = 1_500L
+        for (attempt in 1..3) {
+            try {
+                Net.request("POST", "$api/relay?box=${q(box)}", token, body, "application/json")
+                return
+            } catch (e: Exception) {
+                val retry = (e is HttpError && e.code in setOf(429, 502, 503, 504)) || e is java.io.IOException
+                if (!retry || attempt == 3) throw e
+                Thread.sleep(wait)
+                wait *= 2
+            }
+        }
     }
 
     companion object {

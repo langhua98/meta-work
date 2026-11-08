@@ -90,16 +90,35 @@ object PowerMeter {
         return (if (a > 20_000) a / 1000 else a).toInt()
     }
 
-    /** 采 samples 次（隔 gapMs）取平均，毫安。 */
+    /**
+     * 有的手机这个文件给的不是实测电流，而是一个固定值（S4 的电量芯片不测电流，一直报 1900，是充电电流的设定值）。
+     * 真的电流每次读都在跳，所以：几次读数一模一样，又是整百的数、或者隔了 10 秒以上还是这个数，就认定读不到。
+     */
+    @Volatile var fixed = false
+        private set
+    @Volatile private var lastConst = -1
+    @Volatile private var lastConstAt = 0L
+
+    /** 采 samples 次（隔 gapMs）取平均，毫安。读不到、或者读到的是固定值，返回 null。 */
     fun currentMa(samples: Int = 5, gapMs: Long = 200): Int? {
+        if (fixed) return null
         val f = pick() ?: return null
-        var sum = 0L
-        var n = 0
+        val vals = ArrayList<Int>()
         repeat(samples.coerceAtLeast(1)) { i ->
-            runCatching { toMa(f.readText()) }.getOrNull()?.let { sum += it; n++ }
+            runCatching { toMa(f.readText()) }.getOrNull()?.let { vals.add(it) }
             if (i < samples - 1) try { Thread.sleep(gapMs) } catch (e: InterruptedException) { return@repeat }
         }
-        return if (n == 0) null else (sum / n).toInt()
+        if (vals.isEmpty()) return null
+        if (looksFixed(vals, lastConst, System.currentTimeMillis() - lastConstAt)) { fixed = true; return null }
+        if (vals.distinct().size == 1) { lastConst = vals[0]; lastConstAt = System.currentTimeMillis() } else lastConst = -1
+        return vals.sum() / vals.size
+    }
+
+    /** 读数是不是固定值：好几次一模一样，而且是整百的数，或者和 10 秒以前那次一样。 */
+    fun looksFixed(vals: List<Int>, prevConst: Int, sincePrevMs: Long): Boolean {
+        if (vals.size < 3 || vals.distinct().size != 1) return false
+        val v = vals[0]
+        return (v >= 100 && v % 100 == 0) || (v == prevConst && sincePrevMs > 10_000)
     }
 
     private fun pick(): File? {

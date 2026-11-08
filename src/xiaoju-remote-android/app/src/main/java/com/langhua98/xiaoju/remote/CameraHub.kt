@@ -84,6 +84,8 @@ class CameraHub(
     @Volatile private var encH = 0
     private val jpg = ByteArrayOutputStream(64 * 1024)
 
+    private val stamper = TimeStamp()
+
     // 侦测
     private val preroll = PreRoll()               // 省电侦测守望时留的最近几帧
     private var prerollPending = false            // 编码器一开就先喂 preroll（相机线程上用）
@@ -108,6 +110,8 @@ class CameraHub(
     private var housekeepAt = 0L
 
     init {
+        settings.flip = prefs.flip
+        settings.stamp = prefs.stamp
         applyMonitor()
         recorder.onClosed = { e ->
             Bus.push(if (e.video) "录好一段：${e.name}，${e.durMs / 1000} 秒" else "记下一次动静：${e.name}（只有截图）")
@@ -159,6 +163,7 @@ class CameraHub(
         if (!s.has("codec")) s.put("codec", LiveSettings.JPEG)   // 老查看器只认 JPEG
         settings.codecNote = ""
         settings.apply(s)
+        saveView()
         val l = Live(cmd.optString("room"), av, audio, System.currentTimeMillis() + RemoteService.LIVE_MAX_MS)
         l.cloud = c
         live = l
@@ -181,7 +186,10 @@ class CameraHub(
     }
 
     /** 直播中 / 侦测中调相机（video_set、手电）。 */
-    fun adjust(cmd: JSONObject): List<String> = settings.apply(cmd)
+    fun adjust(cmd: JSONObject): List<String> = settings.apply(cmd).also { saveView() }
+
+    /** 翻转、时间戳记在手机上（侦测、下次直播都照这个来） */
+    private fun saveView() { prefs.flip = settings.flip; prefs.stamp = settings.stamp }
 
     /** 从画面截一张照片（相机开着时拍照用），转正、JPEG。拿不到返回 null。 */
     fun grab(timeoutMs: Long = 3_000): ByteArray? {
@@ -313,14 +321,16 @@ class CameraHub(
      */
     private fun frame(nv21: ByteArray, w: Int, h: Int, r: Int, ts: Long) {
         rot = r
-        grabLatch?.let { l ->
-            if (grabbed == null) { grabbed = nv21.copyOf(); grabW = w; grabH = h; grabRot = r; l.countDown() }
-        }
         val l = live
         val sinks = l?.watched().orEmpty()
         val m = monitor
-        // 先看有没有动静：省电侦测时，发现动静的这一帧就开始录
+        // 先看有没有动静（在印时间之前看：跳动的秒数不能算动静）；省电侦测时，发现动静的这一帧就开始录
         if (m.on) look(nv21, w, h, r, ts)
+        // 印日期时间：之后的直播、录像、截图都带上
+        if (settings.stamp) stamper.draw(nv21, w, h, r)
+        grabLatch?.let { gl ->
+            if (grabbed == null) { grabbed = nv21.copyOf(); grabW = w; grabH = h; grabRot = r; gl.countDown() }
+        }
         val eco = m.on && m.eco
         val rec = m.on && (!eco || recorder.recording)
         val liveH264 = sinks.isNotEmpty() && settings.codec == LiveSettings.H264

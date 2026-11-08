@@ -113,7 +113,8 @@ object Camera {
                             // 按节拍抽帧：平均下来正好是要的帧率（守望时每秒 4 帧）
                             if (running() && pacer.due(now, s.frameFps)) {
                                 val ts = StreamClient.now()   // 采集时间（和声音同一个时钟）
-                                try { onFrame(data, fw, fh, rot, ts) } catch (e: Throwable) { /* 丢这一帧 */ }
+                                val r = if (s.flip) (rot + 180) % 360 else rot   // 上下翻转 = 多转 180°
+                                try { onFrame(data, fw, fh, r, ts) } catch (e: Throwable) { /* 丢这一帧 */ }
                             }
                             pool.addLast(data)
                             // 下一帧快该用了才把缓冲区给相机；这之间的帧相机自己丢掉，不拷贝
@@ -209,7 +210,7 @@ object Camera {
     }
 
     /** 拍一张 JPEG。阻塞调用，不要在主线程上调。 */
-    fun capture(front: Boolean, timeoutMs: Long = 15_000): ByteArray {
+    fun capture(front: Boolean, flip: Boolean = false, timeoutMs: Long = 15_000): ByteArray {
         if (LegacyCamera.getNumberOfCameras() == 0) throw IllegalStateException("这台手机没有摄像头")
         Torch.releaseLegacy()   // 老接口开着手电时相机被占用，先关掉
         val ht = HandlerThread("cam").apply { start() }
@@ -235,7 +236,7 @@ object Camera {
                 size?.let { p.setPictureSize(it.width, it.height) }
                 p.pictureFormat = ImageFormat.JPEG
                 p.jpegQuality = 85
-                p.setRotation(info.orientation)   // 竖着拿手机时照片方向正确
+                p.setRotation((info.orientation + if (flip) 180 else 0) % 360)   // 竖着拿手机时照片方向正确；倒装时再转 180°
                 val modes = p.supportedFocusModes ?: emptyList()
                 when {
                     "continuous-picture" in modes -> p.focusMode = "continuous-picture"

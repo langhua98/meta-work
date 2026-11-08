@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 8.0+ 自适应图标：整张头像当背景，系统按自己的形状裁；8.0 以下用 mipmap-*/ic_launcher*.png -->
+<!-- 法莉娅的头像（满版图，系统按桌面形状裁成圆形 / 圆角），原图见 res/drawable-nodpi/ic_launcher_full.png -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@mipmap/ic_launcher_full" />
+    <background android:drawable="@drawable/ic_launcher_full" />
     <foreground android:drawable="@android:color/transparent" />
 </adaptive-icon>

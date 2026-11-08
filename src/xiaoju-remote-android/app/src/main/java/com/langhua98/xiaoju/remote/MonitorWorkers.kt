@@ -28,11 +28,11 @@ class Notifier(private val cloud: Cloud, private val prefs: Prefs, private val d
         val more = if (skipped > 0) "（这之前 $cooldownMin 分钟里还有 $skipped 次）" else ""
         skipped = 0
         val what = if (labels.isEmpty()) "有动静" else "有动静：$labels"
-        q.offer("Vania · $device\n$t $what$more" to jpg)
+        q.offer("🍊 小橘遥控 · $device\n$t $what$more" to jpg)
     }
 
     /** 随便发一句（打开侦测时确认 Telegram 通不通）。 */
-    fun text(s: String) { q.offer("Vania · $device\n$s" to null) }
+    fun text(s: String) { q.offer("🍊 小橘遥控 · $device\n$s" to null) }
 
     private fun loop() {
         while (true) {

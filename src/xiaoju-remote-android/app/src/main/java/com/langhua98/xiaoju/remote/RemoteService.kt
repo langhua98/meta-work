@@ -164,7 +164,9 @@ class RemoteService : Service() {
         if (h?.liveActive() == true) on.add("实时画面")
         else if (h?.cameraOn == true && h.monitor.on != true) on.add("相机")
         val lines = ArrayList<String>()
-        PowerMeter.currentMa()?.let { lines.add("电流：约 $it mA（越小越省电）") }
+        val ma = PowerMeter.currentMa()
+        if (ma != null) lines.add("电流：约 $ma mA（越小越省电）")
+        else if (PowerMeter.fixed) lines.add("电流：这台手机读不到实时电流（系统给的是固定值），只能看电量掉得快不快")
         @Suppress("DEPRECATION")
         val screen = runCatching { (getSystemService(Context.POWER_SERVICE) as PowerManager).isScreenOn }.getOrDefault(false)
         if (screen) lines.add("屏幕：亮着（很费电，不用时关掉屏幕）")
@@ -525,7 +527,7 @@ class RemoteService : Service() {
         val stop = PendingIntent.getService(this, 1,
             Intent(this, RemoteService::class.java).setAction(ACTION_STOP), piFlags())
         val b = if (Build.VERSION.SDK_INT >= 26) Api26.builder(this) else Notification.Builder(this)
-        b.setContentTitle("Vania")
+        b.setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_stat)
             .setOngoing(true)
@@ -575,7 +577,7 @@ class RemoteService : Service() {
 private object Api26 {
     fun builder(ctx: Context): Notification.Builder {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(RemoteService.CHANNEL, "Vania", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(RemoteService.CHANNEL, ctx.getString(R.string.app_name), NotificationManager.IMPORTANCE_LOW))
         return Notification.Builder(ctx, RemoteService.CHANNEL)
     }
     fun startForegroundService(ctx: Context, i: Intent) { ctx.startForegroundService(i) }
