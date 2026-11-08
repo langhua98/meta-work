@@ -6,6 +6,7 @@
 第二个参数是这个软件安装包的文件名前缀：/软件包/ 里以它开头、又不是这次新传的文件，都当旧包删掉，
 文件夹里每个软件只留最新一版（AGENTS.md 的约定）。
 需要环境变量 XIAOJU_TOKEN（有写权限的 xa_ 令牌）。
+软件改过名时，用环境变量 OLD_PREFIXES（逗号分隔）把改名前的旧包也一起删掉。
 """
 import json, os, sys, urllib.parse, urllib.request, urllib.error
 
@@ -48,8 +49,9 @@ def main():
     code, b = call("GET", "/items?" + urllib.parse.urlencode({"path": FOLDER, "limit": "1000"}))
     if code != 200:
         sys.exit(f"列 {FOLDER} 失败 {code}: {b[:300]!r}")
+    prefixes = tuple([prefix] + [p for p in os.environ.get("OLD_PREFIXES", "").split(",") if p])
     for c in json.loads(b).get("children", []):
-        if c.get("type") == "folder" or c["name"] == name or not c["name"].startswith(prefix):
+        if c.get("type") == "folder" or c["name"] == name or not c["name"].startswith(prefixes):
             continue
         h = {"If-Match": c["etag"]} if c.get("etag") else {}
         code, b = call("DELETE", f"/items/{c['id']}", headers=h)
