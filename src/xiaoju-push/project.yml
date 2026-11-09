@@ -77,10 +77,8 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
         NSPhotoLibraryAddUsageDescription: 把模型发来的图片和视频存到相册
-        NSMicrophoneUsageDescription: 按住麦克风说话，把你说的话变成文字；遥控待命时被另一台设备请求录音
+        NSMicrophoneUsageDescription: 按住麦克风说话，把你说的话变成文字
         NSSpeechRecognitionUsageDescription: 把你说的话变成文字发给编码助手
-        NSCameraUsageDescription: 遥控待命时，被另一台设备请求拍照
-        NSLocationWhenInUseUsageDescription: 遥控待命时，被另一台设备请求上报一次位置
         # 工作区在「文件」App 里能看到
         NSLocalNetworkUsageDescription: 双机推理：两台手机在同一个 Wi‑Fi 里互相找到对方、传隐藏向量
         NSBonjourServices: [_xjpipe._tcp]

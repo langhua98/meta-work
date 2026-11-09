@@ -54,10 +54,10 @@ struct SettingsView: View {
                     }
                 }
                 .listRowBackground(Theme.card)
-                Section("遥控") {
+                Section("云控") {
                     NavigationLink { RemoteView() } label: {
-                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "遥控",
-                                    sub: "被控端：开待命让别人调用这台；控制端：去调用别的设备")
+                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "云控",
+                                    sub: "经小橘云盘控制别的设备：实时画面、移动侦测、拍照、手电…")
                     }
                 }
                 .listRowBackground(Theme.card)
