@@ -25,6 +25,8 @@ enum Route: Hashable {
     case zip
     /// 双机推理（两台手机合跑 Qwen3.5-9B）
     case pipe
+    /// 云控：经小橘云盘控制别的设备（法莉娅、Vania）
+    case remote
 }
 
 // 首页：推送任务列表。点一个任务 → 看改了什么 → 提交并推送。
@@ -88,6 +90,19 @@ struct HomeView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Section {
+                    Button { Haptics.tap(); path.append(.remote) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(Theme.orangeText).frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("云控").font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
+                                Text("控制别的设备：实时画面、移动侦测、拍照、手电").font(.system(size: 13)).foregroundStyle(Theme.muted)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.faint)
+                        }
+                    }
+                    .buttonStyle(PressStyle())
+                    .listRowBackground(Theme.card)
                     Button { Haptics.tap(); path.append(.zip) } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "shippingbox").foregroundStyle(Theme.orangeText).frame(width: 24)
@@ -142,6 +157,7 @@ struct HomeView: View {
                 case .assistant: ChatView()
                 case .zip: RepoZipView()
                 case .pipe: PipeHomeView()
+                case .remote: RemoteView()
                 }
             }
             .toolbar {
