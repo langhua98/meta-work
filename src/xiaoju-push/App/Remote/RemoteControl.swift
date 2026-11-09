@@ -51,7 +51,7 @@ final class RemoteControl: ObservableObject {
 
         var cmd: [String: Any] = ["id": id, "do": action, "ack": true]
         for (k, v) in extra { cmd[k] = v }
-        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
         if let lens { cmd["lens"] = lens }
         if let seconds { cmd["seconds"] = seconds }
         if let on { cmd["on"] = on }
@@ -118,7 +118,7 @@ final class RemoteControl: ObservableObject {
         let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         var cmd: [String: Any] = ["id": "cancel-" + String(UUID().uuidString.prefix(8)), "do": "cancel", "target": p.id]
-        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
         try? await cf.relaySend(RemoteBox.inbox(p.target), cmd)
     }
 

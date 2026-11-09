@@ -70,7 +70,7 @@ final class RemoteVideo: ObservableObject {
                                    "av": true, "audio": sound,
                                    // 上下翻转、日期时间戳（安卓 0.17+，那边会记住，侦测录像也照这个来）
                                    "flip": flip, "stamp": stamp]
-        if !s.remotePair.isEmpty { base["pair"] = s.remotePair }
+        base["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair
         let firstCmd = base
 
         task = Task {
@@ -316,7 +316,7 @@ final class RemoteVideo: ObservableObject {
         let id = idString()
         var cmd = changes
         cmd["id"] = id; cmd["do"] = "video_set"
-        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
         let send = cmd
         tip = "调整中…"
         Task {
