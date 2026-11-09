@@ -61,7 +61,7 @@ final class RemoteMonitor: ObservableObject {
         let id = f.string(from: Date()) + String(UUID().uuidString.prefix(6))
         var cmd = extra
         cmd["id"] = id; cmd["do"] = action
-        if !s.remotePair.isEmpty { cmd["pair"] = s.remotePair }
+        cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
         do { try await cf.relaySend(RemoteBox.inbox(dev), cmd) } catch {
             note = "发送失败：\(error.localizedDescription)"; return nil
         }

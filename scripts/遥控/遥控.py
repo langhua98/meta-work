@@ -29,7 +29,7 @@ import argparse, base64, json, os, sys, time, urllib.error, urllib.parse, urllib
 
 BASE = os.environ.get("XIAOJU_BASE", "https://langhua1998-xiaoju-cloud.hf.space").rstrip("/")
 TOKEN = os.environ.get("XIAOJU_TOKEN", "")
-PAIR = os.environ.get("XIAOJU_PAIR", "")
+PAIR = os.environ.get("XIAOJU_PAIR", "0")  # 法莉娅（安卓）默认口令是 0
 
 
 def req(method, path, query=None, data=None, ctype="application/octet-stream"):
@@ -95,7 +95,6 @@ def main():
     ap.add_argument("--pitch", type=float, help="gimbal：上下（度，或 move 时的度每秒）")
     ap.add_argument("--save", default=".", help="回执里的文件下载到哪个目录")
     ap.add_argument("--check", action="store_true", help="update：只看有没有新版本，不下载")
-    ap.add_argument("--auto", choices=["on", "off"], help="update：打开 / 关掉安卓被控端的自动更新")
     ap.add_argument("--timeout", type=int, default=90, help="等回执最多多少秒")
     a = ap.parse_args()
 
@@ -115,8 +114,6 @@ def main():
     elif a.action == "update":  # 安卓被控端（法莉娅）0.19+：查云盘「软件包」，有新版本就下载、安装
         if a.check:
             cmd["check"] = True
-        if a.auto:
-            cmd["auto"] = a.auto == "on"
         a.timeout = max(a.timeout, 300)  # 要下载安装包，慢一点
     elif a.action == "shell":
         if not a.cmd:

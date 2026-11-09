@@ -12,8 +12,8 @@ struct RemoteControlView: View {
     var body: some View {
         Form {
             Section("控制谁") {
-                TextField("对方的设备名（和它那边填的一样）", text: $store.remoteTarget)
-                SecureField("配对口令（两台要一样）", text: $store.remotePair)
+                TextField("对方的设备名（法莉娅是 A～D）", text: $store.remoteTarget)
+                SecureField("配对口令（两台要一样，空着 = 0）", text: $store.remotePair)
             }
             .listRowBackground(Theme.card)
 
