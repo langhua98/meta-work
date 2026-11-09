@@ -159,21 +159,34 @@ final class RemoteMonitor: ObservableObject {
         let local = dir.appendingPathComponent("\(target)-\(e.name).\(e.video ? "mov" : "jpg")")
         if FileManager.default.fileExists(atPath: local.path) { return local }
         inflight += 1; defer { inflight -= 1 }
-        note = e.size > (5 << 20) && e.uploaded.isEmpty ? "视频比较大，对方先传到云盘再给你，要等一会儿…" : "取视频…"
+        let s = Store.shared
+        let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
+                            readToken: s.cloudToken, writeToken: s.cloudToken)
+        // 已经备份到云盘的：直接从云盘下，不用先问对方手机（对方离线、改了设备名、相机卡住时也能看）
+        if e.video, !e.uploaded.isEmpty {
+            note = "从云盘下载…"
+            do {
+                if let d = try await cf.readData(e.uploaded), (try? d.write(to: local)) != nil { note = ""; return local }
+                note = "云盘上没找到这段，问对方手机要…"
+            } catch {
+                note = "云盘下载失败（\(error.localizedDescription)），问对方手机要…"
+            }
+        } else {
+            note = e.size > (5 << 20) ? "视频比较大，对方先传到云盘再给你，要等一会儿…" : "取视频…"
+        }
         guard let r = await call("event_get", ["name": e.name], wait: 180) else { return nil }
         guard (r["ok"] as? Bool) != false else { note = (r["text"] as? String) ?? "取不到"; return nil }
         var data: Data?
         for entry in (r["files"] as? [Any]) ?? [] where data == nil {
             if let o = entry as? [String: Any], let b64 = o["data"] as? String { data = Data(base64Encoded: b64) }
             else if let p = entry as? String {
-                let s = Store.shared
-                let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
-                                    readToken: s.cloudToken, writeToken: s.cloudToken)
                 note = "从云盘下载…"
-                data = try? await cf.readData(p)
+                do { data = try await cf.readData(p) } catch { note = "云盘下载失败：\(error.localizedDescription)"; return nil }
+                if data == nil { note = "云盘上没找到 \(p)"; return nil }
             }
         }
-        guard let data, (try? data.write(to: local)) != nil else { note = "下载失败"; return nil }
+        guard let data else { note = "对方回执里没有视频"; return nil }
+        guard (try? data.write(to: local)) != nil else { note = "存不下（手机空间满了？）"; return nil }
         note = ""
         return local
     }
