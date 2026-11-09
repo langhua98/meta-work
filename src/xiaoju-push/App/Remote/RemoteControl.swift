@@ -124,7 +124,7 @@ final class RemoteControl: ObservableObject {
 
     func label(_ action: String) -> String {
         ["photo": "拍照", "audio": "录音", "location": "定位", "torch": "手电筒", "ring": "响铃",
-         "info": "设备信息", "bench": "模型测速", "vibrate": "震动", "gimbal": "云台"][action] ?? action
+         "info": "设备信息", "bench": "模型测速", "vibrate": "震动", "gimbal": "云台", "update": "更新"][action] ?? action
     }
 
     private func present(action: String, receipt: [String: Any], cf: CloudFiles,

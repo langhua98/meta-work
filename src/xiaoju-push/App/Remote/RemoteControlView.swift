@@ -63,6 +63,8 @@ struct RemoteControlView: View {
                 btn("响铃找手机", "bell") { await control.send("ring", to: target, seconds: seconds) }
                 btn("设备信息", "info.circle") { await control.send("info", to: target) }
                 btn("模型测速（安卓 0.10+，约 1 分钟）", "speedometer") { await control.send("bench", to: target, wait: 180) }
+                btn("查更新（安卓 0.19+）", "arrow.triangle.2.circlepath") { await control.send("update", to: target, wait: 60, extra: ["check": true]) }
+                btn("更新到最新版（安卓 0.19+）", "arrow.down.circle") { await control.send("update", to: target, wait: 300) }
             }
             .listRowBackground(Theme.card)
             .disabled(target.isEmpty)
