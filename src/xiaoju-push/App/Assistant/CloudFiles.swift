@@ -31,7 +31,20 @@ final class CloudFiles {
         self.writeToken = w.isEmpty ? self.readToken : w
     }
 
-    var canWrite: Bool { writeToken != readToken }
+    /// 能不能写：连接器里那一个令牌通常就带「上传 / 整理」权限，不用再填第二个。
+    /// 只有云盘明确回过「没有改文件的权限」（403），才当它不能写。
+    var canWrite: Bool { !writeToken.isEmpty && !Self.writeDenied(writeToken) }
+
+    private static let deniedLock = NSLock()
+    nonisolated(unsafe) private static var denied: Set<String> = []
+    static func writeDenied(_ token: String) -> Bool { deniedLock.lock(); defer { deniedLock.unlock() }; return denied.contains(token) }
+    private static func markDenied(_ token: String) { deniedLock.lock(); denied.insert(token); deniedLock.unlock() }
+    /// 设置页用：这一对令牌现在能不能写
+    static func canWrite(read: String, organize: String) -> Bool {
+        let w = organize.trimmingCharacters(in: .whitespacesAndNewlines)
+        let t = w.isEmpty ? read.trimmingCharacters(in: .whitespacesAndNewlines) : w
+        return !t.isEmpty && !writeDenied(t)
+    }
 
     private func request(_ method: String, _ path: String, query: [String: String] = [:], body: Data? = nil,
                          json: Bool = true, write: Bool = false, headers: [String: String] = [:]) async throws -> Data {
@@ -52,6 +65,7 @@ final class CloudFiles {
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if (200..<300).contains(code) { return data }
+                if code == 403 && write { Self.markDenied(writeToken) }
                 if code >= 500 && attempt < 2 {
                     try await Task.sleep(nanoseconds: UInt64(3 + attempt * 5) * 1_000_000_000)
                     continue
@@ -75,7 +89,7 @@ final class CloudFiles {
         }
         switch code {
         case 401: return "云盘令牌不对或过期了"
-        case 403: return write ? "这个令牌没有改文件的权限，去设置里填「整理令牌」" : "这个令牌看不到这里"
+        case 403: return write ? "这个令牌没有改文件的权限：在云盘网页给它加上「上传、整理」，或在设置里另填一个整理令牌" : "这个令牌看不到这里"
         case 404: return "云盘里没有这个文件或文件夹"
         case 409: return msg.isEmpty ? "有冲突：可能同名的已经存在，或者文件刚被别人改过" : "有冲突：\(msg)"
         case 429: return "今天的次数用完了，明天再试"
