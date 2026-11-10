@@ -33,6 +33,7 @@ final class RemoteMonitor: ObservableObject {
     @Published var lens = "back"
     @Published var width = 640
     @Published var eco = true                 // 省电侦测（安卓 0.14+）
+    @Published var engine = "kotlin"          // 侦测引擎（安卓 0.29+）：kotlin 基准 / native C++ 超低功耗 / ab 两个对比
 
     @Published private(set) var loaded = false
     @Published private(set) var inflight = 0   // 几条指令在等回执（可以同时好几条）
@@ -42,6 +43,8 @@ final class RemoteMonitor: ObservableObject {
     @Published private(set) var telegram = ""
     @Published private(set) var backup = ""
     @Published private(set) var objects = ""   // 对方能认东西时是模型名（FastestDet），不能是空
+    @Published private(set) var engineLine = "" // 侦测引擎的实测（安卓 0.29+）
+    @Published private(set) var hasEngine = false // 对方认得 engine 字段（0.29 以上）
     @Published private(set) var events: [MonitorEvent] = []
     @Published private(set) var moreEvents = false
 
@@ -87,7 +90,7 @@ final class RemoteMonitor: ObservableObject {
         inflight += 1; defer { inflight -= 1 }
         var cmd: [String: Any] = [
             "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "people": people, "cooldown": cooldown,
-            "audio": audio, "upload": upload, "lens": lens, "width": width, "eco": eco,
+            "audio": audio, "upload": upload, "lens": lens, "width": width, "eco": eco, "engine": engine,
             "regions": regions.map { [$0.minX, $0.minY, $0.width, $0.height] },
         ]
         cmd["on"] = turnOn ?? on
@@ -112,6 +115,8 @@ final class RemoteMonitor: ObservableObject {
             lens = (m["lens"] as? String) ?? "back"
             width = (m["width"] as? Int) ?? 640
             eco = (m["eco"] as? Bool) ?? true
+            hasEngine = m["engine"] != nil
+            engine = (m["engine"] as? String) ?? "kotlin"
             regions = ((m["regions"] as? [[Double]]) ?? []).compactMap { a in
                 a.count == 4 ? CGRect(x: a[0], y: a[1], width: a[2], height: a[3]) : nil
             }
@@ -131,7 +136,27 @@ final class RemoteMonitor: ObservableObject {
         telegram = (st["telegram"] as? String) ?? ""
         backup = (st["backup"] as? String) ?? ""
         objects = (st["objects"] as? String) ?? ""
+        engineLine = Self.engineText(st["engine"] as? [String: Any])
         if let n = st["codec_note"] as? String, !n.isEmpty { note += "\n\(n)" }
+    }
+
+    /// 侦测引擎的实测写成一句话：报了几次、过滤掉几次、待命时相机实际帧率、App 的 CPU、掉电速度、对比结果。
+    static func engineText(_ e: [String: Any]?) -> String {
+        guard let e = e, let name = e["engine"] as? String else { return "" }
+        var p: [String] = [name == "native" ? "C++ 引擎" : name == "ab" ? "C++ 和 Kotlin 对比" : "Kotlin 引擎"]
+        if let m = e["since_min"] as? Int { p.append("开了 \(m) 分钟") }
+        if let n = e["events"] as? Int { p.append("报了 \(n) 次") }
+        if let f = e["filtered"] as? Int, f > 0 { p.append("过滤掉 \(f) 次") }
+        if let s = e["standby_sensor_fps"] as? Double, let l = e["standby_looks_per_s"] as? Double {
+            p.append(String(format: "待命时相机每秒出 %.1f 帧、看 %.1f 帧", s, l))
+        }
+        if let c = e["app_cpu_pct"] as? Double { p.append(String(format: "App CPU %.1f%%", c)) }
+        if let b = e["battery_pct_per_h"] as? Double { p.append(String(format: "每小时掉电 %.1f%%", b)) }
+        if let ab = e["ab"] as? [String: Any] {
+            p.append("两个都发现 \((ab["both"] as? Int) ?? 0) 次、只有 C++ \((ab["native_only"] as? Int) ?? 0) 次、只有 Kotlin \((ab["kotlin_only"] as? Int) ?? 0) 次")
+        }
+        if let note = e["note"] as? String, !note.isEmpty { p.append(note) }
+        return p.joined(separator: " · ")
     }
 
     func loadEvents(more: Bool = false) async {
@@ -230,6 +255,7 @@ struct RemoteMonitorView: View {
                 if !m.statusLine.isEmpty { Text(m.statusLine).font(.footnote).foregroundStyle(Theme.muted) }
                 if !m.telegram.isEmpty { Text("Telegram：\(m.telegram)").font(.footnote).foregroundStyle(Theme.muted) }
                 if !m.backup.isEmpty { Text("备份：\(m.backup)").font(.footnote).foregroundStyle(Theme.muted) }
+                if !m.engineLine.isEmpty { Text("侦测：\(m.engineLine)").font(.footnote).foregroundStyle(Theme.muted) }
                 if !m.note.isEmpty { Text(m.note).font(.footnote).foregroundStyle(Theme.orangeText) }
                 if m.busy { ProgressView() }
             } footer: {
@@ -251,6 +277,21 @@ struct RemoteMonitorView: View {
                         Text(m.eco
                              ? "没动静时相机每秒只看 4 帧、不录像，有动静才开始录（动静前只留几张画面，最多 3 秒）。安卓 0.14 以上。"
                              : "编码器一直开着，能录到动静前 \(m.pre) 秒，但费电得多，要一直插着电。")
+                            .font(.footnote).foregroundStyle(Theme.muted)
+                    }
+                }
+                if m.eco && m.hasEngine {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Picker("侦测引擎", selection: $m.engine) {
+                            Text("Kotlin 基准").tag("kotlin")
+                            Text("C++ 省电").tag("native")
+                            Text("两个对比").tag("ab")
+                        }.pickerStyle(.segmented)
+                        Text(m.engine == "native"
+                             ? "C++ 超低功耗版：没动静时每秒只看 2 帧，有变化升到 4 帧、连续 3 帧才算，误报少。安卓 0.29 以上。"
+                             : m.engine == "ab"
+                             ? "两个引擎看同一帧，按 C++ 的结果录像，状态里记下两个哪里不一样（用来比漏检和误报）。"
+                             : "原来的版本：没动静时每秒看 4 帧、连续 2 帧算动。")
                             .font(.footnote).foregroundStyle(Theme.muted)
                     }
                 }
