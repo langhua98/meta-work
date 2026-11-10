@@ -174,8 +174,9 @@ final class Store: ObservableObject {
         let d = UserDefaults.standard
         // 2026-11：云盘从 HF Space 搬到家里电脑（Tailscale），手机上存着的旧地址自动换成新的
         let savedCloud = d.string(forKey: "cloudURL") ?? Store.defaultCloudURL
-        cloudURL = savedCloud.contains(".hf.space") && savedCloud.contains("xiaoju-cloud") ? Store.defaultCloudURL : savedCloud
-        if cloudURL != savedCloud { d.set(cloudURL, forKey: "cloudURL") }
+        let cloud = savedCloud.contains(".hf.space") && savedCloud.contains("xiaoju-cloud") ? Store.defaultCloudURL : savedCloud
+        if cloud != savedCloud { d.set(cloud, forKey: "cloudURL") }
+        cloudURL = cloud
         cloudToken = Keychain.read("cloudToken")
         githubToken = Keychain.read("githubToken")
         mappings = Store.load("mappings") ?? []
