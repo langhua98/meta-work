@@ -119,7 +119,7 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
 
 @MainActor
 final class Store: ObservableObject {
-    static let defaultCloudURL = "https://langhua1998-xiaoju-cloud.hf.space"
+    static let defaultCloudURL = "https://node.tail823dbd.ts.net"
     static let shared = Store()
     static let defaultTemplates = ["从小橘云盘更新 {文件}", "修复：{文件}", "新功能：{文件}", "整理代码：{文件}"]
 
