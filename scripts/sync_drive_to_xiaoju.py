@@ -7,7 +7,7 @@ import pathlib
 import os
 
 # 配置 - 从环境变量读，不要硬编码 token
-XIAOJU_API = "https://langhua1998-xiaoju-cloud.hf.space/api/agent/v1"
+XIAOJU_API = "https://node.tail823dbd.ts.net/api/agent/v1"
 XIAOJU_TOKEN = os.getenv("XIAOJU_TOKEN")  # export XIAOJU_TOKEN=xxx
 GITHUB_REPO = "langhua98/meta-work"
 

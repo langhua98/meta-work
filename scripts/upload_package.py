@@ -10,7 +10,7 @@
 """
 import json, os, sys, urllib.parse, urllib.request, urllib.error
 
-BASE = (os.environ.get("XIAOJU_URL") or "https://langhua1998-xiaoju-cloud.hf.space").rstrip("/") + "/api/agent/v1"
+BASE = (os.environ.get("XIAOJU_URL") or "https://node.tail823dbd.ts.net").rstrip("/") + "/api/agent/v1"
 TOKEN = os.environ.get("XIAOJU_TOKEN", "")
 FOLDER = "/软件包"
 

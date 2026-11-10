@@ -20,7 +20,7 @@
 ```
 
 ### 为什么用 Google Drive 中转
-- 我 (Meta AI) 沙盒无公网，无法直接调用 `https://langhua1998-xiaoju-cloud.hf.space/api/agent/v1`
+- 我 (Meta AI) 沙盒无公网，无法直接调用 `https://node.tail823dbd.ts.net/api/agent/v1`
 - 但我能写 Google Drive，所以 Drive 是唯一中间存储
 - opencode 跑在用户本地，有公网，能从 Drive 拉到小桔云，再推 GitHub
 

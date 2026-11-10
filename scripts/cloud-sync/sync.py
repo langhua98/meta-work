@@ -12,7 +12,7 @@
 只用 Python 标准库。环境变量：
   XIAOJU_TOKEN    小橘云盘 agent 令牌（xa_…，只要读权限）
   GH_PUSH_TOKEN   能写目标仓库的 GitHub 令牌
-  XIAOJU_URL      可选，默认 https://langhua1998-xiaoju-cloud.hf.space
+  XIAOJU_URL      可选，默认 https://node.tail823dbd.ts.net
 用法：sync.py 配置.json [状态.json] [--dry-run]
 """
 import base64
@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 
 GITHUB = "https://api.github.com"
-DEFAULT_CLOUD = "https://langhua1998-xiaoju-cloud.hf.space"
+DEFAULT_CLOUD = "https://node.tail823dbd.ts.net"
 MAX_FILE_BYTES = 50 * 1024 * 1024
 SKIP_NAMES = {".git", "node_modules", ".DS_Store"}
 

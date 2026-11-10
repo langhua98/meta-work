@@ -6,7 +6,7 @@
 B 设备装了「小橘遥控」App 并开着「待命」。
 
 环境变量：
-  XIAOJU_BASE   云盘地址，默认 https://langhua1998-xiaoju-cloud.hf.space
+  XIAOJU_BASE   云盘地址，默认 https://node.tail823dbd.ts.net
   XIAOJU_TOKEN  云盘令牌 xa_…（必填，要有写权限）
   XIAOJU_PAIR   配对口令，要和 B 手机里填的一样
 
@@ -27,7 +27,7 @@ B 设备装了「小橘遥控」App 并开着「待命」。
 """
 import argparse, base64, json, os, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
-BASE = os.environ.get("XIAOJU_BASE", "https://langhua1998-xiaoju-cloud.hf.space").rstrip("/")
+BASE = os.environ.get("XIAOJU_BASE", "https://node.tail823dbd.ts.net").rstrip("/")
 TOKEN = os.environ.get("XIAOJU_TOKEN", "")
 PAIR = os.environ.get("XIAOJU_PAIR", "0")  # 法莉娅（安卓）默认口令是 0
 
