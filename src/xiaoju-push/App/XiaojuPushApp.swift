@@ -25,7 +25,7 @@ enum Route: Hashable {
     case zip
     /// 双机推理（两台手机合跑 Qwen3.5-9B）
     case pipe
-    /// 遥控（云控）：经小橘云盘控制法莉娅 / Vania，2026-11 从设置挪到首页
+    /// 云控：经小橘云盘控制法莉娅 / Vania，2026-11 从设置挪到首页
     case remote
 }
 
@@ -94,7 +94,7 @@ struct HomeView: View {
                         HStack(spacing: 12) {
                             Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(Theme.orangeText).frame(width: 24)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("遥控").font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
+                                Text("云控").font(.system(size: 16, weight: .medium)).foregroundStyle(Theme.text)
                                 Text("经小橘云盘控制别的设备：实时画面、移动侦测、拍照、手电…").font(.system(size: 13)).foregroundStyle(Theme.muted)
                             }
                             Spacer()
