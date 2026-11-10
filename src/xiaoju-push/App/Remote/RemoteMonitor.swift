@@ -65,8 +65,21 @@ final class RemoteMonitor: ObservableObject {
         var cmd = extra
         cmd["id"] = id; cmd["do"] = action
         cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
-        do { try await cf.relaySend(RemoteBox.inbox(dev), cmd) } catch {
-            note = "发送失败：\(error.localizedDescription)"; return nil
+        do {
+            try await cf.relaySend(RemoteBox.inbox(dev), cmd)
+            await RemoteBackup.refreshOnce(dev, cf)
+        } catch {
+            // 云盘连不上：改走备用通道（ntfy.sh，加密，见 RemoteBackup）
+            guard let info = RemoteBackup.info(dev) else { note = "发送失败：\(error.localizedDescription)"; return nil }
+            let sent = Date()
+            do { try await RemoteBackup.send(info, cmd) } catch {
+                note = "发送失败：云盘和备用通道都连不上"; return nil
+            }
+            note = "云盘连不上，走的备用通道"
+            if let r = await RemoteBackup.wait(info, id: id, since: sent,
+                                               deadline: Date().addingTimeInterval(TimeInterval(wait) + RemoteBackup.extraWait)) { return r }
+            note = "备用通道等不到回执：确认对方开着待命、是安卓 0.31 以上"
+            return nil
         }
         let deadline = Date().addingTimeInterval(TimeInterval(wait))
         while Date() < deadline {
