@@ -59,14 +59,27 @@ final class RemoteControl: ObservableObject {
         let inbox = "/小橘推送/遥控/\(dev)/收件/\(id).json"
         let outbox = "/小橘推送/遥控/\(dev)/回执"
 
-        // 快路：云盘的即时信箱（内存里，长轮询，发了对方马上收到）；服务端还没有时退回到写文件
+        // 快路：云盘的即时信箱（内存里，长轮询，发了对方马上收到）；服务端还没有时退回到写文件。
+        // 云盘连不上（家里电脑关机）：改走备用通道（ntfy.sh，加密，见 RemoteBackup）
         var viaRelay = true
+        var backup: RemoteBackup.Info?
         do {
             try await cf.relaySend(RemoteBox.inbox(dev), cmd)
+            await RemoteBackup.refreshOnce(dev, cf)   // 云盘好着：顺便取一下备用通道的密钥
         } catch where CloudFiles.relayMissing(error) {
             viaRelay = false
         } catch {
-            log("发送失败：\(error.localizedDescription)"); return
+            guard let info = RemoteBackup.info(dev) else {
+                log("发送失败：\(error.localizedDescription)。备用通道还没准备好：云盘正常时给这台设备发过一次指令，才会取到备用通道的密钥。")
+                return
+            }
+            do {
+                try await RemoteBackup.send(info, cmd)
+                backup = info
+                log("云盘连不上（\(error.localizedDescription)），改走备用通道，手机切过来可能要等一会儿")
+            } catch {
+                log("发送失败：云盘和备用通道都连不上（\(error.localizedDescription)）"); return
+            }
         }
         if !viaRelay {
             do {
@@ -78,6 +91,23 @@ final class RemoteControl: ObservableObject {
         let sentAt = Date()
         pending.append(PendingCommand(id: id, action: action, target: dev, started: sentAt))
         defer { pending.removeAll { $0.id == id } }
+
+        if let info = backup {
+            // 备用通道：手机发现云盘停了才开始收，多等一会儿
+            let r = await RemoteBackup.wait(info, id: id, since: sentAt,
+                                            deadline: Date().addingTimeInterval(wait + RemoteBackup.extraWait)) { [weak self] in
+                Task { @MainActor in
+                    if let self, let i = self.pending.firstIndex(where: { $0.id == id }) { self.pending[i].received = true }
+                }
+            }
+            guard pending.contains(where: { $0.id == id }) else { return }   // 被取消了
+            if let r {
+                await present(action: action, receipt: r, cf: cf, took: Date().timeIntervalSince(sentAt), via: "，走的备用通道")
+            } else {
+                log("\(label(action))：备用通道等不到回执。手机可能没开待命、没联网，或者还没升级到 0.31。")
+            }
+            return
+        }
 
         // 等回执（一般最多 90 秒；模型测速要一分多钟）。对方说「收到了」以后再多等一会儿
         var deadline = Date().addingTimeInterval(wait)
@@ -99,7 +129,7 @@ final class RemoteControl: ObservableObject {
             }
             if let r = got.first(where: { ($0["pending"] as? Bool) != true }) {
                 await present(action: action, receipt: r, cf: cf,
-                              took: Date().timeIntervalSince(sentAt), viaRelay: viaRelay)
+                              took: Date().timeIntervalSince(sentAt), via: viaRelay ? "" : "，走的文件信箱")
                 return
             }
             if !got.isEmpty, let i = pending.firstIndex(where: { $0.id == id }), !pending[i].received {
@@ -119,7 +149,9 @@ final class RemoteControl: ObservableObject {
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         var cmd: [String: Any] = ["id": "cancel-" + String(UUID().uuidString.prefix(8)), "do": "cancel", "target": p.id]
         cmd["pair"] = s.remotePair.isEmpty ? "0" : s.remotePair  // 空着就发默认口令 0（法莉娅 0.20 默认口令是 0）
-        try? await cf.relaySend(RemoteBox.inbox(p.target), cmd)
+        do { try await cf.relaySend(RemoteBox.inbox(p.target), cmd) } catch {
+            if let info = RemoteBackup.info(p.target) { try? await RemoteBackup.send(info, cmd) }
+        }
     }
 
     func label(_ action: String) -> String {
@@ -128,9 +160,9 @@ final class RemoteControl: ObservableObject {
     }
 
     private func present(action: String, receipt: [String: Any], cf: CloudFiles,
-                         took: TimeInterval, viaRelay: Bool) async {
+                         took: TimeInterval, via: String) async {
         var text = (receipt["text"] as? String) ?? ""
-        text += String(format: "\n（%.1f 秒%@）", took, viaRelay ? "" : "，走的文件信箱")
+        text += String(format: "\n（%.1f 秒%@）", took, via)
         var image: UIImage?
         // 即时信箱：照片直接放在回执里（{"name","data": base64}）；文件信箱：回执里是云盘路径
         for entry in (receipt["files"] as? [Any]) ?? [] where image == nil {

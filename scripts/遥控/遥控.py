@@ -24,8 +24,12 @@ B 设备装了「小橘遥控」App 并开着「待命」。
   遥控.py 测试机B gimbal --go look --yaw -45 --pitch 10   （转到相对归位点的方向）
   遥控.py 测试机B gimbal --go move --yaw 20 --ms 1000     （按 20°/s 转 1 秒）
   遥控.py 测试机B gimbal --go center          （回到归位点）
+
+备用通道（安卓 0.31+）：云盘（家里电脑）连不上时，指令和回执改走公共信箱 ntfy.sh，内容加密。
+密钥是手机生成的，云盘正常时存在 /小橘推送/遥控/<设备名>/备用通道.json；这个脚本云盘正常时取一份
+存到 ~/.xiaoju-remote/备用通道-<设备名>.json，云盘停了就用它。算法和安卓的 BackupCrypto.kt 一样。
 """
-import argparse, base64, json, os, sys, time, urllib.error, urllib.parse, urllib.request, uuid
+import argparse, base64, hashlib, hmac, json, os, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
 BASE = os.environ.get("XIAOJU_BASE", "https://node.tail823dbd.ts.net").rstrip("/")
 TOKEN = os.environ.get("XIAOJU_TOKEN", "")
@@ -75,6 +79,124 @@ def relay_wait(box, seconds):
 
 def download(item_id):
     return req("GET", f"/api/agent/v1/items/{item_id}/content")
+
+
+# ---- 备用通道（ntfy.sh，加密）----
+
+BACKUP_DIR = os.path.expanduser("~/.xiaoju-remote")
+
+
+def _h(key, *parts):
+    m = hmac.new(key, digestmod=hashlib.sha256)
+    for p in parts:
+        m.update(p)
+    return m.digest()
+
+
+def _stream(enc, nonce, data):
+    out = bytearray(len(data))
+    for blk in range((len(data) + 31) // 32):
+        ks = _h(enc, nonce, blk.to_bytes(4, "big"))
+        s = blk * 32
+        for i in range(min(32, len(data) - s)):
+            out[s + i] = data[s + i] ^ ks[i]
+    return bytes(out)
+
+
+def bk_seal(key, plain, nonce=None):
+    """nonce(16) ‖ 明文 XOR 密钥流 ‖ tag(32)，见安卓 BackupCrypto.kt"""
+    nonce = nonce or os.urandom(16)
+    ct = _stream(_h(key, b"xj-enc"), nonce, plain)
+    return nonce + ct + _h(_h(key, b"xj-mac"), nonce, ct)
+
+
+def bk_open(key, sealed):
+    if len(sealed) < 48:
+        return None
+    nonce, ct, tag = sealed[:16], sealed[16:-32], sealed[-32:]
+    if not hmac.compare_digest(tag, _h(_h(key, b"xj-mac"), nonce, ct)):
+        return None
+    return _stream(_h(key, b"xj-enc"), nonce, ct)
+
+
+def bk_open_text(key, text):
+    if not text.startswith("xj1."):
+        return None
+    try:
+        return bk_open(key, base64.b64decode(text[4:]))
+    except Exception:
+        return None
+
+
+def backup_path(device):
+    return os.path.join(BACKUP_DIR, f"备用通道-{device}.json")
+
+
+def backup_refresh(device):
+    """云盘正常时取手机存的备用通道密钥，记到本机。取不到不要紧。"""
+    try:
+        it = next((x for x in list_dir(f"/小橘推送/遥控/{device}") if x.get("name") == "备用通道.json"), None)
+        if not it:
+            return
+        info = json.loads(download(it["id"]))
+        if len(base64.b64decode(info.get("key", ""))) != 32:
+            return
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        fd = os.open(backup_path(device), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(info, f)
+    except Exception:
+        pass
+
+
+def backup_info(device):
+    try:
+        with open(backup_path(device)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def backup_send(info, cmd):
+    c = dict(cmd, at=int(time.time()))  # 手机拒绝 15 分钟以前的指令
+    key = base64.b64decode(info["key"])
+    body = ("xj1." + base64.b64encode(bk_seal(key, json.dumps(c, ensure_ascii=False).encode("utf-8"))).decode()).encode()
+    r = urllib.request.Request(f"{info['server']}/{info['cmd']}", method="POST", data=body)
+    with urllib.request.urlopen(r, timeout=30) as resp:
+        resp.read()
+
+
+def backup_wait(info, cid, since, deadline):
+    """在 ntfy 的回执信箱里等这条指令的回执（跳过「收到了」）。"""
+    key = base64.b64decode(info["key"])
+    url = f"{info['server']}/{info['reply']}/json?since={int(since) - 5}"
+    while time.time() < deadline:
+        try:
+            # ntfy 大约每 45 秒发一次 keepalive，90 秒没东西就当断了
+            with urllib.request.urlopen(url, timeout=90) as resp:
+                for raw in resp:
+                    if time.time() >= deadline:
+                        return None
+                    try:
+                        m = json.loads(raw)
+                    except Exception:
+                        continue
+                    if m.get("event") != "message":
+                        continue
+                    att = m.get("attachment") or {}
+                    if att.get("url"):
+                        with urllib.request.urlopen(att["url"], timeout=120) as a:
+                            plain = bk_open(key, a.read())
+                    else:
+                        plain = bk_open_text(key, m.get("message", ""))
+                    if not plain:
+                        continue
+                    r = json.loads(plain)
+                    if r.get("id") == cid and not r.get("pending"):
+                        return r
+        except Exception:
+            time.sleep(3)
+    return None
 
 
 def main():
@@ -129,21 +251,38 @@ def main():
             cmd["ms"] = a.ms
 
     sent = time.time()
-    via_relay = relay_send(f"遥控/{a.device}/收件", cmd)
-    if not via_relay:
-        inbox = f"/小橘推送/遥控/{a.device}/收件/{cid}.json"
-        put_file(inbox, json.dumps(cmd, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
-    print(f"已发送 [{a.action}] → {a.device}（id {cid}{'' if via_relay else '，走文件信箱'}），等回执…")
+    try:
+        via_relay = relay_send(f"遥控/{a.device}/收件", cmd)
+        if not via_relay:
+            inbox = f"/小橘推送/遥控/{a.device}/收件/{cid}.json"
+            put_file(inbox, json.dumps(cmd, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        backup_refresh(a.device)  # 云盘好着：顺便取一下备用通道的密钥
+        backup = None
+    except (urllib.error.URLError, OSError) as e:
+        if isinstance(e, urllib.error.HTTPError) and e.code < 500:
+            raise
+        # 云盘连不上（家里电脑关机）：改走备用通道
+        backup = backup_info(a.device)
+        if not backup:
+            sys.exit(f"云盘连不上（{e}），备用通道也还没准备好：云盘正常时先发一次指令，才会取到密钥")
+        backup_send(backup, cmd)
+        via_relay = False
+    print(f"已发送 [{a.action}] → {a.device}（id {cid}"
+          f"{'，云盘连不上，走备用通道（手机切过来可能要等一会儿）' if backup else ('' if via_relay else '，走文件信箱')}），等回执…")
 
     outbox = f"/小橘推送/遥控/{a.device}/回执"
-    deadline = time.time() + a.timeout
+    deadline = time.time() + a.timeout + (300 if backup else 0)
     while time.time() < deadline:
         r = None
-        if via_relay:
+        if backup:
+            r = backup_wait(backup, cid, sent, deadline)
+            if not r:
+                break
+        elif via_relay:
             left = max(1, min(25, int(deadline - time.time())))
             got = relay_wait(f"遥控/{a.device}/回执/{cid}", left)
             r = got[0] if got else None
-        else:
+        elif not backup:
             time.sleep(1)
             it = next((x for x in list_dir(outbox) if x.get("name") == f"{cid}.json"), None)
             if it:
