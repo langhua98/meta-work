@@ -203,13 +203,14 @@ def main():
     ap = argparse.ArgumentParser(description="小橘遥控发送端")
     ap.add_argument("device", help="B 设备的名字，和 App 里填的一样")
     ap.add_argument("action", choices=["info", "photo", "audio", "location", "torch", "vibrate", "ring", "shell", "gimbal",
-                                       "update"])
+                                       "update", "log"])
     ap.add_argument("--lens", choices=["back", "front"], default="back")
     ap.add_argument("--seconds", type=int, default=5)
     ap.add_argument("--on", action="store_true")
     ap.add_argument("--off", action="store_true")
     ap.add_argument("--ms", type=int, default=800)
     ap.add_argument("--cmd", default="")
+    ap.add_argument("--lines", type=int, default=200, help="log：要最近多少行运行记录（安卓 0.37）")
     ap.add_argument("--go", default="status",
                     choices=["status", "connect", "disconnect", "turn", "look", "move", "stop", "center", "home"],
                     help="gimbal 的动作")
@@ -237,6 +238,8 @@ def main():
         if a.check:
             cmd["check"] = True
         a.timeout = max(a.timeout, 300)  # 要下载安装包，慢一点
+    elif a.action == "log":
+        cmd["lines"] = a.lines
     elif a.action == "shell":
         if not a.cmd:
             sys.exit("shell 要用 --cmd 给命令")

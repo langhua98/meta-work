@@ -5,6 +5,7 @@ import Foundation
 // 被控端给每帧画面、每包声音都打上它自己的采集时间（单调时钟，毫秒）。这边：
 //   1. 对表：offset ≈ 本机到达时间 − 对方采集时间，取最快到的那些包（网络偶尔变慢不算进去）；
 //   2. 播放时间 = 采集时间 + offset + 缓冲（挡住网络抖动；按最近的抖动自动调，网络稳时 0.1 秒上下）；
+//      有声音时只拿声音的包对表（画面的采集时间里还有编码的时间，拿来对表会把缓冲撑大、忽大忽小）；
 //   3. 声音按播放时间排进播放器（正常时一包接一包无缝播，对不上了才重新对齐），画面到了播放时间才显示。
 // 两边用同一条时间线，所以声音和画面是对齐的。
 
@@ -39,7 +40,8 @@ struct LiveTimeline {
         let sorted = late.sorted()
         let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
         let want = min(max(p95 + 40, Self.minDelay), Self.maxDelay)
-        delay = want > delay ? want : max(want, delay - 20)
+        // 减得慢一点（以前每秒 20 ms）：每减一次声音就要丢一点去追，减得快就一会儿断一下
+        delay = want > delay ? want : max(want, delay - 10)
     }
 
     func playout(_ senderMs: Double) -> Double? { offset.map { senderMs + $0 + delay } }
@@ -93,9 +95,10 @@ final class LiveAudio {
         if at + dur < now - 50 { return }  // 早就过了播放时间，丢掉，免得越拖越晚
         if let e = endMs, e > now + 5 {
             // 排着的声音还没播完：差不多接得上就无缝接着播；
-            // 排得比时间线晚太多（缓冲刚变小）就丢这一包追上——排进去的声音只会按顺序播，不能插队
-            if at < e - 60 { return }
-            if at <= e + 60 {
+            // 排得比时间线晚太多（缓冲刚变小）就丢这一包追上——排进去的声音只会按顺序播，不能插队。
+            // 以前差 60 ms 就丢 / 就重新对齐，时间线稍微一动声音就断一下（「一卡一卡」）；现在差 150 ms 以内都接着播
+            if at < e - 150 { return }
+            if at <= e + 120 {
                 player.scheduleBuffer(buf, completionHandler: nil)
                 endMs = e + dur
                 return
