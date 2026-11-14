@@ -35,6 +35,11 @@ final class RemoteVideo: ObservableObject {
     private var pending: [(at: Double, img: UIImage)] = []
     private var display: Task<Void, Never>?
     private var decoder = LiveH264Decoder()
+    // 解画面排成一条队（按顺序解），不挡着收消息：以前每帧都等解完才收下一条，声音包跟着被挡住，到了一阵一阵的
+    private var decodeTail: Task<Void, Never>?
+    private var decoding = 0
+    private var needKey = false      // 解得太慢丢过 H.264 帧：等下一个关键帧
+    private var audioSeen = false    // 收到过声音：时间线只看声音的包
     private var bytes = (t: Date(), n: 0)
     private var room = ""
     private static let direct = "Wi-Fi 直连"
@@ -50,6 +55,7 @@ final class RemoteVideo: ObservableObject {
 
         running = true; frame = nil; frames = 0; fps = 0; note = "连接直播通道…"
         withAudio = sound; pending = []; timeline = LiveTimeline(delay: 200); tip = ""
+        decodeTail = nil; decoding = 0; needKey = false; audioSeen = false
         codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false; route = ""
         decoder = LiveH264Decoder(); bytes = (Date(), 0)
         self.target = dev
@@ -166,6 +172,7 @@ final class RemoteVideo: ObservableObject {
                 if kind == 2 {
                     guard withAudio, let audio, d.count > 10 else { continue }
                     let ts = d.liveTimestamp(at: 2)
+                    audioSeen = true
                     timeline.observe(senderMs: ts, arrivedMs: arrived)
                     guard let at = timeline.playout(ts) else { continue }
                     let rate: Double = d[d.startIndex + 1] == 2 ? 8000 : 16000
@@ -179,27 +186,42 @@ final class RemoteVideo: ObservableObject {
                 var at: Double?
                 if kind != 1, withAudio {
                     let ts = d.liveTimestamp(at: 2)
-                    timeline.observe(senderMs: ts, arrivedMs: arrived)
+                    // 还没收到声音时先拿画面对表；有声音了只看声音
+                    if !audioSeen { timeline.observe(senderMs: ts, arrivedMs: arrived) }
                     at = timeline.playout(ts)
                 }
                 let rot = Int(d[d.startIndex + 1]) * 90
                 let payload = d.subdata(in: (d.startIndex + head)..<d.endIndex)
-                let img: UIImage?
-                if kind == 4 {
-                    if codec != "H.264" { codec = "H.264" }
-                    let dec = decoder   // 按顺序一帧帧解（H.264 后面的帧要靠前面的）
-                    img = await Task.detached { dec.decode(payload).map { UIImage(cgImage: $0) } }.value
-                } else {
-                    if codec != "JPEG" { codec = "JPEG" }
-                    img = await Task.detached { UIImage(data: payload)?.preparingForDisplay() }.value
+                let h264 = kind == 4
+                let key = h264 && (d[d.startIndex + 10] & 1) == 1
+                // 解得跟不上（排了太多）：JPEG 直接丢这一帧；H.264 丢到下一个关键帧（后面的帧要靠前面的）
+                if decoding >= 24 && !key {
+                    if h264 { needKey = true }
+                    continue
                 }
-                guard running, let img else { continue }
-                let shown = rotated(img, rot)
-                if let at {
-                    pending.append((at, shown))
-                    if pending.count > 30 { pending.removeFirst(pending.count - 30) }
-                } else {
-                    show(shown)
+                if h264 {
+                    if needKey && !key { continue }
+                    if key { needKey = false }
+                    if codec != "H.264" { codec = "H.264" }
+                } else if codec != "JPEG" { codec = "JPEG" }
+                decoding += 1
+                let prev = decodeTail
+                let dec = decoder   // 按顺序一帧帧解（H.264 后面的帧要靠前面的）
+                decodeTail = Task { [weak self] in
+                    await prev?.value
+                    let img: UIImage? = h264
+                        ? await Task.detached { dec.decode(payload).map { UIImage(cgImage: $0) } }.value
+                        : await Task.detached { UIImage(data: payload)?.preparingForDisplay() }.value
+                    guard let self else { return }
+                    self.decoding -= 1
+                    guard self.running, let img else { return }
+                    let shown = self.rotated(img, rot)
+                    if let at {
+                        self.pending.append((at, shown))
+                        if self.pending.count > 30 { self.pending.removeFirst(self.pending.count - 30) }
+                    } else {
+                        self.show(shown)
+                    }
                 }
             case .string(let t):
                 if t.contains("\"pub\":true") { seenPub = true; if frames == 0 { note = "对方开始推流了…" } }
@@ -329,6 +351,7 @@ final class RemoteVideo: ObservableObject {
     func stop() {
         running = false
         display?.cancel(); display = nil
+        decodeTail = nil
         audio?.stop(); audio = nil
         pending = []
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
