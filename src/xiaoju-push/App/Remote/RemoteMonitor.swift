@@ -4,6 +4,7 @@ import UIKit
 
 // 移动侦测（被控端是安卓 0.8+）：开关、灵敏度、只看哪块区域、录多久、Telegram 提醒、备份；看录好的事件、回放、存相册。
 // 侦测在安卓手机上跑，录像先存在那台手机上，再慢慢备份到云盘；这边只是发指令（即时信箱）、看结果。
+// 声音监听（安卓 0.41+）：平时只听不录，有声音才录一段（只有声音，.wav），和录像放在同一个列表里。设置在移动侦测的设置下面。
 
 struct MonitorEvent: Identifiable {
     let name: String
@@ -14,7 +15,10 @@ struct MonitorEvent: Identifiable {
     let uploaded: String
     let size: Int
     let labels: String  // 认出来在动的是什么（「人×2、猫」），安卓 0.12+，认不出来是空
+    let sound: Bool     // 声音监听录的一段（只有声音，.wav），安卓 0.41+
     let thumb: UIImage?
+    /// 有没有能放的文件（视频或者录音）
+    var hasMedia: Bool { video || sound }
     var id: String { name }
 }
 
@@ -34,6 +38,12 @@ final class RemoteMonitor: ObservableObject {
     @Published var width = 640
     @Published var eco = true                 // 省电侦测（安卓 0.14+）
     @Published var engine = "kotlin"          // 侦测引擎（安卓 0.29+）：kotlin 基准 / native C++ 超低功耗 / ab 两个对比
+    // 声音监听（安卓 0.41+）：和移动侦测各开各的
+    @Published var sound = false
+    @Published var soundSens = 50.0
+    @Published var soundPre = 3
+    @Published var soundPost = 10
+    @Published var soundNotify = false
 
     @Published private(set) var loaded = false
     @Published private(set) var inflight = 0   // 几条指令在等回执（可以同时好几条）
@@ -45,6 +55,8 @@ final class RemoteMonitor: ObservableObject {
     @Published private(set) var objects = ""   // 对方能认东西时是模型名（FastestDet），不能是空
     @Published private(set) var engineLine = "" // 侦测引擎的实测（安卓 0.29+）
     @Published private(set) var hasEngine = false // 对方认得 engine 字段（0.29 以上）
+    @Published private(set) var hasSound = false  // 对方有声音监听（0.41 以上）
+    @Published private(set) var soundLine = ""    // 声音监听现在的状态（在不在听、音量、底噪）
     @Published private(set) var events: [MonitorEvent] = []
     @Published private(set) var moreEvents = false
 
@@ -99,7 +111,7 @@ final class RemoteMonitor: ObservableObject {
     }
 
     /// 打开 / 关闭 / 改设置：把这边的设置全发过去。
-    func save(turnOn: Bool? = nil) async {
+    func save(turnOn: Bool? = nil, soundOn: Bool? = nil) async {
         inflight += 1; defer { inflight -= 1 }
         var cmd: [String: Any] = [
             "sensitivity": Int(sensitivity), "pre": pre, "post": post, "notify": notify, "people": people, "cooldown": cooldown,
@@ -107,6 +119,10 @@ final class RemoteMonitor: ObservableObject {
             "regions": regions.map { [$0.minX, $0.minY, $0.width, $0.height] },
         ]
         cmd["on"] = turnOn ?? on
+        // 声音监听的设置一起发（老版本的安卓不认这几个字段，会当没看见）
+        cmd["sound"] = soundOn ?? sound
+        cmd["sound_sens"] = Int(soundSens); cmd["sound_pre"] = soundPre; cmd["sound_post"] = soundPost
+        cmd["sound_notify"] = soundNotify
         guard let r = await call("monitor", cmd) else { return }
         take(r)
     }
@@ -129,6 +145,12 @@ final class RemoteMonitor: ObservableObject {
             width = (m["width"] as? Int) ?? 640
             eco = (m["eco"] as? Bool) ?? true
             hasEngine = m["engine"] != nil
+            hasSound = m["sound"] != nil
+            sound = (m["sound"] as? Bool) ?? false
+            soundSens = Double((m["sound_sens"] as? Int) ?? 50)
+            soundPre = (m["sound_pre"] as? Int) ?? 3
+            soundPost = (m["sound_post"] as? Int) ?? 10
+            soundNotify = (m["sound_notify"] as? Bool) ?? false
             engine = (m["engine"] as? String) ?? "kotlin"
             regions = ((m["regions"] as? [[Double]]) ?? []).compactMap { a in
                 a.count == 4 ? CGRect(x: a[0], y: a[1], width: a[2], height: a[3]) : nil
@@ -150,7 +172,20 @@ final class RemoteMonitor: ObservableObject {
         backup = (st["backup"] as? String) ?? ""
         objects = (st["objects"] as? String) ?? ""
         engineLine = Self.engineText(st["engine"] as? [String: Any])
+        soundLine = Self.soundText(st["sound"] as? [String: Any])
         if let n = st["codec_note"] as? String, !n.isEmpty { note += "\n\(n)" }
+    }
+
+    /// 声音监听现在怎么样：在不在听、正在录没有、音量和底噪（分贝，比底噪高出门槛才算有声音）。
+    static func soundText(_ s: [String: Any]?) -> String {
+        guard let s = s, (s["on"] as? Bool) == true else { return "" }
+        guard (s["listening"] as? Bool) == true else { return "麦克风还没开（被别的占着，或者没有麦克风权限）" }
+        var p: [String] = [(s["recording"] as? Bool) == true ? "正在录" : "正在听"]
+        if let l = s["level"] as? Int, let f = s["floor"] as? Int {
+            p.append("现在音量 \(l)、底噪 \(f)")
+            if let m = s["margin"] as? Int { p.append("比底噪高 \(m) 才录") }
+        }
+        return p.joined(separator: " · ")
     }
 
     /// 侦测引擎的实测写成一句话：报了几次、过滤掉几次、待命时相机实际帧率、App 的 CPU、掉电速度、对比结果。
@@ -183,25 +218,26 @@ final class RemoteMonitor: ObservableObject {
             return MonitorEvent(name: (o["name"] as? String) ?? "", at: at, dur: (o["dur"] as? Int) ?? 0,
                                 motions: (o["motions"] as? Int) ?? 1, video: (o["video"] as? Bool) ?? false,
                                 uploaded: (o["uploaded"] as? String) ?? "", size: (o["size"] as? Int) ?? 0,
-                                labels: (o["labels"] as? String) ?? "", thumb: thumb)
+                                labels: (o["labels"] as? String) ?? "", sound: (o["sound"] as? Bool) ?? false, thumb: thumb)
         }
         events = more ? events + got : got
         moreEvents = got.count >= 30
         if !more { note = "" }
     }
 
-    /// 取一段视频，存成本机的临时文件（取过的不再取）。没有视频时返回截图文件。
+    /// 取一段视频（或者录音），存成本机的临时文件（取过的不再取）。都没有时返回截图文件。
     func fetch(_ e: MonitorEvent) async -> URL? {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("monitor")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let local = dir.appendingPathComponent("\(target)-\(e.name).\(e.video ? "mov" : "jpg")")
+        let local = dir.appendingPathComponent("\(target)-\(e.name).\(e.sound ? "wav" : e.video ? "mov" : "jpg")")
+        let what = e.sound ? "录音" : "视频"
         if FileManager.default.fileExists(atPath: local.path) { return local }
         inflight += 1; defer { inflight -= 1 }
         let s = Store.shared
         let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         // 已经备份到云盘的：直接从云盘下，不用先问对方手机（对方离线、改了设备名、相机卡住时也能看）
-        if e.video, !e.uploaded.isEmpty {
+        if e.hasMedia, !e.uploaded.isEmpty {
             note = "从云盘下载…"
             do {
                 if let d = try await cf.readData(e.uploaded), (try? d.write(to: local)) != nil { note = ""; return local }
@@ -210,7 +246,7 @@ final class RemoteMonitor: ObservableObject {
                 note = "云盘下载失败（\(error.localizedDescription)），问对方手机要…"
             }
         } else {
-            note = e.size > (5 << 20) ? "视频比较大，对方先传到云盘再给你，要等一会儿…" : "取视频…"
+            note = e.size > (5 << 20) ? "\(what)比较大，对方先传到云盘再给你，要等一会儿…" : "取\(what)…"
         }
         guard let r = await call("event_get", ["name": e.name], wait: 180) else { return nil }
         guard (r["ok"] as? Bool) != false else { note = (r["text"] as? String) ?? "取不到"; return nil }
@@ -223,7 +259,7 @@ final class RemoteMonitor: ObservableObject {
                 if data == nil { note = "云盘上没找到 \(p)"; return nil }
             }
         }
-        guard let data else { note = "对方回执里没有视频"; return nil }
+        guard let data else { note = "对方回执里没有\(what)"; return nil }
         guard (try? data.write(to: local)) != nil else { note = "存不下（手机空间满了？）"; return nil }
         note = ""
         return local
@@ -340,6 +376,42 @@ struct RemoteMonitorView: View {
             }
             .listRowBackground(Theme.card)
 
+            Section {
+                Toggle(isOn: Binding(get: { m.sound }, set: { v in Haptics.tap(); Task { await m.save(soundOn: v) } })) {
+                    Label("声音监听", systemImage: "ear").foregroundStyle(Theme.orangeText)
+                }
+                .disabled(!m.loaded || !m.hasSound)
+                if m.loaded && !m.hasSound {
+                    Text("那台手机的小橘遥控要更新到安卓 0.41 以上才有声音监听。").font(.footnote).foregroundStyle(Theme.muted)
+                }
+                if !m.soundLine.isEmpty { Text(m.soundLine).font(.footnote).foregroundStyle(Theme.muted) }
+                if m.hasSound {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("灵敏度 \(Int(m.soundSens))（越大越灵敏，老是乱录就调小）").font(.footnote).foregroundStyle(Theme.muted)
+                        Slider(value: $m.soundSens, in: 1...100, step: 1)
+                    }
+                    Stepper("有声音前留 \(m.soundPre) 秒", value: $m.soundPre, in: 0...10)
+                    Stepper("安静 \(m.soundPost) 秒后停", value: $m.soundPost, in: 5...120, step: 5)
+                    Toggle(isOn: $m.soundNotify) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Telegram 提醒")
+                            Text("录到一段就发一句话（不带录音），两次至少隔 \(m.cooldown) 分钟，和移动侦测的提醒分开算。")
+                                .font(.footnote).foregroundStyle(Theme.muted)
+                        }
+                    }
+                    Button {
+                        Haptics.tap()
+                        Task { await m.save() }
+                    } label: { Label("保存声音监听设置", systemImage: "checkmark.circle").foregroundStyle(Theme.orangeText) }
+                    .disabled(!m.loaded)
+                }
+            } header: {
+                Text("声音监听")
+            } footer: {
+                Text("平时只听不录：那台手机的麦克风一直开着，只算音量。有声音才录一段（只录声音，不开相机），录好的在下面「录好的」里，带喇叭图标，一样慢慢备份到云盘。冰箱、风扇这种一直响的声音，响一会儿就不算了。和移动侦测各开各的。麦克风一直开着比较费电，那台手机要一直插着电。")
+            }
+            .listRowBackground(Theme.card)
+
             Section("录好的") {
                 if m.events.isEmpty {
                     Text(m.loaded ? "还没有" : "…").foregroundStyle(Theme.muted)
@@ -381,6 +453,9 @@ struct RemoteMonitorView: View {
             if let t = e.thumb {
                 Image(uiImage: t).resizable().scaledToFill().frame(width: 64, height: 48).clipped()
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else if e.sound {
+                RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)).frame(width: 64, height: 48)
+                    .overlay { Image(systemName: "waveform").font(.title3).foregroundStyle(Theme.orangeText) }
             } else {
                 RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)).frame(width: 64, height: 48)
             }
@@ -389,7 +464,7 @@ struct RemoteMonitorView: View {
                 if !e.labels.isEmpty {
                     Text(e.labels).font(.footnote.weight(.semibold)).foregroundStyle(Theme.orangeText)
                 }
-                Text(e.video ? "\(e.dur / 1000) 秒 · 动了 \(e.motions) 次" : "只有截图")
+                Text(e.sound ? "声音 · \(e.dur / 1000) 秒" : e.video ? "\(e.dur / 1000) 秒 · 动了 \(e.motions) 次" : "只有截图")
                     .font(.footnote).foregroundStyle(Theme.muted)
             }
             Spacer()
@@ -405,17 +480,46 @@ private struct PlayItem: Identifiable {
     var id: String { url.path }
 }
 
-/// 放一段录像（或看截图），可以存相册、分享。
+/// 放一段录音（声音监听录的 .wav）：打开就放，可以拖进度。
+private struct SoundClipPlayer: View {
+    let url: URL
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "waveform").font(.system(size: 56)).foregroundStyle(Theme.orangeText)
+            Text(url.deletingPathExtension().lastPathComponent).font(.footnote).foregroundStyle(Theme.muted)
+            if let player {
+                VideoPlayer(player: player).frame(height: 96).clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            Spacer()
+        }
+        .padding(.top, 24)
+        .onAppear {
+            // 手机侧面的静音键拨到静音时也要出声
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            if player == nil { player = AVPlayer(url: url) }
+            player?.play()
+        }
+        .onDisappear { player?.pause() }
+    }
+}
+
+/// 放一段录像（或听录音、看截图），可以存相册、分享。
 private struct MonitorPlayer: View {
     let url: URL
     @State private var saved = ""
     @Environment(\.dismiss) private var dismiss
+    private var isSound: Bool { url.pathExtension == "wav" }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
                 if url.pathExtension == "jpg", let img = UIImage(contentsOfFile: url.path) {
                     Image(uiImage: img).resizable().scaledToFit()
+                } else if isSound {
+                    SoundClipPlayer(url: url)
                 } else {
                     VideoPlayer(player: AVPlayer(url: url))
                 }
@@ -427,6 +531,9 @@ private struct MonitorPlayer: View {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .primaryAction) { ShareLink(item: url) }
                 ToolbarItem(placement: .bottomBar) {
+                    if isSound {
+                        Text("录音存不进相册，用右上角分享（可以存到「文件」）").font(.footnote).foregroundStyle(Theme.muted)
+                    } else {
                     Button {
                         if url.pathExtension == "jpg", let img = UIImage(contentsOfFile: url.path) {
                             UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil); saved = "已存到相册"
@@ -436,6 +543,7 @@ private struct MonitorPlayer: View {
                             saved = "这个视频存不进相册，用右上角分享"
                         }
                     } label: { Label("存到相册", systemImage: "square.and.arrow.down") }
+                    }
                 }
             }
         }
