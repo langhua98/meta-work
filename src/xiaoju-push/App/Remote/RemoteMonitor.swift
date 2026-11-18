@@ -238,6 +238,11 @@ final class RemoteMonitor: ObservableObject {
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         // 已经备份到云盘的：直接从云盘下，不用先问对方手机（对方离线、改了设备名、相机卡住时也能看）
         if e.hasMedia, !e.uploaded.isEmpty {
+            // 视频先试中转：家里电脑只告诉它视频在 Telegram 哪几条消息里，视频本身从机房直接下，不受家里网速拖累
+            if e.video, !e.sound, let st = try? await cf.streamURL(e.uploaded) {
+                note = "从中转下载…"
+                if await CloudFiles.downloadStream(st, to: local) { note = ""; return local }
+            }
             note = "从云盘下载…"
             do {
                 if let d = try await cf.readData(e.uploaded), (try? d.write(to: local)) != nil { note = ""; return local }
