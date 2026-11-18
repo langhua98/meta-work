@@ -237,7 +237,7 @@ final class RemoteMonitor: ObservableObject {
                                 readToken: s.cloudToken, writeToken: s.cloudToken)
             if let st = try? await cf.streamURL(e.uploaded) { note = ""; return st }
         }
-        return await fetch(e, viaRelay: false)
+        return await fetch(e, viaRelay: false, preferStream: true)
     }
 
     func localURL(_ e: MonitorEvent) -> URL {
@@ -248,7 +248,8 @@ final class RemoteMonitor: ObservableObject {
 
     /// 取一段视频（或者录音），存成本机的临时文件（取过的不再取）。都没有时返回截图文件。
     /// viaRelay：备份过的视频先试从中转整段下（中转放不了时用 false，直接走云盘）。
-    func fetch(_ e: MonitorEvent, viaRelay: Bool = true) async -> URL? {
+    /// preferStream：对方手机刚传到云盘的视频，有中转就返回中转地址（边下边放），不再从家里电脑整段下。
+    func fetch(_ e: MonitorEvent, viaRelay: Bool = true, preferStream: Bool = false) async -> URL? {
         let local = localURL(e)
         let what = e.sound ? "录音" : "视频"
         if FileManager.default.fileExists(atPath: local.path) { return local }
@@ -279,6 +280,10 @@ final class RemoteMonitor: ObservableObject {
         for entry in (r["files"] as? [Any]) ?? [] where data == nil {
             if let o = entry as? [String: Any], let b64 = o["data"] as? String { data = Data(base64Encoded: b64) }
             else if let p = entry as? String {
+                if preferStream, e.video, !e.sound {
+                    note = "对方传好了，问云盘要中转地址…"
+                    if let st = try? await cf.streamURL(p) { note = ""; return st }
+                }
                 note = "从云盘下载…"
                 do { data = try await cf.readData(p) } catch { note = "云盘下载失败：\(error.localizedDescription)"; return nil }
                 if data == nil { note = "云盘上没找到 \(p)"; return nil }
