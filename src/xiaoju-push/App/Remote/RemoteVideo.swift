@@ -84,24 +84,32 @@ final class RemoteVideo: ObservableObject {
             // 每次随机一个房间名，放在指令里，别人猜不到
             let room = "遥控/\(dev)/视频/" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).lowercased()
             self.room = room
-            guard let ws = openSocket(base: s.cloudURL, token: s.cloudToken, room: room) else {
-                note = "云盘地址不对"; running = false; return
-            }
-            socket = ws
-            // 第一条消息是 {"pub":false}（新服务端还带 "h264":true）；连不上时看是不是服务端还没有直播通道
-            let hello: URLSessionWebSocketTask.Message
-            do { hello = try await ws.receive() } catch {
-                let code = (ws.response as? HTTPURLResponse)?.statusCode ?? 0
-                ws.cancel()
-                if code == 404 {
-                    cmd["seconds"] = 60
-                    await relayFallback(relay: relay, dev: dev, cmd: cmd)
-                } else {
-                    note = "连不上直播通道：\(code > 0 ? "HTTP \(code)" : error.localizedDescription)"
+            // 第一条消息是 {"pub":false}（新服务端还带 "h264":true）；连不上时看是不是服务端还没有直播通道。
+            // 网络一时断了（没拿到 HTTP 状态码）再试一次。
+            var ws: URLSessionWebSocketTask!
+            var hello: URLSessionWebSocketTask.Message?
+            for attempt in 0..<2 {
+                guard let w = openSocket(base: s.cloudURL, token: s.cloudToken, room: room) else {
+                    note = "云盘地址不对"; running = false; return
                 }
-                running = false; return
+                ws = w; socket = w
+                do { hello = try await w.receive(); break } catch {
+                    let code = (w.response as? HTTPURLResponse)?.statusCode ?? 0
+                    w.cancel()
+                    if code == 404 {
+                        cmd["seconds"] = 60
+                        await relayFallback(relay: relay, dev: dev, cmd: cmd)
+                        running = false; return
+                    }
+                    if code > 0 { note = "连不上直播通道：HTTP \(code)"; running = false; return }
+                    guard running else { return }
+                    if attempt == 0 { note = "连接直播通道…（重试）"; try? await Task.sleep(nanoseconds: 2_000_000_000); continue }
+                    note = await Self.explain(error, base: s.cloudURL)
+                    running = false; return
+                }
             }
-            if case .string(let t) = hello, t.contains("\"h264\":true") { serverH264 = true }
+            guard let first = hello else { running = false; return }
+            if case .string(let t) = first, t.contains("\"h264\":true") { serverH264 = true }
             route = Self.viaServer
             askedH264 = serverH264 && !compat
             cmd["codec"] = askedH264 ? "h264" : "jpeg"
@@ -131,6 +139,20 @@ final class RemoteVideo: ObservableObject {
             if running { note = frames > 0 ? "直播结束" : (note.isEmpty ? "对方没有推流" : note) }
             running = false
         }
+    }
+
+    /// 直播通道连不上时说清楚是谁的问题：再用普通 HTTPS 访问一下云盘首页。
+    /// 云盘在家里电脑上，经 Tailscale Funnel 开到公网；电脑关机、睡着、Tailscale 掉线时，
+    /// Funnel 的入口握到一半就断，iPhone 报的是「A TLS error caused the secure connection to fail」，看不出原因。
+    private static func explain(_ error: Error, base: String) async -> String {
+        let raw = error.localizedDescription
+        guard let url = URL(string: base) else { return "连不上直播通道：\(raw)" }
+        var req = URLRequest(url: url, timeoutInterval: 8)
+        req.httpMethod = "GET"
+        if let r = try? await URLSession.shared.data(for: req), r.1 is HTTPURLResponse {
+            return "连不上直播通道（云盘本身能打开）：\(raw)"
+        }
+        return "连不上云盘：家里那台电脑可能关机、睡着了，或者 Tailscale 掉线了。（\(raw)）"
     }
 
     private func openSocket(base: String, token: String, room: String) -> URLSessionWebSocketTask? {
