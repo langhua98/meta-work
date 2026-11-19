@@ -49,6 +49,7 @@ final class RemoteMonitor: ObservableObject {
     @Published private(set) var inflight = 0   // 几条指令在等回执（可以同时好几条）
     var busy: Bool { inflight > 0 }
     @Published private(set) var note = ""
+    @Published private(set) var opening = ""   // 正在打开的那一段（列表里那一行转圈、下面显示进度）
     @Published private(set) var statusLine = ""
     @Published private(set) var telegram = ""
     @Published private(set) var backup = ""
@@ -225,11 +226,31 @@ final class RemoteMonitor: ObservableObject {
         if !more { note = "" }
     }
 
-    /// 取一段视频（或者录音），存成本机的临时文件（取过的不再取）。都没有时返回截图文件。
-    func fetch(_ e: MonitorEvent) async -> URL? {
+    /// 点开一段：备份过的视频有中转就直接返回中转地址（边下边放，不用等整段下完），
+    /// 别的照旧下到本机（fetch）。返回 nil 表示打不开，原因在 note。
+    func open(_ e: MonitorEvent) async -> URL? {
+        opening = e.name; defer { opening = "" }
+        if e.video, !e.sound, !e.uploaded.isEmpty, !FileManager.default.fileExists(atPath: localURL(e).path) {
+            note = "问云盘要中转地址…"
+            let s = Store.shared
+            let cf = CloudFiles(base: s.cloudURL.isEmpty ? Store.defaultCloudURL : s.cloudURL,
+                                readToken: s.cloudToken, writeToken: s.cloudToken)
+            if let st = try? await cf.streamURL(e.uploaded) { note = ""; return st }
+        }
+        return await fetch(e, viaRelay: false, preferStream: true)
+    }
+
+    func localURL(_ e: MonitorEvent) -> URL {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("monitor")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let local = dir.appendingPathComponent("\(target)-\(e.name).\(e.sound ? "wav" : e.video ? "mov" : "jpg")")
+        return dir.appendingPathComponent("\(target)-\(e.name).\(e.sound ? "wav" : e.video ? "mov" : "jpg")")
+    }
+
+    /// 取一段视频（或者录音），存成本机的临时文件（取过的不再取）。都没有时返回截图文件。
+    /// viaRelay：备份过的视频先试从中转整段下（中转放不了时用 false，直接走云盘）。
+    /// preferStream：对方手机刚传到云盘的视频，有中转就返回中转地址（边下边放），不再从家里电脑整段下。
+    func fetch(_ e: MonitorEvent, viaRelay: Bool = true, preferStream: Bool = false) async -> URL? {
+        let local = localURL(e)
         let what = e.sound ? "录音" : "视频"
         if FileManager.default.fileExists(atPath: local.path) { return local }
         inflight += 1; defer { inflight -= 1 }
@@ -238,6 +259,11 @@ final class RemoteMonitor: ObservableObject {
                             readToken: s.cloudToken, writeToken: s.cloudToken)
         // 已经备份到云盘的：直接从云盘下，不用先问对方手机（对方离线、改了设备名、相机卡住时也能看）
         if e.hasMedia, !e.uploaded.isEmpty {
+            // 视频先试中转：家里电脑只告诉它视频在 Telegram 哪几条消息里，视频本身从机房直接下，不受家里网速拖累
+            if viaRelay, e.video, !e.sound, let st = try? await cf.streamURL(e.uploaded) {
+                note = "从中转下载…"
+                if await CloudFiles.downloadStream(st, to: local) { note = ""; return local }
+            }
             note = "从云盘下载…"
             do {
                 if let d = try await cf.readData(e.uploaded), (try? d.write(to: local)) != nil { note = ""; return local }
@@ -254,6 +280,10 @@ final class RemoteMonitor: ObservableObject {
         for entry in (r["files"] as? [Any]) ?? [] where data == nil {
             if let o = entry as? [String: Any], let b64 = o["data"] as? String { data = Data(base64Encoded: b64) }
             else if let p = entry as? String {
+                if preferStream, e.video, !e.sound {
+                    note = "对方传好了，问云盘要中转地址…"
+                    if let st = try? await cf.streamURL(p) { note = ""; return st }
+                }
                 note = "从云盘下载…"
                 do { data = try await cf.readData(p) } catch { note = "云盘下载失败：\(error.localizedDescription)"; return nil }
                 if data == nil { note = "云盘上没找到 \(p)"; return nil }
@@ -289,6 +319,7 @@ struct RemoteMonitorView: View {
     let target: String
     @StateObject private var m = RemoteMonitor()
     @State private var playing: URL?
+    @State private var playingEvent: MonitorEvent?
     @State private var editingRegions = false
 
     private let widths = [480, 640, 960]
@@ -418,11 +449,17 @@ struct RemoteMonitorView: View {
                 }
                 ForEach(m.events) { e in
                     Button {
-                        Task { if let u = await m.fetch(e) { playing = u } }
+                        guard m.opening.isEmpty else { return }
+                        Haptics.tap()
+                        Task { if let u = await m.open(e) { playing = u; playingEvent = e } }
                     } label: { row(e) }
                     .swipeActions {
                         Button(role: .destructive) { Task { await m.delete(e) } } label: { Label("删", systemImage: "trash") }
                     }
+                }
+                if !m.opening.isEmpty || (!m.note.isEmpty && !m.events.isEmpty) {
+                    // 进度和出错的原因也写在列表这里（上面那行要滚回顶部才看得到）
+                    Text(m.note.isEmpty ? "打开中…" : m.note).font(.footnote).foregroundStyle(Theme.orangeText)
                 }
                 if m.moreEvents {
                     Button("更早的…") { Task { await m.loadEvents(more: true) } }
@@ -437,11 +474,17 @@ struct RemoteMonitorView: View {
         .refreshable { await m.refresh(); await m.loadEvents() }
         .task {
             m.use(target)
-            await m.refresh()
-            await m.loadEvents()
+            // 状态和列表同时问（以前一个问完再问另一个，列表要多等一个来回）
+            async let st: Void = m.refresh()
+            async let ev: Void = m.loadEvents()
+            _ = await (st, ev)
         }
         .sheet(item: Binding(get: { playing.map { PlayItem(url: $0) } }, set: { playing = $0?.url })) { item in
-            MonitorPlayer(url: item.url)
+            MonitorPlayer(url: item.url, fallback: {
+                // 中转放不了：改从云盘整段下
+                guard let e = playingEvent else { return nil }
+                return await m.fetch(e, viaRelay: false)
+            })
         }
         .sheet(isPresented: $editingRegions) {
             RegionEditor(monitor: m)
@@ -468,7 +511,8 @@ struct RemoteMonitorView: View {
                     .font(.footnote).foregroundStyle(Theme.muted)
             }
             Spacer()
-            if !e.uploaded.isEmpty { Image(systemName: "icloud.fill").foregroundStyle(Theme.muted) }
+            if m.opening == e.name { ProgressView() }
+            else if !e.uploaded.isEmpty { Image(systemName: "icloud.fill").foregroundStyle(Theme.muted) }
         }
     }
 
@@ -507,45 +551,101 @@ private struct SoundClipPlayer: View {
 }
 
 /// 放一段录像（或听录音、看截图），可以存相册、分享。
+/// url 可以是中转地址（边下边放）：20 秒还放不起来或者出错，就用 fallback 从云盘整段下了再放。
 private struct MonitorPlayer: View {
     let url: URL
+    var fallback: (() async -> URL?)? = nil
+    @State private var current: URL?
+    @State private var player: AVPlayer?
     @State private var saved = ""
+    @State private var status = ""
+    @State private var saving = false
     @Environment(\.dismiss) private var dismiss
-    private var isSound: Bool { url.pathExtension == "wav" }
+    private var shown: URL { current ?? url }
+    private var isSound: Bool { shown.pathExtension == "wav" }
+    private var isPhoto: Bool { shown.pathExtension == "jpg" }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
-                if url.pathExtension == "jpg", let img = UIImage(contentsOfFile: url.path) {
+                if isPhoto, let img = UIImage(contentsOfFile: shown.path) {
                     Image(uiImage: img).resizable().scaledToFit()
                 } else if isSound {
-                    SoundClipPlayer(url: url)
+                    SoundClipPlayer(url: shown)
+                } else if let player {
+                    VideoPlayer(player: player)
                 } else {
-                    VideoPlayer(player: AVPlayer(url: url))
+                    ProgressView()
                 }
+                if !status.isEmpty { Text(status).font(.footnote).foregroundStyle(Theme.muted) }
                 if !saved.isEmpty { Text(saved).font(.footnote).foregroundStyle(Theme.muted) }
             }
             .padding()
             .background(Theme.bg)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) { ShareLink(item: url) }
+                ToolbarItem(placement: .primaryAction) { ShareLink(item: shown) }
                 ToolbarItem(placement: .bottomBar) {
                     if isSound {
                         Text("录音存不进相册，用右上角分享（可以存到「文件」）").font(.footnote).foregroundStyle(Theme.muted)
                     } else {
-                    Button {
-                        if url.pathExtension == "jpg", let img = UIImage(contentsOfFile: url.path) {
-                            UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil); saved = "已存到相册"
-                        } else if UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(url.path) {
-                            UISaveVideoAtPathToSavedPhotosAlbum(url.path, nil, nil, nil); saved = "已存到相册"
-                        } else {
-                            saved = "这个视频存不进相册，用右上角分享"
-                        }
-                    } label: { Label("存到相册", systemImage: "square.and.arrow.down") }
+                        Button {
+                            Task { await save() }
+                        } label: { Label(saving ? "下载中…" : "存到相册", systemImage: "square.and.arrow.down") }
+                        .disabled(saving)
                     }
                 }
             }
+        }
+        .task { await play() }
+        .onDisappear { player?.pause() }
+    }
+
+    private func play() async {
+        guard !isPhoto, !isSound, player == nil else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        let p = AVPlayer(url: shown)
+        player = p
+        p.play()
+        guard !shown.isFileURL else { return }
+        status = "从中转播放…"
+        // 看中转放不放得起来
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            if p.currentItem?.status == .readyToPlay { status = ""; return }
+            if p.currentItem?.status == .failed { break }
+        }
+        p.pause()
+        guard let fallback else { status = "中转放不了"; return }
+        player = nil
+        status = "中转放不了，改从云盘下载（会慢一些）…"
+        if let local = await fallback() {
+            current = local
+            status = ""
+            let q = AVPlayer(url: local)
+            player = q
+            q.play()
+        } else {
+            status = "云盘也取不到"
+        }
+    }
+
+    private func save() async {
+        saving = true; defer { saving = false }
+        var file = shown
+        if !file.isFileURL {
+            // 中转地址：先整段下到本机
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+            guard await CloudFiles.downloadStream(file, to: tmp) else { saved = "下载失败，稍后再试"; return }
+            file = tmp
+        }
+        if isPhoto, let img = UIImage(contentsOfFile: file.path) {
+            UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil); saved = "已存到相册"
+        } else if UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(file.path) {
+            UISaveVideoAtPathToSavedPhotosAlbum(file.path, nil, nil, nil); saved = "已存到相册"
+        } else {
+            saved = "这个视频存不进相册，用右上角分享"
         }
     }
 }
