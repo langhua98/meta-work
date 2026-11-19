@@ -44,6 +44,8 @@ final class RemoteVideo: ObservableObject {
     private var room = ""
     private static let direct = "Wi-Fi 直连"
     private static let viaServer = "经服务器"
+    private static let viaRelay = "经 Hugging Face 中转"
+    private var relayOK = false      // 对方也在往 Hugging Face 中转推（回执里 relay = true，安卓 0.43+）
 
     func start(target: String, seconds: Int, fps wantFps: Int, width: Int, quality: Int, sound: Bool = false,
                lens: String = "back", compat: Bool = false, flip: Bool = false, stamp: Bool = true) {
@@ -56,7 +58,7 @@ final class RemoteVideo: ObservableObject {
         running = true; frame = nil; frames = 0; fps = 0; note = "连接直播通道…"
         withAudio = sound; pending = []; timeline = LiveTimeline(delay: 200); tip = ""
         decodeTail = nil; decoding = 0; needKey = false; audioSeen = false
-        codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false; route = ""
+        codec = ""; kbps = 0; bufferMs = 0; serverH264 = false; askedH264 = false; route = ""; relayOK = false
         decoder = LiveH264Decoder(); bytes = (Date(), 0)
         self.target = dev
         if sound {
@@ -119,7 +121,8 @@ final class RemoteVideo: ObservableObject {
             }
             note = "等对方开始推流…"
             // 对方出错（没相机权限、连不上直播通道）会回一条 ok:false 的回执；
-            // 成功的回执里有 lan（对方在局域网里的地址）：同一个 Wi-Fi 就直接连过去，不绕服务器
+            // 成功的回执里有 lan（对方在局域网里的地址）：同一个 Wi-Fi 就直接连过去，不绕服务器；
+            // 有 relay = true（对方也在往 Hugging Face 中转推）：连不上 Wi-Fi 就去中转看，画面不经过家里电脑
             Task { [weak self] in
                 for _ in 0..<2 {
                     let msgs = (try? await relay.wait(RemoteBox.receipt(dev, id), seconds: 20)) ?? []
@@ -128,8 +131,10 @@ final class RemoteVideo: ObservableObject {
                         if (r["ok"] as? Bool) == false {
                             self.note = (r["text"] as? String) ?? "对方没开始推流"
                             self.stop()
-                        } else if let lan = r["lan"] as? [String], !lan.isEmpty {
-                            await self.tryDirect(lan)
+                        } else {
+                            self.relayOK = (r["relay"] as? Bool) == true
+                            if let lan = r["lan"] as? [String], !lan.isEmpty { await self.tryDirect(lan) }
+                            if self.running, self.route != Self.direct, self.relayOK { _ = await self.tryRelay() }
                         }
                         return
                     }
@@ -181,8 +186,9 @@ final class RemoteVideo: ObservableObject {
                 guard running else { return }
                 // 换了连接（切到 Wi-Fi 直连了）：接着收新的
                 if let s = socket, s !== ws { ws = s; continue }
-                // 直连断了（离开了 Wi-Fi）：换回服务器
-                if route == Self.direct, let back = await backToServer() { ws = back; continue }
+                // 直连断了（离开了 Wi-Fi）：先换中转，不行再换回服务器；中转断了也换回服务器
+                if route == Self.direct, relayOK, let r = await tryRelay() { ws = r; continue }
+                if route == Self.direct || route == Self.viaRelay, let back = await backToServer() { ws = back; continue }
                 return
             }
             let arrived = LiveClock.nowMs()
@@ -247,7 +253,11 @@ final class RemoteVideo: ObservableObject {
                 }
             case .string(let t):
                 if t.contains("\"pub\":true") { seenPub = true; if frames == 0 { note = "对方开始推流了…" } }
-                else if t.contains("\"pub\":false"), seenPub { return }   // 推流端断开
+                else if t.contains("\"pub\":false"), seenPub {   // 推流端断开
+                    // 中转上的推流断了：对方可能还连着家里电脑，换回去试试
+                    if route == Self.viaRelay, let back = await backToServer() { ws = back; continue }
+                    return
+                }
             @unknown default:
                 continue
             }
@@ -274,6 +284,34 @@ final class RemoteVideo: ObservableObject {
             old?.cancel(with: .goingAway, reason: nil)
             return
         }
+    }
+
+    /// Hugging Face 中转：向家里电脑要一张看的通行证，连中转上同一个房间；对方在推（{"pub":true}）就换过去，
+    /// 把经服务器的那条关掉（服务器那边没人看了，对方就不往电脑发了）。连不上返回 nil，接着用原来那条。
+    private func tryRelay() async -> URLSessionWebSocketTask? {
+        let s = Store.shared
+        guard var c = URLComponents(string: s.cloudURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/agent/v1/stream/relay") else { return nil }
+        c.queryItems = [URLQueryItem(name: "role", value: "sub"), URLQueryItem(name: "room", value: room)]
+        guard let ticketURL = c.url else { return nil }
+        var req = URLRequest(url: ticketURL, timeoutInterval: 10)
+        req.setValue("Bearer \(s.cloudToken)", forHTTPHeaderField: "Authorization")
+        guard let r = try? await URLSession.shared.data(for: req),
+              (r.1 as? HTTPURLResponse)?.statusCode == 200,
+              let obj = (try? JSONSerialization.jsonObject(with: r.0)) as? [String: Any],
+              let u = obj["url"] as? String,
+              let url = URL(string: u + "&ack=1&window=8"), running else { return nil }
+        let ws = URLSession.shared.webSocketTask(with: url)
+        ws.maximumMessageSize = 2 << 20
+        ws.resume()
+        guard case .string(let t)? = await firstMessage(ws, timeout: 8), t.contains("\"pub\":true"), running else {
+            ws.cancel(); return nil
+        }
+        let old = socket
+        socket = ws
+        route = Self.viaRelay
+        decoder = LiveH264Decoder()   // 从关键帧重新开始
+        old?.cancel(with: .goingAway, reason: nil)
+        return ws
     }
 
     /// 直连断了：用同一个房间重新连服务器（对方还连着服务器）。
@@ -468,7 +506,7 @@ struct RemoteVideoView: View {
 
                 controls
 
-                Text("一直播到点「停止」。画面经云盘服务器中转，不写存储。对方那台要开着待命。直播中调参数大约 1 秒生效。")
+                Text("一直播到点「停止」。同一个 Wi-Fi 时直连对方手机；不在时走 Hugging Face 中转，再不行经家里电脑，不写存储。对方那台要开着待命。直播中调参数大约 1 秒生效。")
                     .font(.caption2).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
             }
             .padding(16)

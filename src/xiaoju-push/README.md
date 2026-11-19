@@ -65,3 +65,9 @@ SideStore 签名时会保留这个 App Group。小组件一直显示 0 的话，
 - 发送端：在另一台 iPhone 的同一页「遥控别的设备」里填对方设备名、选指令、发送，回执和照片直接显示；电脑上也可以用 `scripts/遥控/遥控.py`。
 - `shell` 指令在遥控里暂时没接本机命令（本 App 有 ios_system，以后可以接上）。
 - 代码在 `App/Remote/`。
+
+### 实时画面走哪条路（0.5.6，配合法莉娅 0.43）
+
+先试同一个 Wi-Fi 直连对方手机；不在同一个 Wi-Fi 时，回执里有 `relay: true` 就向家里电脑要一张通行证
+（`GET /api/agent/v1/stream/relay?role=sub`），去 Hugging Face 中转上看，画面和声音不经过家里电脑；
+中转连不上、或者中转上的推流断了，才经家里电脑。画面下面那行会写「Wi-Fi 直连 / 经 Hugging Face 中转 / 经服务器」。

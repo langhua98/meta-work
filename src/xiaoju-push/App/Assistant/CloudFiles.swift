@@ -129,6 +129,31 @@ final class CloudFiles {
         return try await request("GET", "/items/\(it.id)/content")
     }
 
+    /// 视频走中转的地址（云盘配了视频中转、中转在线时，link 多给一个 stream，6 小时有效）。
+    /// 中转在 Hugging Face，直接从 Telegram 取视频，不经过家里电脑的上传带宽。没有中转时返回 nil。
+    func streamURL(_ path: String) async throws -> URL? {
+        guard let it = try await item(path), !it.isFolder else { return nil }
+        let d = try await request("POST", "/items/\(it.id)/link")
+        guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let s = j["stream"] as? String, !s.isEmpty else { return nil }
+        return URL(string: s)
+    }
+
+    /// 从中转把视频下到本机文件。成功返回 true；中转不行时返回 false，调用方改走云盘。
+    static func downloadStream(_ url: URL, to local: URL) async -> Bool {
+        var req = URLRequest(url: url, timeoutInterval: 30)
+        req.httpMethod = "GET"
+        guard let got = try? await URLSession.shared.download(for: req) else { return false }
+        let (tmp, resp) = got
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard let h = resp as? HTTPURLResponse, h.statusCode == 200 else { return false }
+        if h.expectedContentLength > 0,
+           let n = (try? FileManager.default.attributesOfItem(atPath: tmp.path)[.size]) as? NSNumber,
+           n.int64Value != h.expectedContentLength { return false }
+        try? FileManager.default.removeItem(at: local)
+        return (try? FileManager.default.moveItem(at: tmp, to: local)) != nil
+    }
+
     func readText(_ path: String) async throws -> String? {
         guard let it = try await item(path), !it.isFolder else { return nil }
         let d = try await request("GET", "/items/\(it.id)/content")
