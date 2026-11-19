@@ -66,7 +66,7 @@ SideStore 签名时会保留这个 App Group。小组件一直显示 0 的话，
 - `shell` 指令在遥控里暂时没接本机命令（本 App 有 ios_system，以后可以接上）。
 - 代码在 `App/Remote/`。
 
-### 实时画面走哪条路（0.5.5，配合法莉娅 0.43）
+### 实时画面走哪条路（0.5.6，配合法莉娅 0.43）
 
 先试同一个 Wi-Fi 直连对方手机；不在同一个 Wi-Fi 时，回执里有 `relay: true` 就向家里电脑要一张通行证
 （`GET /api/agent/v1/stream/relay?role=sub`），去 Hugging Face 中转上看，画面和声音不经过家里电脑；
